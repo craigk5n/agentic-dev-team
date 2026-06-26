@@ -71,7 +71,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 128m
+          memory: 512m
 
   event-bus-worker:
     build:
