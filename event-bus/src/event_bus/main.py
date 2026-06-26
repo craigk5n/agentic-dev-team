@@ -10,9 +10,12 @@ from __future__ import annotations
 import structlog
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import redis
 from fastapi import FastAPI, Header, HTTPException, Request, status
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 from rq import Queue
 
@@ -56,6 +59,17 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="dev-agents event bus", lifespan=lifespan)
+
+# Serve the control-panel UI from /ui/
+_static_dir = Path(__file__).parent / "static"
+if _static_dir.exists():
+    app.mount("/ui", StaticFiles(directory=str(_static_dir), html=True), name="ui")
+
+
+@app.get("/", include_in_schema=False)
+async def root():
+    """Redirect bare root to the control-panel UI."""
+    return RedirectResponse("/ui/")
 
 
 def _queue_or_503() -> Queue:
