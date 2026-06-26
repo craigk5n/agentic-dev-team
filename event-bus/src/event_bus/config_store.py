@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 _KEY = "runtime_config"
 _GATE_FIELDS = {"pr_merge_approval", "security_signoff", "free_models_only"}  # idea_approval is always ON
 _MODEL_ROLES = {"idea", "planner", "coder", "reviewer", "tester", "security"}
+_PROJECT_FIELDS = {"plane_project_id"}
 
 
 @dataclass
@@ -72,10 +73,17 @@ class LimitsConfig:
 
 
 @dataclass
+class ProjectConfig:
+    """Persistent project-level settings (override env vars at runtime)."""
+    plane_project_id: str = ""
+
+
+@dataclass
 class RuntimeConfig:
     gates: GateConfig = field(default_factory=GateConfig)
     models: ModelConfig = field(default_factory=ModelConfig)
     limits: LimitsConfig = field(default_factory=LimitsConfig)
+    project: ProjectConfig = field(default_factory=ProjectConfig)
 
 
 def _load(r: "redis.Redis") -> RuntimeConfig:
@@ -101,7 +109,11 @@ def _load(r: "redis.Redis") -> RuntimeConfig:
                for k in LimitsConfig.__dataclass_fields__
                if k in lim}
         )
-        return RuntimeConfig(gates=gates, models=models, limits=limits)
+        p = raw.get("project", {})
+        project = ProjectConfig(
+            plane_project_id=p.get("plane_project_id", ""),
+        )
+        return RuntimeConfig(gates=gates, models=models, limits=limits, project=project)
     except Exception:
         return RuntimeConfig()
 
@@ -129,6 +141,10 @@ def patch_config(r: "redis.Redis", patch: dict) -> RuntimeConfig:
     for key, val in patch.get("limits", {}).items():
         if hasattr(config.limits, key):
             setattr(config.limits, key, int(val))
+
+    for key, val in patch.get("project", {}).items():
+        if key in _PROJECT_FIELDS:
+            setattr(config.project, key, str(val))
 
     _save(r, config)
     return config

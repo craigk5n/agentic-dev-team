@@ -161,17 +161,20 @@ async def submit_idea(request: Request):
     if not prompt:
         raise HTTPException(status_code=400, detail="'prompt' field required")
 
-    project_id = body.get("project_id") or settings.plane_project_id
+    cfg = get_config(_redis_or_503())
+
+    # Priority: request body → runtime config (Config tab) → env var
+    project_id = body.get("project_id") or cfg.project.plane_project_id or settings.plane_project_id
     if not project_id:
         raise HTTPException(
             status_code=422,
-            detail="project_id required (set PLANE_PROJECT_ID or pass in request body)",
+            detail="project_id required — set it in Config → Project, PLANE_PROJECT_ID env var, or pass in the form",
         )
 
-    # Model override: request body takes priority, then runtime config, then env var default
+    # Model override: request body → runtime config → env var default
     model_override = (body.get("model_override") or "").strip()
     if not model_override:
-        model_override = get_config(_redis_or_503()).models.idea
+        model_override = cfg.models.idea
 
     try:
         from idea_agent.main import submit_idea as _submit
