@@ -1,0 +1,5 @@
+[run]
+omit =
+    # Entry-point scripts — invoked at runtime, not unit-testable
+    */event_bus/worker.py
+    */event_bus/sandbox_runner.py

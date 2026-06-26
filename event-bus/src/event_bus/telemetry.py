@@ -1,0 +1,138 @@
+"""
+Telemetry aggregation and Prometheus metrics rendering for the event bus.
+
+Reads from:
+  telemetry:llm:{date}      — cost/token data written by reviewer.telemetry
+  limits:concurrency:{role} — current in-flight job count
+  limits:rejected:{role}    — cumulative rate/concurrency rejections
+
+Exposed at:
+  GET /api/telemetry  — JSON summary
+  GET /metrics        — Prometheus text format
+"""
+
+from __future__ import annotations
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import redis
+
+_ALL_ROLES = ("coder", "idea", "planner", "reviewer", "tester", "security")
+
+
+def get_telemetry_summary(r: "redis.Redis", days: int = 7) -> dict:
+    """
+    Return aggregated telemetry: costs, tokens, rejections, and current concurrency.
+    """
+    try:
+        from reviewer.telemetry import read_all
+        llm_records = read_all(r, days=days)
+    except ImportError:
+        llm_records = []
+
+    from event_bus.limits import get_concurrency, get_rejected, get_rate_window_count
+
+    # Aggregate LLM costs by role
+    by_role: dict[str, dict] = {}
+    for rec in llm_records:
+        role = rec.get("role", "unknown")
+        if role not in by_role:
+            by_role[role] = {"cost_usd": 0.0, "input_tokens": 0, "output_tokens": 0, "calls": 0}
+        by_role[role]["cost_usd"] += rec.get("cost_usd", 0.0)
+        by_role[role]["input_tokens"] += rec.get("input_tokens", 0)
+        by_role[role]["output_tokens"] += rec.get("output_tokens", 0)
+        by_role[role]["calls"] += rec.get("calls", 0)
+
+    concurrency = {role: get_concurrency(r, role) for role in _ALL_ROLES}
+    rejected = {role: get_rejected(r, role) for role in _ALL_ROLES}
+    rate_current = {role: get_rate_window_count(r, role) for role in _ALL_ROLES}
+
+    total_cost = sum(v["cost_usd"] for v in by_role.values())
+
+    return {
+        "period_days": days,
+        "total_cost_usd": round(total_cost, 6),
+        "by_role": {
+            role: {
+                **by_role.get(role, {"cost_usd": 0.0, "input_tokens": 0,
+                                     "output_tokens": 0, "calls": 0}),
+                "current_concurrent": concurrency.get(role, 0),
+                "rate_rejected_total": rejected.get(role, 0),
+                "rate_current_minute": rate_current.get(role, 0),
+            }
+            for role in _ALL_ROLES
+        },
+        "daily": llm_records,
+    }
+
+
+def render_prometheus(r: "redis.Redis") -> str:
+    """
+    Render current metrics in Prometheus text exposition format.
+    """
+    from event_bus.limits import get_concurrency, get_rejected, get_rate_window_count
+
+    lines: list[str] = []
+
+    def _metric(name: str, help_text: str, metric_type: str) -> None:
+        lines.append(f"# HELP {name} {help_text}")
+        lines.append(f"# TYPE {name} {metric_type}")
+
+    _metric("agent_concurrent_jobs", "Current number of in-flight jobs per role", "gauge")
+    for role in _ALL_ROLES:
+        lines.append(f'agent_concurrent_jobs{{role="{role}"}} {get_concurrency(r, role)}')
+
+    _metric("agent_rate_rejected_total", "Total jobs rejected by rate or concurrency limits", "counter")
+    for role in _ALL_ROLES:
+        lines.append(f'agent_rate_rejected_total{{role="{role}"}} {get_rejected(r, role)}')
+
+    _metric("agent_rate_current_minute", "Jobs submitted in the current 1-minute window", "gauge")
+    for role in _ALL_ROLES:
+        lines.append(f'agent_rate_current_minute{{role="{role}"}} {get_rate_window_count(r, role)}')
+
+    # LLM cost and token metrics from reviewer telemetry
+    try:
+        from reviewer.telemetry import read_all
+        records = read_all(r, days=1)  # today only for Prometheus gauges
+
+        by_role_model: dict[tuple, dict] = {}
+        for rec in records:
+            key = (rec["role"], rec["model"])
+            if key not in by_role_model:
+                by_role_model[key] = {"cost_usd": 0.0, "input_tokens": 0,
+                                       "output_tokens": 0, "calls": 0}
+            for field in ("cost_usd", "input_tokens", "output_tokens", "calls"):
+                by_role_model[key][field] += rec.get(field, 0)
+
+        if by_role_model:
+            _metric("agent_llm_cost_usd_today",
+                    "LLM cost in USD for today per role and model", "gauge")
+            for (role, model), vals in by_role_model.items():
+                lines.append(
+                    f'agent_llm_cost_usd_today{{role="{role}",model="{model}"}} '
+                    f'{round(vals["cost_usd"], 8)}'
+                )
+
+            _metric("agent_llm_calls_today",
+                    "LLM calls today per role and model", "gauge")
+            for (role, model), vals in by_role_model.items():
+                lines.append(
+                    f'agent_llm_calls_today{{role="{role}",model="{model}"}} '
+                    f'{vals["calls"]}'
+                )
+
+            _metric("agent_llm_tokens_today",
+                    "LLM tokens used today per role, model, and direction", "gauge")
+            for (role, model), vals in by_role_model.items():
+                lines.append(
+                    f'agent_llm_tokens_today{{role="{role}",model="{model}",direction="input"}} '
+                    f'{vals["input_tokens"]}'
+                )
+                lines.append(
+                    f'agent_llm_tokens_today{{role="{role}",model="{model}",direction="output"}} '
+                    f'{vals["output_tokens"]}'
+                )
+    except ImportError:
+        pass  # reviewer package not installed
+
+    return "\n".join(lines) + "\n"

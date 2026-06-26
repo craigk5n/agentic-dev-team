@@ -1,0 +1,102 @@
+# Event bus — webhook receiver + RQ worker
+# Run from infra/: docker compose -f event-bus/docker-compose.yml --env-file .env up -d
+#
+# Joins plane_default so it can reach plane-redis (job queue) and
+# Plane/Forgejo containers can push webhooks to http://event-bus:8080.
+# Joins forgejo_default for the same reason on the Forgejo side.
+
+version: "3.8"
+
+x-event-bus-env: &event-bus-env
+  PLANE_WEBHOOK_SECRET: ${PLANE_WEBHOOK_SECRET}
+  FORGEJO_WEBHOOK_SECRET: ${FORGEJO_WEBHOOK_SECRET}
+  PLANE_API_TOKEN: ${PLANE_API_TOKEN}
+  FORGEJO_API_TOKEN: ${FORGEJO_API_TOKEN}
+  # Internal URLs (resolved via Docker networks)
+  PLANE_BASE_URL: http://plane-proxy:${PLANE_HTTP_PORT:-8181}
+  FORGEJO_BASE_URL: http://forgejo:3000
+  FORGEJO_GIT_URL: http://forgejo:3000
+  PLANE_WORKSPACE_SLUG: ${PLANE_WORKSPACE_SLUG:-dev-agents}
+  # db=1 avoids colliding with Plane's db=0
+  REDIS_URL: redis://plane-redis:6379/1
+  LOG_LEVEL: ${EVENT_BUS_LOG_LEVEL:-INFO}
+  # Phase 5: Plane project ID for idea/story creation
+  PLANE_PROJECT_ID: ${PLANE_PROJECT_ID:-}
+  # Phase 6: Temporal address — leave blank to use RQ fallback for PR approval
+  TEMPORAL_ADDRESS: ${TEMPORAL_ADDRESS:-}
+  # Phase 7: sandbox mode — "process" (default) or "docker" (requires socket mount below)
+  SANDBOX_MODE: ${SANDBOX_MODE:-process}
+  SANDBOX_IMAGE: ${SANDBOX_IMAGE:-dev-agents/event-bus:latest}
+  SANDBOX_MEMORY: ${SANDBOX_MEMORY:-512m}
+  SANDBOX_CPUS: ${SANDBOX_CPUS:-1.0}
+  # Coding Agent (Phase 3)
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+  ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-6}
+  DEFAULT_REPO: ${DEFAULT_REPO:-devadmin/sandbox}
+  # Idea / Planner model (Phase 5) — defaults to sonnet via OpenRouter
+  MODEL_IDEA: ${MODEL_IDEA:-openrouter/anthropic/claude-sonnet-4-6}
+  MODEL_PLANNER: ${MODEL_PLANNER:-openrouter/anthropic/claude-sonnet-4-6}
+  # Reviewer Agent (Phase 4) — set OPENROUTER_API_KEY to route through OpenRouter
+  # or fall back to ANTHROPIC_API_KEY for direct Anthropic calls
+  OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+  MODEL_REVIEWER: ${MODEL_REVIEWER:-openrouter/anthropic/claude-sonnet-4-6}
+  MODEL_TESTER: ${MODEL_TESTER:-openrouter/anthropic/claude-haiku-4-5}
+  MODEL_SECURITY: ${MODEL_SECURITY:-openrouter/anthropic/claude-haiku-4-5}
+
+services:
+  event-bus:
+    build:
+      # Root of the repo so Dockerfile can COPY from both event-bus/ and agents/
+      context: ../..
+      dockerfile: event-bus/Dockerfile
+    image: dev-agents/event-bus:latest
+    restart: unless-stopped
+    ports:
+      - "${EVENT_BUS_PORT:-8080}:8080"
+    environment:
+      <<: *event-bus-env
+    networks:
+      plane_network:
+        aliases:
+          - event-bus
+      forgejo_network:
+        aliases:
+          - event-bus
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+
+  event-bus-worker:
+    build:
+      context: ../..
+      dockerfile: event-bus/Dockerfile
+    image: dev-agents/event-bus:latest
+    restart: unless-stopped
+    command: ["python", "-m", "event_bus.worker"]
+    environment:
+      <<: *event-bus-env
+    networks:
+      - plane_network
+    volumes:
+      # Bind Docker socket so SANDBOX_MODE=docker can spawn ephemeral containers.
+      # Remove this mount if sandboxing is not needed (SANDBOX_MODE=process).
+      - /var/run/docker.sock:/var/run/docker.sock
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+
+networks:
+  plane_network:
+    external: true
+    name: plane_default
+  forgejo_network:
+    external: true
+    name: forgejo_default
