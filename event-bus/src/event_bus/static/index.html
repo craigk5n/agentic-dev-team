@@ -473,6 +473,30 @@ button.secondary:hover { border-color: var(--accent); color: var(--accent); }
         <span class="slider"></span>
       </label>
     </div>
+    <div class="toggle-row">
+      <div class="toggle-info">
+        <div class="name">Free Models Only</div>
+        <div class="desc">Advisory flag — restrict all roles to free OpenRouter models or local Ollama. Use the panel below to browse and apply free models.</div>
+      </div>
+      <label class="toggle">
+        <input type="checkbox" id="gate-free-models">
+        <span class="slider"></span>
+      </label>
+    </div>
+  </div>
+
+  <!-- Free & Local Model discovery -->
+  <div class="card">
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+      <div class="section-title" style="margin:0">Free &amp; Local Models</div>
+      <button class="secondary" id="load-free-btn" style="padding:5px 14px;font-size:12px">Load from OpenRouter</button>
+      <button class="secondary" id="refresh-free-btn" style="padding:5px 12px;font-size:12px;display:none">↻ Refresh</button>
+      <span id="free-ts" style="color:var(--muted);font-size:12px;margin-left:auto"></span>
+    </div>
+    <p style="color:var(--muted);font-size:12px;margin-bottom:10px">
+      Click any model chip to apply it to all roles. Free OpenRouter models change periodically — refresh to see the latest.
+    </p>
+    <div id="free-models-list"></div>
   </div>
 
   <!-- Model overrides -->
@@ -697,6 +721,73 @@ document.getElementById('idea-form').addEventListener('submit', async e => {
   }
 });
 
+// ── Free & Local Models ───────────────────────────────────────────────────────
+
+document.getElementById('load-free-btn').addEventListener('click', () => loadFreeModels(false));
+document.getElementById('refresh-free-btn').addEventListener('click', () => loadFreeModels(true));
+
+async function loadFreeModels(refresh) {
+  const btn = document.getElementById(refresh ? 'refresh-free-btn' : 'load-free-btn');
+  const origText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Loading…';
+  try {
+    const data = await api(`/api/models/openrouter?refresh=${refresh}`);
+    renderFreeModels(data);
+  } catch (err) {
+    toast('Failed to load free models: ' + err.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = origText;
+  }
+}
+
+function renderFreeModels(data) {
+  const list = document.getElementById('free-models-list');
+  const refreshBtn = document.getElementById('refresh-free-btn');
+  const ts = document.getElementById('free-ts');
+
+  const cachedAt = data.cached_at
+    ? new Date(data.cached_at * 1000).toLocaleString()
+    : '—';
+  ts.textContent = `${data.count} models · ${cachedAt}`;
+  refreshBtn.style.display = '';
+
+  function chipHtml(m, accent) {
+    const ctx = m.context_length >= 1000
+      ? ` · ${(m.context_length / 1000).toFixed(0)}K ctx`
+      : '';
+    return `<button class="free-chip secondary" data-id="${m.id}"
+      title="${m.id}"
+      style="font-size:11px;padding:4px 10px;${accent ? 'border-color:var(--accent);color:var(--accent)' : ''}"
+    >${m.name}${ctx}</button>`;
+  }
+
+  const orChips = (data.models || []).map(m => chipHtml(m, false)).join('');
+  const ollamaChips = (data.ollama || []).map(m => chipHtml(m, true)).join('');
+
+  list.innerHTML = `
+    ${orChips
+      ? `<div style="display:flex;flex-wrap:wrap;gap:6px;max-height:180px;overflow-y:auto;margin-bottom:10px">${orChips}</div>`
+      : `<p style="color:var(--muted);font-size:12px;margin-bottom:10px">No free models returned — check your OPENROUTER_API_KEY or try refreshing.</p>`
+    }
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+      <span style="font-size:11px;color:var(--muted)">Ollama (local):</span>
+      ${ollamaChips}
+    </div>`;
+
+  list.querySelectorAll('.free-chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+      const id = chip.dataset.id;
+      for (const r of ROLES) {
+        document.getElementById(`model-${r}`).value = id;
+      }
+      const short = id.split('/').pop();
+      toast(`All roles → ${short}`);
+    });
+  });
+}
+
 // ── Config ────────────────────────────────────────────────────────────────────
 
 function buildConfigForms() {
@@ -729,6 +820,7 @@ async function loadConfig() {
     buildConfigForms();
     document.getElementById('gate-pr-merge').checked = data.gates.pr_merge_approval;
     document.getElementById('gate-security').checked = data.gates.security_signoff;
+    document.getElementById('gate-free-models').checked = data.gates.free_models_only || false;
     for (const r of ROLES) {
       document.getElementById(`model-${r}`).value = data.models[r] || '';
       document.getElementById(`concurrent-${r}`).value = data.limits[`max_concurrent_${r}`] ?? 0;
@@ -747,6 +839,7 @@ document.getElementById('save-config-btn').addEventListener('click', async () =>
   const gates = {
     pr_merge_approval: document.getElementById('gate-pr-merge').checked,
     security_signoff: document.getElementById('gate-security').checked,
+    free_models_only: document.getElementById('gate-free-models').checked,
   };
   const models = {}, limits = {};
   for (const r of ROLES) {

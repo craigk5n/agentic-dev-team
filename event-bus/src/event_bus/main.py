@@ -273,6 +273,33 @@ async def approve_pr_merge(owner: str, repo: str, pr_number: int, request: Reque
     return {"status": "merging", "job_id": job.id}
 
 
+# ── Model discovery ───────────────────────────────────────────────────────────
+
+@app.get("/api/models/openrouter")
+async def list_openrouter_models(refresh: bool = False):
+    """
+    List free OpenRouter models (cached 2h in Redis) plus static Ollama suggestions.
+
+    Pass ?refresh=true to force a fresh fetch from OpenRouter regardless of cache.
+    No OpenRouter API key is required to list models; set OPENROUTER_API_KEY to
+    raise rate limits if you hit 429s.
+
+    Response: {models: [...], ollama: [...], count: int, cached_at: int}
+    """
+    from event_bus.models_catalog import get_free_models, refresh_free_models, get_ollama_suggestions
+    r = _redis_or_503()
+    try:
+        if refresh:
+            data = refresh_free_models(r, settings.openrouter_api_key)
+        else:
+            data = get_free_models(r, settings.openrouter_api_key)
+    except Exception as exc:
+        log.error("openrouter_models_fetch_failed", error=str(exc))
+        raise HTTPException(status_code=502, detail=f"Failed to fetch models from OpenRouter: {exc}")
+    data["ollama"] = get_ollama_suggestions()
+    return data
+
+
 # ── Telemetry (Phase 7) ────────────────────────────────────────────────────────
 
 @app.get("/api/telemetry")
