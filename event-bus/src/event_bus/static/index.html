@@ -394,6 +394,61 @@ button.secondary:hover { border-color: var(--accent); color: var(--accent); }
 .refresh-row .ts { color: var(--muted); font-size: 12px; margin-left: auto; }
 
 .select-days { width: auto; padding: 6px 10px; }
+
+/* ── Per-role free model dropdown ────────────────────────── */
+
+.model-input-wrap { position: relative; }
+.model-input-row { display: flex; gap: 6px; }
+.model-input-row input { flex: 1; min-width: 0; }
+
+button.secondary.free-browse-btn {
+  flex-shrink: 0;
+  padding: 7px 10px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.free-dropdown {
+  display: none;
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  right: 0;
+  z-index: 50;
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0,0,0,.5);
+  max-height: 240px;
+  overflow-y: auto;
+}
+.free-dropdown.open { display: block; }
+
+.fdd-section {
+  padding: 5px 10px 3px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  background: var(--surface2);
+  position: sticky;
+  top: 0;
+}
+.fdd-item {
+  padding: 7px 10px;
+  cursor: pointer;
+  font-size: 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  transition: background .1s;
+}
+.fdd-item:last-child { border-bottom: none; }
+.fdd-item:hover { background: var(--accent-dim); color: var(--accent); }
+.fdd-ctx { color: var(--muted); font-size: 11px; margin-left: 8px; white-space: nowrap; }
+.fdd-loading { padding: 12px 10px; color: var(--muted); font-size: 12px; text-align: center; }
 </style>
 </head>
 
@@ -487,16 +542,15 @@ button.secondary:hover { border-color: var(--accent); color: var(--accent); }
 
   <!-- Free & Local Model discovery -->
   <div class="card">
-    <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+    <div style="display:flex;align-items:center;gap:12px">
       <div class="section-title" style="margin:0">Free &amp; Local Models</div>
-      <button class="secondary" id="load-free-btn" style="padding:5px 14px;font-size:12px">Load from OpenRouter</button>
+      <button class="secondary" id="load-free-btn" style="padding:5px 14px;font-size:12px">Pre-load list</button>
       <button class="secondary" id="refresh-free-btn" style="padding:5px 12px;font-size:12px;display:none">↻ Refresh</button>
       <span id="free-ts" style="color:var(--muted);font-size:12px;margin-left:auto"></span>
     </div>
-    <p style="color:var(--muted);font-size:12px;margin-bottom:10px">
-      Click any model chip to apply it to all roles. Free OpenRouter models change periodically — refresh to see the latest.
+    <p style="color:var(--muted);font-size:12px;margin-top:10px">
+      Pre-loads the free model cache (2 h TTL). Then use the <strong>Free ▾</strong> button next to each role to browse and assign individually.
     </p>
-    <div id="free-models-list"></div>
   </div>
 
   <!-- Model overrides -->
@@ -723,6 +777,8 @@ document.getElementById('idea-form').addEventListener('submit', async e => {
 
 // ── Free & Local Models ───────────────────────────────────────────────────────
 
+let _cachedFreeData = null;
+
 document.getElementById('load-free-btn').addEventListener('click', () => loadFreeModels(false));
 document.getElementById('refresh-free-btn').addEventListener('click', () => loadFreeModels(true));
 
@@ -733,7 +789,13 @@ async function loadFreeModels(refresh) {
   btn.textContent = 'Loading…';
   try {
     const data = await api(`/api/models/openrouter?refresh=${refresh}`);
-    renderFreeModels(data);
+    _cachedFreeData = data;
+    _updateFreeStatus(data);
+    // Re-render any currently-open dropdowns with fresh data
+    document.querySelectorAll('.free-dropdown.open').forEach(dd => {
+      renderDropdownContent(dd, dd.id.replace('free-dd-', ''));
+    });
+    toast(`${data.count} free models loaded`);
   } catch (err) {
     toast('Failed to load free models: ' + err.message, 'error');
   } finally {
@@ -742,51 +804,85 @@ async function loadFreeModels(refresh) {
   }
 }
 
-function renderFreeModels(data) {
-  const list = document.getElementById('free-models-list');
-  const refreshBtn = document.getElementById('refresh-free-btn');
+function _updateFreeStatus(data) {
   const ts = document.getElementById('free-ts');
-
+  const rb = document.getElementById('refresh-free-btn');
   const cachedAt = data.cached_at
     ? new Date(data.cached_at * 1000).toLocaleString()
     : '—';
-  ts.textContent = `${data.count} models · ${cachedAt}`;
-  refreshBtn.style.display = '';
+  ts.textContent = `${data.count} free models · ${cachedAt}`;
+  rb.style.display = '';
+}
 
-  function chipHtml(m, accent) {
-    const ctx = m.context_length >= 1000
-      ? ` · ${(m.context_length / 1000).toFixed(0)}K ctx`
-      : '';
-    return `<button class="free-chip secondary" data-id="${m.id}"
-      title="${m.id}"
-      style="font-size:11px;padding:4px 10px;${accent ? 'border-color:var(--accent);color:var(--accent)' : ''}"
-    >${m.name}${ctx}</button>`;
+// ── Per-role free model dropdown ──────────────────────────────────────────────
+
+async function toggleFreeDropdown(role) {
+  // Close any other open dropdown first
+  document.querySelectorAll('.free-dropdown.open').forEach(dd => {
+    if (dd.id !== `free-dd-${role}`) dd.classList.remove('open');
+  });
+
+  const dd = document.getElementById(`free-dd-${role}`);
+  if (dd.classList.contains('open')) {
+    dd.classList.remove('open');
+    return;
   }
 
-  const orChips = (data.models || []).map(m => chipHtml(m, false)).join('');
-  const ollamaChips = (data.ollama || []).map(m => chipHtml(m, true)).join('');
+  dd.classList.add('open');
 
-  list.innerHTML = `
-    ${orChips
-      ? `<div style="display:flex;flex-wrap:wrap;gap:6px;max-height:180px;overflow-y:auto;margin-bottom:10px">${orChips}</div>`
-      : `<p style="color:var(--muted);font-size:12px;margin-bottom:10px">No free models returned — check your OPENROUTER_API_KEY or try refreshing.</p>`
+  if (!_cachedFreeData) {
+    dd.innerHTML = '<div class="fdd-loading">Fetching from OpenRouter…</div>';
+    try {
+      _cachedFreeData = await api('/api/models/openrouter');
+      _updateFreeStatus(_cachedFreeData);
+    } catch (err) {
+      dd.innerHTML = `<div class="fdd-loading" style="color:var(--red)">Error: ${err.message}</div>`;
+      return;
     }
-    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-      <span style="font-size:11px;color:var(--muted)">Ollama (local):</span>
-      ${ollamaChips}
-    </div>`;
+  }
 
-  list.querySelectorAll('.free-chip').forEach(chip => {
-    chip.addEventListener('click', () => {
-      const id = chip.dataset.id;
-      for (const r of ROLES) {
-        document.getElementById(`model-${r}`).value = id;
-      }
-      const short = id.split('/').pop();
-      toast(`All roles → ${short}`);
-    });
-  });
+  renderDropdownContent(dd, role);
 }
+
+function renderDropdownContent(dd, role) {
+  const models = _cachedFreeData?.models || [];
+  const ollama  = _cachedFreeData?.ollama  || [];
+
+  const itemHtml = m => {
+    const ctx = m.context_length >= 1000
+      ? `${(m.context_length / 1000).toFixed(0)}K`
+      : '';
+    // escape single quotes in id/name for inline onclick
+    const safeId   = m.id.replace(/'/g, "\\'");
+    const safeName = m.name.replace(/</g, '&lt;');
+    return `<div class="fdd-item" onclick="selectFreeModel('${role}','${safeId}')">
+      <span>${safeName}</span><span class="fdd-ctx">${ctx}</span>
+    </div>`;
+  };
+
+  dd.innerHTML =
+    (models.length
+      ? `<div class="fdd-section">OpenRouter free (${models.length})</div>${models.map(itemHtml).join('')}`
+      : '<div class="fdd-loading">No free models — try refreshing.</div>')
+    + `<div class="fdd-section">Ollama — local</div>`
+    + ollama.map(itemHtml).join('');
+}
+
+function selectFreeModel(role, modelId) {
+  const input = document.getElementById(`model-${role}`);
+  input.value = modelId;
+  document.getElementById(`free-dd-${role}`).classList.remove('open');
+  input.style.borderColor = 'var(--accent)';
+  setTimeout(() => { input.style.borderColor = ''; }, 1200);
+}
+
+// Close dropdowns when clicking outside the model input area
+document.addEventListener('click', e => {
+  if (!e.target.closest('.model-input-wrap')) {
+    document.querySelectorAll('.free-dropdown.open')
+      .forEach(dd => dd.classList.remove('open'));
+  }
+});
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -796,7 +892,14 @@ function buildConfigForms() {
   mg.innerHTML = ROLES.map(r => `
     <div class="field">
       <label>${r}</label>
-      <input id="model-${r}" list="model-list" placeholder="env default">
+      <div class="model-input-wrap">
+        <div class="model-input-row">
+          <input id="model-${r}" list="model-list" placeholder="env default">
+          <button class="secondary free-browse-btn" type="button"
+                  onclick="toggleFreeDropdown('${r}')">Free ▾</button>
+        </div>
+        <div class="free-dropdown" id="free-dd-${r}"></div>
+      </div>
     </div>`).join('');
 
   // Limits grid: header row + rows for concurrency and rate
