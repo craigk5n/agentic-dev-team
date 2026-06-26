@@ -276,6 +276,73 @@ async def approve_pr_merge(owner: str, repo: str, pr_number: int, request: Reque
     return {"status": "merging", "job_id": job.id}
 
 
+# ── Board / issue browser ─────────────────────────────────────────────────────
+
+@app.get("/api/board/states")
+async def board_states():
+    """Return all states for the configured project (id, name, color, group)."""
+    cfg = get_config(_redis_or_503())
+    project_id = cfg.project.plane_project_id or settings.plane_project_id
+    if not project_id:
+        raise HTTPException(status_code=422, detail="No project configured — set it in Config → Project")
+    import httpx
+    url = f"{settings.plane_base_url}/api/v1/workspaces/{settings.plane_workspace_slug}/projects/{project_id}/states/"
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(url, headers={"X-API-Key": settings.plane_api_token})
+    if resp.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"Plane returned {resp.status_code}")
+    data = resp.json()
+    return {"states": [
+        {"id": s["id"], "name": s["name"], "color": s.get("color", "#888"), "group": s.get("group", "")}
+        for s in data.get("results", [])
+    ]}
+
+
+@app.get("/api/board/issues")
+async def board_issues(state: str = "", page: int = 1, per_page: int = 50):
+    """
+    List issues for the configured project.
+
+    Optional filters:
+      state     — state UUID to filter by (empty = all)
+      page      — 1-based page number
+      per_page  — results per page (max 100)
+    """
+    cfg = get_config(_redis_or_503())
+    project_id = cfg.project.plane_project_id or settings.plane_project_id
+    if not project_id:
+        raise HTTPException(status_code=422, detail="No project configured — set it in Config → Project")
+    import httpx
+    params: dict = {"per_page": min(per_page, 100), "cursor": f"{min(per_page, 100)}:{page - 1}:0"}
+    if state:
+        params["state"] = state
+    url = f"{settings.plane_base_url}/api/v1/workspaces/{settings.plane_workspace_slug}/projects/{project_id}/issues/"
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(url, headers={"X-API-Key": settings.plane_api_token}, params=params)
+    if resp.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"Plane returned {resp.status_code}")
+    data = resp.json()
+    plane_url = settings.plane_base_url.replace("plane-proxy", "localhost").replace(":8181", f":{settings.plane_base_url.split(':')[-1]}")
+    results = []
+    for issue in data.get("results", []):
+        results.append({
+            "id": issue["id"],
+            "sequence_id": issue.get("sequence_id"),
+            "title": issue["name"],
+            "state": issue.get("state"),
+            "priority": issue.get("priority", "none"),
+            "created_at": issue.get("created_at"),
+            "updated_at": issue.get("updated_at"),
+        })
+    return {
+        "issues": results,
+        "total": data.get("total_count", 0),
+        "page": page,
+        "per_page": per_page,
+        "project_id": project_id,
+    }
+
+
 # ── Model discovery ───────────────────────────────────────────────────────────
 
 @app.get("/api/models/openrouter")

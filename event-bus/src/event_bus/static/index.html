@@ -449,6 +449,97 @@ button.secondary.free-browse-btn {
 .fdd-item:hover { background: var(--accent-dim); color: var(--accent); }
 .fdd-ctx { color: var(--muted); font-size: 11px; margin-left: 8px; white-space: nowrap; }
 .fdd-loading { padding: 12px 10px; color: var(--muted); font-size: 12px; text-align: center; }
+
+/* ── Board ───────────────────────────────────────────────── */
+.board-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+.board-toolbar select {
+  width: auto;
+  min-width: 160px;
+}
+.plane-link {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--accent);
+  text-decoration: none;
+}
+.plane-link:hover { text-decoration: underline; }
+
+.board-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.board-table th {
+  text-align: left;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.board-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+.board-table tr:last-child td { border-bottom: none; }
+.board-table tr:hover td { background: var(--surface2); }
+
+.issue-title a {
+  color: var(--text);
+  text-decoration: none;
+  font-weight: 500;
+}
+.issue-title a:hover { color: var(--accent); }
+.issue-seq { color: var(--muted); font-size: 11px; margin-right: 6px; }
+
+.state-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 12px;
+  white-space: nowrap;
+}
+.state-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.priority-badge {
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: capitalize;
+}
+
+.board-empty {
+  color: var(--muted);
+  padding: 40px 0;
+  text-align: center;
+  font-size: 13px;
+}
+
+.board-pagination {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 16px;
+  justify-content: center;
+  font-size: 13px;
+  color: var(--muted);
+}
 </style>
 </head>
 
@@ -457,6 +548,7 @@ button.secondary.free-browse-btn {
   <h1><span>dev</span>-agents</h1>
   <nav>
     <button class="tab active" data-tab="ideas">Ideas</button>
+    <button class="tab" data-tab="board">Board</button>
     <button class="tab" data-tab="config">Config</button>
     <button class="tab" data-tab="telemetry">Telemetry</button>
     <button class="tab" data-tab="health">Health</button>
@@ -645,6 +737,27 @@ button.secondary.free-browse-btn {
   </div>
 </section>
 
+<!-- ── Board ───────────────────────────────────────────────── -->
+<section id="board" class="tab-panel">
+  <h2>Board</h2>
+  <div class="board-toolbar">
+    <select id="board-state-filter">
+      <option value="">All states</option>
+    </select>
+    <button class="secondary" id="refresh-board-btn">↻ Refresh</button>
+    <span class="ts" id="board-ts"></span>
+    <a id="board-plane-link" href="#" target="_blank" class="plane-link" style="display:none">Open in Plane ↗</a>
+  </div>
+  <div id="board-issues">
+    <div class="board-empty">Select a project in Config → Project, then refresh.</div>
+  </div>
+  <div class="board-pagination" id="board-pagination" style="display:none">
+    <button class="secondary" id="board-prev" disabled>← Prev</button>
+    <span id="board-page-info"></span>
+    <button class="secondary" id="board-next">Next →</button>
+  </div>
+</section>
+
 <!-- ── Health ──────────────────────────────────────────────── -->
 <section id="health" class="tab-panel">
   <h2>Health</h2>
@@ -705,6 +818,7 @@ function showTab(name) {
   if (name === 'config') loadConfig();
   if (name === 'telemetry') loadTelemetry();
   if (name === 'health') loadHealth();
+  if (name === 'board') loadBoard();
 }
 
 // ── Toast ─────────────────────────────────────────────────────────────────────
@@ -1096,6 +1210,123 @@ const observer = new MutationObserver(() => {
   }
 });
 observer.observe(document.getElementById('health'), { attributes: true, attributeFilter: ['class'] });
+
+// ── Board ─────────────────────────────────────────────────────────────────────
+
+let _boardStates = null;   // id → {name, color, group}
+let _boardPage = 1;
+let _boardTotal = 0;
+const _boardPerPage = 25;
+let _boardProjectId = null;
+
+async function loadBoardStates() {
+  if (_boardStates) return _boardStates;
+  const r = await fetch('/api/board/states');
+  if (!r.ok) return {};
+  const d = await r.json();
+  _boardStates = {};
+  const sel = document.getElementById('board-state-filter');
+  // clear options except first
+  while (sel.options.length > 1) sel.remove(1);
+  for (const s of d.states) {
+    _boardStates[s.id] = s;
+    const opt = document.createElement('option');
+    opt.value = s.id;
+    opt.textContent = s.name;
+    sel.appendChild(opt);
+  }
+  return _boardStates;
+}
+
+async function loadBoard(resetPage = false) {
+  if (resetPage) _boardPage = 1;
+  await loadBoardStates();
+
+  const stateFilter = document.getElementById('board-state-filter').value;
+  const container = document.getElementById('board-issues');
+  container.innerHTML = '<div class="board-empty">Loading…</div>';
+
+  let url = `/api/board/issues?page=${_boardPage}&per_page=${_boardPerPage}`;
+  if (stateFilter) url += `&state=${encodeURIComponent(stateFilter)}`;
+
+  const r = await fetch(url);
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}));
+    container.innerHTML = `<div class="board-empty" style="color:var(--red)">${err.detail || 'Failed to load issues'}</div>`;
+    return;
+  }
+  const d = await r.json();
+  _boardTotal = d.total;
+  _boardProjectId = d.project_id;
+
+  // Update Plane link
+  const link = document.getElementById('board-plane-link');
+  if (d.project_id) {
+    link.href = `http://${location.hostname}:8181/dev-agents/projects/${d.project_id}/issues/`;
+    link.style.display = '';
+  }
+
+  // Timestamp
+  document.getElementById('board-ts').textContent = 'Updated ' + new Date().toLocaleTimeString();
+
+  if (!d.issues.length) {
+    container.innerHTML = '<div class="board-empty">No issues found.</div>';
+    document.getElementById('board-pagination').style.display = 'none';
+    return;
+  }
+
+  // Build table
+  const states = _boardStates || {};
+  const rows = d.issues.map(issue => {
+    const st = states[issue.state] || {name: '—', color: '#888'};
+    const pri = issue.priority === 'none' ? '' : issue.priority;
+    const date = issue.updated_at ? new Date(issue.updated_at).toLocaleDateString() : '';
+    const issueUrl = `http://${location.hostname}:8181/dev-agents/projects/${d.project_id}/issues/${issue.id}/`;
+    return `<tr>
+      <td class="issue-title">
+        <span class="issue-seq">#${issue.sequence_id}</span>
+        <a href="${issueUrl}" target="_blank">${escHtml(issue.title)}</a>
+      </td>
+      <td>
+        <span class="state-badge" style="background:${st.color}22;color:${st.color}">
+          <span class="state-dot" style="background:${st.color}"></span>
+          ${escHtml(st.name)}
+        </span>
+      </td>
+      <td><span class="priority-badge">${escHtml(pri)}</span></td>
+      <td style="color:var(--muted);font-size:12px;white-space:nowrap">${date}</td>
+    </tr>`;
+  }).join('');
+
+  container.innerHTML = `<div class="card" style="padding:0;overflow:hidden">
+    <table class="board-table">
+      <thead><tr>
+        <th>Issue</th><th>State</th><th>Priority</th><th>Updated</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </div>`;
+
+  // Pagination
+  const totalPages = Math.ceil(_boardTotal / _boardPerPage);
+  if (totalPages > 1) {
+    document.getElementById('board-pagination').style.display = 'flex';
+    document.getElementById('board-page-info').textContent = `Page ${_boardPage} of ${totalPages} (${_boardTotal} total)`;
+    document.getElementById('board-prev').disabled = _boardPage <= 1;
+    document.getElementById('board-next').disabled = _boardPage >= totalPages;
+  } else {
+    document.getElementById('board-pagination').style.display = 'none';
+  }
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+document.getElementById('refresh-board-btn').addEventListener('click', () => loadBoard(true));
+document.getElementById('board-state-filter').addEventListener('change', () => loadBoard(true));
+document.getElementById('board-prev').addEventListener('click', () => { _boardPage--; loadBoard(); });
+document.getElementById('board-next').addEventListener('click', () => { _boardPage++; loadBoard(); });
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 
