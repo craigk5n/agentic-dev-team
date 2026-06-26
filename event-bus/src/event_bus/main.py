@@ -322,7 +322,6 @@ async def board_issues(state: str = "", page: int = 1, per_page: int = 50):
     if resp.status_code != 200:
         raise HTTPException(status_code=502, detail=f"Plane returned {resp.status_code}")
     data = resp.json()
-    plane_url = settings.plane_base_url.replace("plane-proxy", "localhost").replace(":8181", f":{settings.plane_base_url.split(':')[-1]}")
     results = []
     for issue in data.get("results", []):
         results.append({
@@ -340,6 +339,7 @@ async def board_issues(state: str = "", page: int = 1, per_page: int = 50):
         "page": page,
         "per_page": per_page,
         "project_id": project_id,
+        "plane_public_url": settings.plane_public_url or None,
     }
 
 

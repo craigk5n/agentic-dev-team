@@ -14,6 +14,7 @@ x-event-bus-env: &event-bus-env
   FORGEJO_API_TOKEN: ${FORGEJO_API_TOKEN}
   # Internal URLs (resolved via Docker networks)
   PLANE_BASE_URL: http://plane-proxy:${PLANE_HTTP_PORT:-8181}
+  PLANE_PUBLIC_URL: ${PLANE_URL:-}
   FORGEJO_BASE_URL: http://forgejo:3000
   FORGEJO_GIT_URL: http://forgejo:3000
   PLANE_WORKSPACE_SLUG: ${PLANE_WORKSPACE_SLUG:-dev-agents}

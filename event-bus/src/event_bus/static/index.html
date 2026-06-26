@@ -1258,11 +1258,12 @@ async function loadBoard(resetPage = false) {
   const d = await r.json();
   _boardTotal = d.total;
   _boardProjectId = d.project_id;
+  const planeBase = d.plane_public_url || `http://${location.hostname}:8181`;
 
   // Update Plane link
   const link = document.getElementById('board-plane-link');
   if (d.project_id) {
-    link.href = `http://${location.hostname}:8181/dev-agents/projects/${d.project_id}/issues/`;
+    link.href = `${planeBase}/dev-agents/projects/${d.project_id}/issues/`;
     link.style.display = '';
   }
 
@@ -1281,7 +1282,7 @@ async function loadBoard(resetPage = false) {
     const st = states[issue.state] || {name: '—', color: '#888'};
     const pri = issue.priority === 'none' ? '' : issue.priority;
     const date = issue.updated_at ? new Date(issue.updated_at).toLocaleDateString() : '';
-    const issueUrl = `http://${location.hostname}:8181/dev-agents/projects/${d.project_id}/issues/${issue.id}/`;
+    const issueUrl = `${planeBase}/dev-agents/projects/${d.project_id}/issues/${issue.id}/`;
     return `<tr>
       <td class="issue-title">
         <span class="issue-seq">#${issue.sequence_id}</span>

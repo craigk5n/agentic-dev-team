@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     forgejo_base_url: str = "http://localhost:13000"
     plane_workspace_slug: str = "dev-agents"
 
+    # Public-facing Plane URL used to build links in the UI (browser-accessible)
+    plane_public_url: str = ""
+
     # Project where ideas and stories are created (Phase 5)
     plane_project_id: str = ""
 
