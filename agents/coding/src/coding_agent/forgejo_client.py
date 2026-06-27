@@ -57,6 +57,14 @@ class ForgejoClient:
         log.info("forgejo_pr_created", repo=f"{owner}/{repo}", pr=pr.get("number"), url=pr.get("html_url"))
         return pr
 
+    def post_pr_comment(self, owner: str, repo: str, pr_number: int, body: str) -> dict[str, Any]:
+        resp = self._http.post(
+            f"{self._base}/api/v1/repos/{owner}/{repo}/issues/{pr_number}/comments",
+            json={"body": body},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     def get_pr(self, owner: str, repo: str, pr_number: int) -> dict[str, Any]:
         resp = self._http.get(f"{self._base}/api/v1/repos/{owner}/{repo}/pulls/{pr_number}")
         resp.raise_for_status()

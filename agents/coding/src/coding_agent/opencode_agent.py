@@ -120,5 +120,4 @@ def run_opencode_agent(
         )
 
     log.info("opencode_done", story=story_title)
-    # Use last 2000 chars of stdout as implementation summary
-    return (result.stdout.strip() or "Implementation complete")[-2000:]
+    return result.stdout.strip() or "Implementation complete"

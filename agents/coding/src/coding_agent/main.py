@@ -107,6 +107,19 @@ def run_coding_agent(
             head=branch,
         )
         pr_url = pr.get("html_url", "")
+        pr_number = pr.get("number")
+
+        # Post the full agent output as a collapsible comment so it's visible in Forgejo
+        if pr_number and summary:
+            truncated = summary[-6000:]  # Forgejo comment size limit
+            agent_comment = (
+                "<details>\n<summary>🤖 Agent output</summary>\n\n"
+                f"```\n{truncated}\n```\n\n</details>"
+            )
+            try:
+                forgejo.post_pr_comment(owner, repo_name, pr_number, agent_comment)
+            except Exception as exc:
+                log.warning("agent_comment_failed", pr=pr_number, error=str(exc))
 
     log.info("coding_agent_done", item_id=item_id, pr=pr_url, sha=sha[:8])
     return {
