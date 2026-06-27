@@ -60,6 +60,11 @@ def _try_install_deps(repo_dir: str) -> None:
             ["pip", "install", "-e", ".", "--quiet"],
             cwd=repo_dir, capture_output=True, timeout=120,
         )
+    # Always ensure pytest is available regardless of project structure
+    subprocess.run(
+        ["pip", "install", "pytest", "--quiet"],
+        capture_output=True, timeout=60,
+    )
 
 
 def _parse_pytest_output(output: str, returncode: int) -> tuple[str, list[str]]:
