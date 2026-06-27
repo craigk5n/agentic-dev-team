@@ -185,6 +185,21 @@ async def forgejo_webhook(
         log.warning("forgejo_parse_error", error=str(exc))
         raise HTTPException(status_code=400, detail="payload validation failed") from exc
 
+    # Auto-advance story when PR is merged in Forgejo
+    if event.action == "closed" and event.pull_request.merged:
+        pr_url = event.pull_request.html_url
+        item = find_item_by_pr_url(pr_url)
+        if item:
+            updated = update_state(item["id"], "merged")
+            unlocked = unlock_next_story(item["id"])
+            log.info("pr_merged_auto_advance",
+                     item_id=item["id"], pr=event.pr_number,
+                     next=unlocked["id"] if unlocked else None)
+            return {"result": "merged", "item_id": item["id"],
+                    "unlocked": unlocked["id"] if unlocked else None}
+        log.info("pr_merged_no_story", pr_url=pr_url)
+        return {"result": "skipped", "reason": "no matching story for PR"}
+
     outcome = dispatch_forgejo_event(event, _queue_or_503())
     log.info("forgejo_webhook", result=outcome.result, reason=outcome.reason, job=outcome.job_id)
     return {"result": outcome.result, "job_id": outcome.job_id}
