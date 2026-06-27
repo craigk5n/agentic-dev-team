@@ -455,90 +455,150 @@ button.secondary.free-browse-btn {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-bottom: 16px;
-  flex-wrap: wrap;
+  margin-bottom: 20px;
 }
-.board-toolbar select {
-  width: auto;
-  min-width: 160px;
-}
-.plane-link {
-  margin-left: auto;
-  font-size: 12px;
-  color: var(--accent);
-  text-decoration: none;
-}
-.plane-link:hover { text-decoration: underline; }
 
-.board-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 13px;
-}
-.board-table th {
-  text-align: left;
+.board-group-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-size: 11px;
   font-weight: 600;
-  letter-spacing: .06em;
+  letter-spacing: .08em;
   text-transform: uppercase;
   color: var(--muted);
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--border);
+  margin: 20px 0 8px;
 }
-.board-table td {
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--border);
-  vertical-align: middle;
-}
-.board-table tr:last-child td { border-bottom: none; }
-.board-table tr:hover td { background: var(--surface2); }
-
-.issue-title a {
-  color: var(--text);
-  text-decoration: none;
-  font-weight: 500;
-}
-.issue-title a:hover { color: var(--accent); }
-.issue-seq { color: var(--muted); font-size: 11px; margin-right: 6px; }
-
-.state-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 11px;
-  font-weight: 500;
-  padding: 2px 8px;
-  border-radius: 12px;
-  white-space: nowrap;
-}
-.state-dot {
-  width: 7px;
-  height: 7px;
+.board-group-label:first-child { margin-top: 0; }
+.board-group-dot {
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
   flex-shrink: 0;
 }
-
-.priority-badge {
+.board-group-count {
+  margin-left: auto;
   font-size: 11px;
   color: var(--muted);
-  text-transform: capitalize;
 }
+
+.board-item {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.board-item:hover { border-color: var(--accent); }
+.board-item-title {
+  flex: 1;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  cursor: pointer;
+}
+.board-item-title:hover { color: var(--accent); }
+.board-item-meta {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.board-item-actions { display: flex; gap: 6px; flex-shrink: 0; }
+
+button.approve-btn {
+  background: rgba(34,197,94,.15);
+  border: 1px solid rgba(34,197,94,.4);
+  color: #22c55e;
+  border-radius: 5px;
+  padding: 3px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+button.approve-btn:hover { background: rgba(34,197,94,.25); }
+button.reject-btn {
+  background: rgba(107,114,128,.15);
+  border: 1px solid rgba(107,114,128,.4);
+  color: var(--muted);
+  border-radius: 5px;
+  padding: 3px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+button.reject-btn:hover { background: rgba(107,114,128,.25); }
 
 .board-empty {
   color: var(--muted);
-  padding: 40px 0;
+  padding: 60px 0;
   text-align: center;
   font-size: 13px;
 }
 
-.board-pagination {
+/* Item detail drawer */
+.drawer-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.5);
+  z-index: 100;
+}
+.drawer-overlay.open { display: block; }
+.drawer {
+  position: fixed;
+  top: 0; right: 0; bottom: 0;
+  width: min(580px, 100vw);
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  z-index: 101;
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  overflow: hidden;
+}
+.drawer-header {
+  padding: 20px 24px 16px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: flex-start;
   gap: 12px;
-  margin-top: 16px;
-  justify-content: center;
-  font-size: 13px;
+}
+.drawer-header h3 { flex: 1; font-size: 15px; font-weight: 600; }
+.drawer-close {
+  background: none;
+  border: none;
   color: var(--muted);
+  font-size: 20px;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+}
+.drawer-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 24px;
+}
+.drawer-meta {
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 16px;
+  display: flex;
+  gap: 16px;
+}
+.drawer-description {
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--text);
+  white-space: pre-wrap;
+}
+.drawer-description h2 { font-size: 14px; margin: 16px 0 6px; color: var(--text); }
+.drawer-footer {
+  padding: 16px 24px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  gap: 8px;
 }
 </style>
 </head>
@@ -547,8 +607,8 @@ button.secondary.free-browse-btn {
 <header>
   <h1><span>dev</span>-agents</h1>
   <nav>
-    <button class="tab active" data-tab="ideas">Ideas</button>
-    <button class="tab" data-tab="board">Board</button>
+    <button class="tab active" data-tab="board">Board</button>
+    <button class="tab" data-tab="ideas">Ideas</button>
     <button class="tab" data-tab="config">Config</button>
     <button class="tab" data-tab="telemetry">Telemetry</button>
     <button class="tab" data-tab="health">Health</button>
@@ -558,7 +618,7 @@ button.secondary.free-browse-btn {
 <main>
 
 <!-- ── Ideas ──────────────────────────────────────────────── -->
-<section id="ideas" class="tab-panel active">
+<section id="ideas" class="tab-panel">
   <h2>Submit Idea</h2>
   <div class="card">
     <form id="idea-form">
@@ -738,25 +798,32 @@ button.secondary.free-browse-btn {
 </section>
 
 <!-- ── Board ───────────────────────────────────────────────── -->
-<section id="board" class="tab-panel">
+<section id="board" class="tab-panel active">
   <h2>Board</h2>
   <div class="board-toolbar">
-    <select id="board-state-filter">
-      <option value="">All states</option>
-    </select>
     <button class="secondary" id="refresh-board-btn">↻ Refresh</button>
     <span class="ts" id="board-ts"></span>
-    <a id="board-plane-link" href="#" target="_blank" class="plane-link" style="display:none">Open in Plane ↗</a>
   </div>
-  <div id="board-issues">
-    <div class="board-empty">Select a project in Config → Project, then refresh.</div>
-  </div>
-  <div class="board-pagination" id="board-pagination" style="display:none">
-    <button class="secondary" id="board-prev" disabled>← Prev</button>
-    <span id="board-page-info"></span>
-    <button class="secondary" id="board-next">Next →</button>
+  <div id="board-items">
+    <div class="board-empty">Loading…</div>
   </div>
 </section>
+
+<!-- ── Board item drawer ─────────────────────────────────── -->
+<div class="drawer-overlay" id="drawer-overlay">
+  <div class="drawer" id="item-drawer">
+    <div class="drawer-header">
+      <h3 id="drawer-title"></h3>
+      <button class="drawer-close" id="drawer-close">✕</button>
+    </div>
+    <div class="drawer-body">
+      <div class="drawer-meta" id="drawer-meta"></div>
+      <div class="drawer-description" id="drawer-description"></div>
+    </div>
+    <div class="drawer-footer" id="drawer-footer"></div>
+  </div>
+</div>
+
 
 <!-- ── Health ──────────────────────────────────────────────── -->
 <section id="health" class="tab-panel">
@@ -1213,127 +1280,144 @@ observer.observe(document.getElementById('health'), { attributes: true, attribut
 
 // ── Board ─────────────────────────────────────────────────────────────────────
 
-let _boardStates = null;   // id → {name, color, group}
-let _boardPage = 1;
-let _boardTotal = 0;
-const _boardPerPage = 25;
-let _boardProjectId = null;
-
-async function loadBoardStates() {
-  if (_boardStates) return _boardStates;
-  const r = await fetch('/api/board/states');
-  if (!r.ok) return {};
-  const d = await r.json();
-  _boardStates = {};
-  const sel = document.getElementById('board-state-filter');
-  // clear options except first
-  while (sel.options.length > 1) sel.remove(1);
-  for (const s of d.states) {
-    _boardStates[s.id] = s;
-    const opt = document.createElement('option');
-    opt.value = s.id;
-    opt.textContent = s.name;
-    sel.appendChild(opt);
-  }
-  return _boardStates;
-}
-
-async function loadBoard(resetPage = false) {
-  if (resetPage) _boardPage = 1;
-  await loadBoardStates();
-
-  const stateFilter = document.getElementById('board-state-filter').value;
-  const container = document.getElementById('board-issues');
-  container.innerHTML = '<div class="board-empty">Loading…</div>';
-
-  let url = `/api/board/issues?page=${_boardPage}&per_page=${_boardPerPage}`;
-  if (stateFilter) url += `&state=${encodeURIComponent(stateFilter)}`;
-
-  const r = await fetch(url);
-  if (!r.ok) {
-    const err = await r.json().catch(() => ({}));
-    container.innerHTML = `<div class="board-empty" style="color:var(--red)">${err.detail || 'Failed to load issues'}</div>`;
-    return;
-  }
-  const d = await r.json();
-  _boardTotal = d.total;
-  _boardProjectId = d.project_id;
-  const planeBase = d.plane_public_url || `http://${location.hostname}:8181`;
-
-  // Update Plane link
-  const link = document.getElementById('board-plane-link');
-  if (d.project_id) {
-    link.href = `${planeBase}/dev-agents/projects/${d.project_id}/issues/`;
-    link.style.display = '';
-  }
-
-  // Timestamp
-  document.getElementById('board-ts').textContent = 'Updated ' + new Date().toLocaleTimeString();
-
-  if (!d.issues.length) {
-    container.innerHTML = '<div class="board-empty">No issues found.</div>';
-    document.getElementById('board-pagination').style.display = 'none';
-    return;
-  }
-
-  // Build table
-  const states = _boardStates || {};
-  const rows = d.issues.map(issue => {
-    const st = states[issue.state] || {name: '—', color: '#888'};
-    const pri = issue.priority === 'none' ? '' : issue.priority;
-    const date = issue.updated_at ? new Date(issue.updated_at).toLocaleDateString() : '';
-    const issueUrl = `${planeBase}/dev-agents/projects/${d.project_id}/issues/${issue.id}/`;
-    return `<tr>
-      <td class="issue-title">
-        <span class="issue-seq">#${issue.sequence_id}</span>
-        <a href="${issueUrl}" target="_blank">${escHtml(issue.title)}</a>
-      </td>
-      <td>
-        <span class="state-badge" style="background:${st.color}22;color:${st.color}">
-          <span class="state-dot" style="background:${st.color}"></span>
-          ${escHtml(st.name)}
-        </span>
-      </td>
-      <td><span class="priority-badge">${escHtml(pri)}</span></td>
-      <td style="color:var(--muted);font-size:12px;white-space:nowrap">${date}</td>
-    </tr>`;
-  }).join('');
-
-  container.innerHTML = `<div class="card" style="padding:0;overflow:hidden">
-    <table class="board-table">
-      <thead><tr>
-        <th>Issue</th><th>State</th><th>Priority</th><th>Updated</th>
-      </tr></thead>
-      <tbody>${rows}</tbody>
-    </table>
-  </div>`;
-
-  // Pagination
-  const totalPages = Math.ceil(_boardTotal / _boardPerPage);
-  if (totalPages > 1) {
-    document.getElementById('board-pagination').style.display = 'flex';
-    document.getElementById('board-page-info').textContent = `Page ${_boardPage} of ${totalPages} (${_boardTotal} total)`;
-    document.getElementById('board-prev').disabled = _boardPage <= 1;
-    document.getElementById('board-next').disabled = _boardPage >= totalPages;
-  } else {
-    document.getElementById('board-pagination').style.display = 'none';
-  }
-}
-
 function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-document.getElementById('refresh-board-btn').addEventListener('click', () => loadBoard(true));
-document.getElementById('board-state-filter').addEventListener('change', () => loadBoard(true));
-document.getElementById('board-prev').addEventListener('click', () => { _boardPage--; loadBoard(); });
-document.getElementById('board-next').addEventListener('click', () => { _boardPage++; loadBoard(); });
+function fmtDate(iso) {
+  if (!iso) return '';
+  return new Date(iso).toLocaleDateString(undefined, {month:'short', day:'numeric', year:'numeric'});
+}
+
+async function loadBoard() {
+  const container = document.getElementById('board-items');
+  container.innerHTML = '<div class="board-empty">Loading…</div>';
+
+  const r = await fetch('/api/items');
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}));
+    container.innerHTML = `<div class="board-empty" style="color:var(--red)">${err.detail || 'Failed to load items'}</div>`;
+    return;
+  }
+  const d = await r.json();
+  document.getElementById('board-ts').textContent = 'Updated ' + new Date().toLocaleTimeString();
+
+  if (!d.total) {
+    container.innerHTML = '<div class="board-empty">No work items yet — submit an idea to get started.</div>';
+    return;
+  }
+
+  let html = '';
+  for (const group of d.groups) {
+    const color = group.color;
+    html += `<div class="board-group-label">
+      <span class="board-group-dot" style="background:${color}"></span>
+      ${escHtml(group.state.replace(/-/g,' '))}
+      <span class="board-group-count">${group.items.length}</span>
+    </div>`;
+    for (const item of group.items) {
+      const isPending = item.state === 'pending-approval';
+      const actions = isPending ? `
+        <div class="board-item-actions">
+          <button class="approve-btn" data-id="${item.id}">Approve</button>
+          <button class="reject-btn" data-id="${item.id}">Reject</button>
+        </div>` : '';
+      const date = fmtDate(item.created_at);
+      html += `<div class="board-item" data-id="${item.id}">
+        <div class="board-item-title" data-id="${item.id}">${escHtml(item.title)}</div>
+        <div class="board-item-meta">${item.type}${date ? ' · ' + date : ''}</div>
+        ${actions}
+      </div>`;
+    }
+  }
+  container.innerHTML = html;
+
+  // Approve / Reject buttons
+  container.querySelectorAll('.approve-btn').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const id = btn.dataset.id;
+      btn.disabled = true;
+      const r = await fetch(`/api/items/${id}/approve`, {method:'POST'});
+      if (r.ok) { toast('Idea approved'); loadBoard(); }
+      else { toast('Approve failed', 'error'); btn.disabled = false; }
+    });
+  });
+  container.querySelectorAll('.reject-btn').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const id = btn.dataset.id;
+      btn.disabled = true;
+      const r = await fetch(`/api/items/${id}/reject`, {method:'POST'});
+      if (r.ok) { toast('Idea rejected'); loadBoard(); }
+      else { toast('Reject failed', 'error'); btn.disabled = false; }
+    });
+  });
+
+  // Click title to open drawer
+  container.querySelectorAll('.board-item-title[data-id]').forEach(el => {
+    el.addEventListener('click', () => openDrawer(el.dataset.id));
+  });
+}
+
+// ── Item drawer ───────────────────────────────────────────────────────────────
+
+async function openDrawer(id) {
+  const r = await fetch(`/api/items/${id}`);
+  if (!r.ok) return;
+  const item = await r.json();
+  document.getElementById('drawer-title').textContent = item.title;
+  document.getElementById('drawer-meta').innerHTML =
+    `<span>${item.type}</span><span>${item.state.replace(/-/g,' ')}</span><span>${fmtDate(item.created_at)}</span>`;
+
+  // Show prompt (the original user input) then LLM description
+  let body = '';
+  if (item.prompt) {
+    body += `<div style="color:var(--muted);font-size:12px;margin-bottom:8px">Original prompt</div>`;
+    body += `<div style="background:var(--surface2);border-radius:6px;padding:10px 14px;margin-bottom:16px;font-size:13px">${escHtml(item.prompt)}</div>`;
+  }
+  if (item.description) {
+    body += `<div style="color:var(--muted);font-size:12px;margin-bottom:8px">Proposal</div>`;
+    body += `<div class="drawer-description">${escHtml(item.description)}</div>`;
+  }
+  document.getElementById('drawer-description').innerHTML = body;
+
+  // Footer: approve/reject if pending
+  const footer = document.getElementById('drawer-footer');
+  if (item.state === 'pending-approval') {
+    footer.innerHTML = `
+      <button class="approve-btn" id="drawer-approve">Approve</button>
+      <button class="reject-btn" id="drawer-reject">Reject</button>`;
+    document.getElementById('drawer-approve').addEventListener('click', async () => {
+      const r = await fetch(`/api/items/${id}/approve`, {method:'POST'});
+      if (r.ok) { toast('Idea approved'); closeDrawer(); loadBoard(); }
+    });
+    document.getElementById('drawer-reject').addEventListener('click', async () => {
+      const r = await fetch(`/api/items/${id}/reject`, {method:'POST'});
+      if (r.ok) { toast('Idea rejected'); closeDrawer(); loadBoard(); }
+    });
+  } else {
+    footer.innerHTML = '';
+  }
+
+  document.getElementById('drawer-overlay').classList.add('open');
+}
+
+function closeDrawer() {
+  document.getElementById('drawer-overlay').classList.remove('open');
+}
+
+document.getElementById('drawer-close').addEventListener('click', closeDrawer);
+document.getElementById('drawer-overlay').addEventListener('click', (e) => {
+  if (e.target === document.getElementById('drawer-overlay')) closeDrawer();
+});
+
+document.getElementById('refresh-board-btn').addEventListener('click', () => loadBoard());
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 
-// Pre-build config forms so they're ready when tab is opened
 buildConfigForms();
-// Load health immediately on first render
+loadBoard();
 loadHealth();
 </script>
 </body>

@@ -1,9 +1,17 @@
 """
-Event bus — webhook receiver.
+Event bus — webhook receiver + work item store.
 
-POST /webhook/plane   — receives Plane CE webhooks
+POST /webhook/plane   — receives Plane CE webhooks (legacy)
 POST /webhook/forgejo — receives Forgejo webhooks
 GET  /health          — liveness probe
+
+Work items (replaces Plane):
+POST /api/ideas                    — submit idea, LLM expands, saves to SQLite
+GET  /api/items                    — list all items grouped by state
+GET  /api/items/{id}               — get single item with full description
+POST /api/items/{id}/approve       — approve pending idea
+POST /api/items/{id}/reject        — reject pending idea
+POST /api/items/migrate-from-plane — import existing Plane issues
 """
 
 from __future__ import annotations
@@ -25,6 +33,9 @@ from dataclasses import asdict
 from event_bus.config import settings
 from event_bus.config_store import get_config, patch_config
 from event_bus.dispatch import dispatch_forgejo_event, dispatch_plane_event
+from event_bus.work_store import (
+    create_item, get_item, grouped_items, update_state, STATE_COLORS, get_db
+)
 from event_bus.telemetry import get_telemetry_summary, render_prometheus
 from event_bus.events.forgejo import ForgejoPREvent
 from event_bus.events.plane import PlaneEvent
@@ -52,6 +63,7 @@ async def lifespan(app: FastAPI):
         log.warning("forgejo_webhook_secret_not_set — all Forgejo webhooks will be rejected")
     _redis_conn = redis.from_url(settings.redis_url, decode_responses=False)
     _queue = Queue("agent-jobs", connection=_redis_conn)
+    get_db()  # initialise SQLite schema
     log.info("event_bus_started", redis=settings.redis_url)
     yield
     if _redis_conn:
@@ -144,13 +156,13 @@ async def forgejo_webhook(
     return {"result": outcome.result, "job_id": outcome.job_id}
 
 
-# ── Ideas API (Phase 5) ────────────────────────────────────────────────────────
+# ── Ideas API ─────────────────────────────────────────────────────────────────
 
 @app.post("/api/ideas", status_code=status.HTTP_202_ACCEPTED)
 async def submit_idea(request: Request):
     """
-    Submit a new feature idea. The Idea Agent expands the prompt and creates
-    a Plane issue with state 'Pending Approval' for human review.
+    Submit a new feature idea. The Idea Agent expands the prompt with an LLM
+    and saves it to SQLite with state 'pending-approval'.
     """
     try:
         body = await request.json()
@@ -162,36 +174,134 @@ async def submit_idea(request: Request):
         raise HTTPException(status_code=400, detail="'prompt' field required")
 
     cfg = get_config(_redis_or_503())
-
-    # Priority: request body → runtime config (Config tab) → env var
-    project_id = body.get("project_id") or cfg.project.plane_project_id or settings.plane_project_id
-    if not project_id:
-        raise HTTPException(
-            status_code=422,
-            detail="project_id required — set it in Config → Project, PLANE_PROJECT_ID env var, or pass in the form",
-        )
-
-    # Model override: request body → runtime config → env var default
-    model_override = (body.get("model_override") or "").strip()
-    if not model_override:
-        model_override = cfg.models.idea
+    model_override = (body.get("model_override") or "").strip() or cfg.models.idea
 
     try:
-        from idea_agent.main import submit_idea as _submit
-        result = _submit(
-            prompt,
-            project_id=project_id,
-            workspace_slug=settings.plane_workspace_slug,
-            model_override=model_override,
-        )
+        from idea_agent.main import expand_idea
+        proposal = expand_idea(prompt, model_override=model_override)
     except ImportError:
         raise HTTPException(status_code=503, detail="idea_agent package not installed")
     except Exception as exc:
-        log.error("idea_submission_failed", error=str(exc))
+        log.error("idea_expansion_failed", error=str(exc))
         raise HTTPException(status_code=500, detail=str(exc))
 
-    log.info("idea_submitted", issue_id=result.get("issue_id"), title=result.get("title"))
-    return result
+    item = create_item(
+        item_type="idea",
+        title=proposal["title"],
+        prompt=prompt,
+        description=proposal.get("description", ""),
+        state="pending-approval",
+        model_used=model_override or settings.model_idea,
+    )
+    log.info("idea_submitted", id=item["id"], title=item["title"])
+    return item
+
+
+# ── Work items API ────────────────────────────────────────────────────────────
+
+@app.get("/api/items")
+async def list_work_items():
+    """Return all work items grouped by state with state metadata."""
+    groups = grouped_items()
+    return {
+        "groups": [
+            {
+                "state": state,
+                "color": STATE_COLORS.get(state, "#888"),
+                "items": items,
+            }
+            for state, items in groups.items()
+        ],
+        "total": sum(len(v) for v in groups.values()),
+    }
+
+
+@app.get("/api/items/{item_id}")
+async def get_work_item(item_id: str):
+    item = get_item(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="item not found")
+    return item
+
+
+@app.post("/api/items/{item_id}/approve", status_code=status.HTTP_200_OK)
+async def approve_item(item_id: str):
+    item = get_item(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="item not found")
+    if item["state"] != "pending-approval":
+        raise HTTPException(status_code=409, detail=f"item is '{item['state']}', not pending-approval")
+    updated = update_state(item_id, "approved")
+    log.info("idea_approved", id=item_id, title=item["title"])
+    return updated
+
+
+@app.post("/api/items/{item_id}/reject", status_code=status.HTTP_200_OK)
+async def reject_item(item_id: str):
+    item = get_item(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="item not found")
+    if item["state"] != "pending-approval":
+        raise HTTPException(status_code=409, detail=f"item is '{item['state']}', not pending-approval")
+    updated = update_state(item_id, "rejected")
+    log.info("idea_rejected", id=item_id, title=item["title"])
+    return updated
+
+
+@app.post("/api/items/migrate-from-plane", status_code=status.HTTP_200_OK)
+async def migrate_from_plane():
+    """
+    Pull existing issues from Plane and import them into the SQLite work store.
+    Safe to run multiple times — skips items whose ID already exists.
+    """
+    import httpx
+    from event_bus.work_store import get_db as _get_db
+    plane_state_map = {
+        "78caf460-11bd-4e63-8e4d-9a3e1dc28d95": "pending-approval",
+        "afa9c777-c63e-44f8-b526-a5fc9330e910": "approved",
+        "88435ad2-c302-4270-b60e-32c4f2e52858": "rejected",
+        "87f5d6b7-6352-4ec4-b4f8-1d047b697fe6": "ready",
+        "a65f2df2-7cc6-4846-9bd2-8a9d6b718765": "in-progress",
+        "9d27a8e7-7d58-4244-9b23-0b8ee9d9b850": "in-review",
+        "9e7d182c-59dd-48c3-9b95-c635ba1fbec3": "changes-requested",
+        "bbc570d1-a7c9-406b-8102-a3f38e6684d5": "merged",
+        "889d04d3-4db8-41db-8072-6a5c793a96d9": "done",
+    }
+    cfg = get_config(_redis_or_503())
+    project_id = cfg.project.plane_project_id or settings.plane_project_id
+    if not project_id:
+        raise HTTPException(status_code=422, detail="No project_id configured")
+
+    url = f"{settings.plane_base_url}/api/v1/workspaces/{settings.plane_workspace_slug}/projects/{project_id}/issues/?per_page=100"
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(url, headers={"X-API-Key": settings.plane_api_token})
+    if resp.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"Plane returned {resp.status_code}")
+
+    imported, skipped = 0, 0
+    for issue in resp.json().get("results", []):
+        existing = get_item(issue["id"])
+        if existing:
+            skipped += 1
+            continue
+        state = plane_state_map.get(issue.get("state", ""), "pending-approval")
+        import re
+        description = re.sub(r"<[^>]+>", "", issue.get("description_html") or "").strip()
+        create_item(
+            item_type="idea",
+            title=issue["name"],
+            description=description,
+            state=state,
+            item_id=issue["id"],
+            created_at=issue.get("created_at"),
+        )
+        imported += 1
+
+    log.info("plane_migration_done", imported=imported, skipped=skipped)
+    return {"imported": imported, "skipped": skipped}
+
+
+# ── Board / issue browser (Plane) — removed; replaced by /api/items ───────────
 
 
 # ── Runtime config API (Phase 6) ──────────────────────────────────────────────
@@ -277,71 +387,6 @@ async def approve_pr_merge(owner: str, repo: str, pr_number: int, request: Reque
 
 
 # ── Board / issue browser ─────────────────────────────────────────────────────
-
-@app.get("/api/board/states")
-async def board_states():
-    """Return all states for the configured project (id, name, color, group)."""
-    cfg = get_config(_redis_or_503())
-    project_id = cfg.project.plane_project_id or settings.plane_project_id
-    if not project_id:
-        raise HTTPException(status_code=422, detail="No project configured — set it in Config → Project")
-    import httpx
-    url = f"{settings.plane_base_url}/api/v1/workspaces/{settings.plane_workspace_slug}/projects/{project_id}/states/"
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.get(url, headers={"X-API-Key": settings.plane_api_token})
-    if resp.status_code != 200:
-        raise HTTPException(status_code=502, detail=f"Plane returned {resp.status_code}")
-    data = resp.json()
-    return {"states": [
-        {"id": s["id"], "name": s["name"], "color": s.get("color", "#888"), "group": s.get("group", "")}
-        for s in data.get("results", [])
-    ]}
-
-
-@app.get("/api/board/issues")
-async def board_issues(state: str = "", page: int = 1, per_page: int = 50):
-    """
-    List issues for the configured project.
-
-    Optional filters:
-      state     — state UUID to filter by (empty = all)
-      page      — 1-based page number
-      per_page  — results per page (max 100)
-    """
-    cfg = get_config(_redis_or_503())
-    project_id = cfg.project.plane_project_id or settings.plane_project_id
-    if not project_id:
-        raise HTTPException(status_code=422, detail="No project configured — set it in Config → Project")
-    import httpx
-    params: dict = {"per_page": min(per_page, 100), "cursor": f"{min(per_page, 100)}:{page - 1}:0"}
-    if state:
-        params["state"] = state
-    url = f"{settings.plane_base_url}/api/v1/workspaces/{settings.plane_workspace_slug}/projects/{project_id}/issues/"
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.get(url, headers={"X-API-Key": settings.plane_api_token}, params=params)
-    if resp.status_code != 200:
-        raise HTTPException(status_code=502, detail=f"Plane returned {resp.status_code}")
-    data = resp.json()
-    results = []
-    for issue in data.get("results", []):
-        results.append({
-            "id": issue["id"],
-            "sequence_id": issue.get("sequence_id"),
-            "title": issue["name"],
-            "state": issue.get("state"),
-            "priority": issue.get("priority", "none"),
-            "created_at": issue.get("created_at"),
-            "updated_at": issue.get("updated_at"),
-        })
-    return {
-        "issues": results,
-        "total": data.get("total_count", 0),
-        "page": page,
-        "per_page": per_page,
-        "project_id": project_id,
-        "plane_public_url": settings.plane_public_url or None,
-    }
-
 
 # ── Model discovery ───────────────────────────────────────────────────────────
 
