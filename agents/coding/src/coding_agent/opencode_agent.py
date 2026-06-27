@@ -40,8 +40,16 @@ def run_opencode_agent(
     prompt = (
         f"## Story: {story_title}\n\n"
         f"{story_description or '(no description)'}\n\n"
-        "Implement this story. Read existing code first to understand the structure. "
-        "Make the minimal focused changes needed. Do not modify unrelated files."
+        "INSTRUCTIONS:\n"
+        "1. First, list all files in the repo to understand what already exists.\n"
+        "2. If the repo has an existing app (e.g. main.py, app.py, package.json, go.mod), "
+        "read the key files and implement the story on top of that stack.\n"
+        "3. If the repo is EMPTY or only has a README, create a minimal working app from "
+        "scratch using Python + FastAPI (unless the story or description specifies another "
+        "language/framework). Set up pyproject.toml or requirements.txt, then implement "
+        "the story on top of that scaffold.\n"
+        "4. Make focused, working changes. Commit-worthy code only — no placeholders.\n"
+        "5. Do not modify files unrelated to this story."
     )
 
     cmd = [opencode_bin, "run", "--dir", repo_dir, "--model", model, prompt]
