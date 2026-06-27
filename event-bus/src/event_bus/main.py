@@ -135,13 +135,19 @@ async def forgejo_webhook(
     x_gitea_signature: str | None = Header(default=None),
 ):
     body = await request.body()
+    log.info("forgejo_webhook_received", gitea_event=x_gitea_event, size=len(body))
 
     # Always validate — verify_forgejo returns False when secret is empty (fail-closed)
     if not verify_forgejo(body, x_gitea_signature or "", settings.forgejo_webhook_secret):
         log.warning("forgejo_signature_invalid")
         raise HTTPException(status_code=403, detail="invalid signature")
 
-    _REVIEW_EVENTS = {"pull_request_review", "pull_request_review_rejected"}
+    _REVIEW_EVENTS = {
+        "pull_request_review",
+        "pull_request_review_rejected",
+        "pull_request_review_approved",
+        "pull_request_review_comment",
+    }
 
     try:
         payload = _json.loads(body)
@@ -155,6 +161,12 @@ async def forgejo_webhook(
         except ValidationError as exc:
             log.warning("forgejo_review_parse_error", error=str(exc))
             return {"result": "skipped", "reason": "review payload parse failed"}
+
+        log.info("forgejo_review_event",
+                 event=x_gitea_event,
+                 review_type=review_event.review.type,
+                 review_body=review_event.review.body[:100],
+                 pr=review_event.pr_number)
 
         if not review_event.is_changes_requested():
             return {"result": "skipped", "reason": f"review type not changes-requested: {review_event.review.type!r}"}

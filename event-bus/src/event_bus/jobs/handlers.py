@@ -147,7 +147,7 @@ def handle_pr_event(
 
     q = Queue("agent-jobs", connection=r)
     base_kwargs = dict(repo_full_name=repo_full_name, pr_number=pr_number,
-                       head_sha=head_sha, base_ref=base_ref)
+                       head_sha=head_sha, base_ref=base_ref, head_ref=head_ref)
     jobs = []
     if reviewer_ok:
         jobs.append(q.enqueue(run_code_reviewer, **base_kwargs,

@@ -35,6 +35,7 @@ def run_code_reviewer(
     pr_number: int,
     head_sha: str,
     base_ref: str = "main",
+    head_ref: str = "",
     model_override: str = "",
 ) -> dict:
     r, lim = _redis_and_limits()
@@ -52,6 +53,7 @@ def run_code_reviewer(
             pr_number=pr_number,
             head_sha=head_sha,
             base_ref=base_ref,
+            head_ref=head_ref,
             model_override=model_override,
         )
     except ImportError:
@@ -66,6 +68,7 @@ def run_tester(
     pr_number: int,
     head_sha: str,
     base_ref: str = "main",
+    head_ref: str = "",
     model_override: str = "",
 ) -> dict:
     r, lim = _redis_and_limits()
@@ -83,6 +86,7 @@ def run_tester(
             pr_number=pr_number,
             head_sha=head_sha,
             base_ref=base_ref,
+            head_ref=head_ref,
             model_override=model_override,
         )
     except ImportError:
@@ -97,6 +101,7 @@ def run_security_scanner(
     pr_number: int,
     head_sha: str,
     base_ref: str = "main",
+    head_ref: str = "",
     model_override: str = "",
 ) -> dict:
     r, lim = _redis_and_limits()
@@ -114,6 +119,7 @@ def run_security_scanner(
             pr_number=pr_number,
             head_sha=head_sha,
             base_ref=base_ref,
+            head_ref=head_ref,
             model_override=model_override,
         )
     except ImportError:
