@@ -19,6 +19,7 @@ class Settings(BaseSettings):
 
     # Forgejo
     forgejo_api_token: str = ""
+    forgejo_reviewer_token: str = ""  # reviewer-bot user — may differ from coder token
     forgejo_base_url: str = "http://localhost:3000"
     forgejo_git_url: str = ""
 

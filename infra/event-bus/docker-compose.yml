@@ -6,6 +6,7 @@ version: "3.8"
 x-event-bus-env: &event-bus-env
   FORGEJO_WEBHOOK_SECRET: ${FORGEJO_WEBHOOK_SECRET}
   FORGEJO_API_TOKEN: ${FORGEJO_API_TOKEN}
+  FORGEJO_REVIEWER_TOKEN: ${FORGEJO_REVIEWER_TOKEN:-}
   FORGEJO_BASE_URL: http://forgejo:3000
   FORGEJO_GIT_URL: http://forgejo:3000
   REDIS_URL: redis://event-bus-redis:6379/0

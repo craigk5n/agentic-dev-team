@@ -79,7 +79,8 @@ def apply_gate(
             + ", ".join(failing)
             + ".\n\nThe coding agent will push a fix automatically."
         )
-        with ForgejoClient(settings.forgejo_base_url, settings.forgejo_api_token) as fj:
+        review_token = settings.forgejo_reviewer_token or settings.forgejo_api_token
+        with ForgejoClient(settings.forgejo_base_url, review_token) as fj:
             fj.create_review(owner, repo, pr_number, "REQUEST_CHANGES", body)
         _clear_verdicts(r, repo_full_name, pr_number)
         log.info("gate_changes_requested", repo=repo_full_name, pr=pr_number, failing=failing)
