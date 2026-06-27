@@ -27,13 +27,14 @@ _conn: sqlite3.Connection | None = None
 STATE_COLORS: dict[str, str] = {
     "pending-approval":   "#f59e0b",
     "approved":           "#22c55e",
-    "rejected":           "#6b7280",
+    "backlog":            "#4b5563",
     "ready":              "#3b82f6",
     "in-progress":        "#f59e0b",
     "in-review":          "#8b5cf6",
     "changes-requested":  "#f97316",
     "merged":             "#22c55e",
     "done":               "#46a758",
+    "rejected":           "#6b7280",
 }
 
 STATE_ORDER = list(STATE_COLORS.keys())
@@ -63,6 +64,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             description TEXT,
             state       TEXT NOT NULL DEFAULT 'pending-approval',
             parent_id   TEXT REFERENCES work_items(id),
+            sequence    INTEGER,
             model_used  TEXT,
             pr_url      TEXT,
             created_at  TEXT NOT NULL,
@@ -71,12 +73,13 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_state ON work_items(state);
         CREATE INDEX IF NOT EXISTS idx_parent ON work_items(parent_id);
     """)
-    # Migrate existing DBs that pre-date the pr_url column
-    try:
-        conn.execute("ALTER TABLE work_items ADD COLUMN pr_url TEXT")
-        conn.commit()
-    except sqlite3.OperationalError:
-        pass  # column already exists
+    # Migrate existing DBs that pre-date optional columns
+    for col, definition in [("pr_url", "TEXT"), ("sequence", "INTEGER")]:
+        try:
+            conn.execute(f"ALTER TABLE work_items ADD COLUMN {col} {definition}")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
 
 
 def create_item(
@@ -87,6 +90,7 @@ def create_item(
     description: str = "",
     state: str = "pending-approval",
     parent_id: Optional[str] = None,
+    sequence: Optional[int] = None,
     model_used: str = "",
     item_id: Optional[str] = None,
     created_at: Optional[str] = None,
@@ -97,9 +101,11 @@ def create_item(
         db = get_db()
         db.execute(
             """INSERT INTO work_items
-               (id, type, title, prompt, description, state, parent_id, model_used, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
-            (item_id, item_type, title, prompt, description, state, parent_id, model_used, now, now),
+               (id, type, title, prompt, description, state, parent_id, sequence,
+                model_used, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (item_id, item_type, title, prompt, description, state, parent_id,
+             sequence, model_used, now, now),
         )
         db.commit()
     return get_item(item_id)
@@ -144,6 +150,22 @@ def update_state(item_id: str, new_state: str) -> dict | None:
         )
         db.commit()
     return get_item(item_id)
+
+
+def unlock_next_story(item_id: str) -> dict | None:
+    """Transition the next sequenced backlog story to ready after item_id completes."""
+    item = get_item(item_id)
+    if not item or item.get("sequence") is None or not item.get("parent_id"):
+        return None
+    next_seq = item["sequence"] + 1
+    with _lock:
+        row = get_db().execute(
+            "SELECT id FROM work_items WHERE parent_id=? AND sequence=? AND state='backlog'",
+            (item["parent_id"], next_seq),
+        ).fetchone()
+    if not row:
+        return None
+    return update_state(row["id"], "ready")
 
 
 def set_pr_url(item_id: str, pr_url: str) -> dict | None:

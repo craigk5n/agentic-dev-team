@@ -35,7 +35,8 @@ from event_bus.config import settings
 from event_bus.config_store import get_config, patch_config
 from event_bus.dispatch import dispatch_forgejo_event, dispatch_plane_event
 from event_bus.work_store import (
-    create_item, get_item, grouped_items, update_state, set_pr_url, STATE_COLORS, get_db
+    create_item, get_item, grouped_items, update_state, set_pr_url,
+    unlock_next_story, STATE_COLORS, get_db
 )
 from event_bus.telemetry import get_telemetry_summary, render_prometheus
 from event_bus.events.forgejo import ForgejoPREvent
@@ -253,16 +254,20 @@ async def _run_planner(item_id: str, title: str, description: str) -> None:
         log.error("planner_failed", id=item_id, error=str(exc))
         return
 
-    for story in plan.get("stories", []):
+    stories = plan.get("stories", [])
+    for i, story in enumerate(stories):
+        # Only the first story starts ready; the rest are backlog until their predecessor merges
+        state = "ready" if i == 0 else "backlog"
         story_item = create_item(
             item_type="story",
             title=story["title"],
             description=story.get("description", ""),
-            state="ready",
+            state=state,
             parent_id=item_id,
+            sequence=i + 1,
             model_used=model,
         )
-        log.info("story_created", id=story_item["id"], title=story_item["title"])
+        log.info("story_created", id=story_item["id"], seq=i + 1, state=state, title=story_item["title"])
 
     log.info(
         "planner_complete",
@@ -334,6 +339,22 @@ async def reject_item(item_id: str):
     updated = update_state(item_id, "rejected")
     log.info("idea_rejected", id=item_id, title=item["title"])
     return updated
+
+
+@app.post("/api/items/{item_id}/merged", status_code=status.HTTP_200_OK)
+async def mark_merged(item_id: str):
+    """Mark a story as merged and unlock the next sequenced story."""
+    item = get_item(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="item not found")
+    if item["state"] not in ("in-review", "changes-requested"):
+        raise HTTPException(status_code=409, detail=f"item is '{item['state']}', expected in-review")
+    updated = update_state(item_id, "merged")
+    unlocked = unlock_next_story(item_id)
+    if unlocked:
+        log.info("story_unlocked", id=unlocked["id"], seq=unlocked.get("sequence"), title=unlocked["title"])
+    log.info("story_merged", id=item_id, next_unlocked=unlocked["id"] if unlocked else None)
+    return {"merged": updated, "unlocked": unlocked}
 
 
 @app.post("/api/items/migrate-from-plane", status_code=status.HTTP_200_OK)

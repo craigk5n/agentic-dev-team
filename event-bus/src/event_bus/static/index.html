@@ -548,6 +548,26 @@ button.code-btn:hover { background: rgba(59,130,246,.25); }
   white-space: nowrap;
 }
 .pr-link:hover { text-decoration: underline; }
+button.merge-btn {
+  background: rgba(34,197,94,.15);
+  border: 1px solid rgba(34,197,94,.4);
+  color: #22c55e;
+  border-radius: 5px;
+  padding: 3px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+button.merge-btn:hover { background: rgba(34,197,94,.25); }
+.seq-badge {
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--surface2);
+  border-radius: 4px;
+  padding: 1px 6px;
+  flex-shrink: 0;
+}
+.board-item.backlog { opacity: .55; }
 
 .board-empty {
   color: var(--muted);
@@ -1344,13 +1364,21 @@ async function loadBoard() {
         actions = `<div class="board-item-actions">
           <button class="code-btn" data-id="${item.id}">▶ Code</button>
         </div>`;
+      } else if (item.state === 'in-review') {
+        actions = `<div class="board-item-actions">
+          ${item.pr_url ? `<a class="pr-link" href="${escHtml(item.pr_url)}" target="_blank">PR ↗</a>` : ''}
+          <button class="merge-btn" data-id="${item.id}">✓ Merged</button>
+        </div>`;
       } else if (item.pr_url) {
         actions = `<div class="board-item-actions">
           <a class="pr-link" href="${escHtml(item.pr_url)}" target="_blank">PR ↗</a>
         </div>`;
       }
+      const seqBadge = item.sequence ? `<span class="seq-badge">${item.sequence}</span>` : '';
       const date = fmtDate(item.created_at);
-      html += `<div class="board-item" data-id="${item.id}">
+      const backlogClass = item.state === 'backlog' ? ' backlog' : '';
+      html += `<div class="board-item${backlogClass}" data-id="${item.id}">
+        ${seqBadge}
         <div class="board-item-title" data-id="${item.id}">${escHtml(item.title)}</div>
         <div class="board-item-meta">${item.type}${date ? ' · ' + date : ''}</div>
         ${actions}
@@ -1378,6 +1406,27 @@ async function loadBoard() {
       const r = await fetch(`/api/items/${id}/reject`, {method:'POST'});
       if (r.ok) { toast('Idea rejected'); loadBoard(); }
       else { toast('Reject failed', 'error'); btn.disabled = false; }
+    });
+  });
+
+  // Merge buttons
+  container.querySelectorAll('.merge-btn').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const id = btn.dataset.id;
+      btn.disabled = true;
+      const r = await fetch(`/api/items/${id}/merged`, {method:'POST'});
+      if (r.ok) {
+        const d = await r.json();
+        const msg = d.unlocked
+          ? `Merged ✓ — story ${d.unlocked.sequence} unlocked`
+          : 'Merged ✓';
+        toast(msg);
+        loadBoard();
+      } else {
+        toast('Merge failed', 'error');
+        btn.disabled = false;
+      }
     });
   });
 
@@ -1447,6 +1496,18 @@ async function openDrawer(id) {
       const r = await fetch(`/api/items/${id}/code`, {method:'POST'});
       if (r.ok) { toast('Coding agent started'); closeDrawer(); loadBoard(); }
       else { toast('Failed to start coding agent', 'error'); }
+    });
+  } else if (item.state === 'in-review') {
+    footer.innerHTML = `
+      ${item.pr_url ? `<a class="pr-link" href="${escHtml(item.pr_url)}" target="_blank">Open PR ↗</a>` : ''}
+      <button class="merge-btn" id="drawer-merge">✓ Mark Merged</button>`;
+    document.getElementById('drawer-merge').addEventListener('click', async () => {
+      const r = await fetch(`/api/items/${id}/merged`, {method:'POST'});
+      if (r.ok) {
+        const d = await r.json();
+        toast(d.unlocked ? `Merged ✓ — story ${d.unlocked.sequence} unlocked` : 'Merged ✓');
+        closeDrawer(); loadBoard();
+      }
     });
   } else if (item.pr_url) {
     footer.innerHTML = `<a class="pr-link" href="${escHtml(item.pr_url)}" target="_blank">Open PR ↗</a>`;
