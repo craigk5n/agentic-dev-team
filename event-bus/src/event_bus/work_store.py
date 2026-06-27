@@ -4,7 +4,7 @@ Work item store — SQLite-backed, replaces Plane as the coordination backbone.
 Schema
 ------
 work_items(id, type, title, prompt, description, state, parent_id,
-           model_used, created_at, updated_at)
+           model_used, repo, created_at, updated_at)
 
 States
 ------
@@ -74,7 +74,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_parent ON work_items(parent_id);
     """)
     # Migrate existing DBs that pre-date optional columns
-    for col, definition in [("pr_url", "TEXT"), ("sequence", "INTEGER")]:
+    for col, definition in [("pr_url", "TEXT"), ("sequence", "INTEGER"), ("repo", "TEXT")]:
         try:
             conn.execute(f"ALTER TABLE work_items ADD COLUMN {col} {definition}")
             conn.commit()
@@ -92,6 +92,7 @@ def create_item(
     parent_id: Optional[str] = None,
     sequence: Optional[int] = None,
     model_used: str = "",
+    repo: str = "",
     item_id: Optional[str] = None,
     created_at: Optional[str] = None,
 ) -> dict:
@@ -102,13 +103,38 @@ def create_item(
         db.execute(
             """INSERT INTO work_items
                (id, type, title, prompt, description, state, parent_id, sequence,
-                model_used, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                model_used, repo, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
             (item_id, item_type, title, prompt, description, state, parent_id,
-             sequence, model_used, now, now),
+             sequence, model_used, repo or None, now, now),
         )
         db.commit()
     return get_item(item_id)
+
+
+def set_repo(item_id: str, repo: str) -> dict | None:
+    with _lock:
+        db = get_db()
+        db.execute(
+            "UPDATE work_items SET repo=?, updated_at=? WHERE id=?",
+            (repo, _now(), item_id),
+        )
+        db.commit()
+    return get_item(item_id)
+
+
+def get_repo_for_story(item_id: str, default: str = "") -> str:
+    """Return the repo for a story, falling back to its parent idea's repo."""
+    item = get_item(item_id)
+    if not item:
+        return default
+    if item.get("repo"):
+        return item["repo"]
+    if item.get("parent_id"):
+        parent = get_item(item["parent_id"])
+        if parent and parent.get("repo"):
+            return parent["repo"]
+    return default
 
 
 def get_item(item_id: str) -> dict | None:

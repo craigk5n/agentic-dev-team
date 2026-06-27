@@ -36,8 +36,8 @@ from event_bus.config_store import get_config, patch_config
 from event_bus.prompt_store import get_prompt, set_prompt, delete_prompt, list_prompts
 from event_bus.dispatch import dispatch_forgejo_event, dispatch_plane_event
 from event_bus.work_store import (
-    create_item, get_item, grouped_items, update_state, set_pr_url,
-    unlock_next_story, find_item_by_pr_url, STATE_COLORS, get_db
+    create_item, get_item, grouped_items, update_state, set_pr_url, set_repo,
+    unlock_next_story, find_item_by_pr_url, get_repo_for_story, STATE_COLORS, get_db
 )
 from event_bus.telemetry import get_telemetry_summary, render_prometheus
 from event_bus.events.forgejo import ForgejoPREvent, ForgejoReviewEvent
@@ -293,13 +293,74 @@ async def approve_item(item_id: str):
     return updated
 
 
+def _slugify(text: str) -> str:
+    """Convert a title to a valid Forgejo repo name (lowercase, hyphens, max 40 chars)."""
+    import re
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return slug[:40]
+
+
+def _provision_project_repo(idea_id: str, title: str) -> str:
+    """
+    Create a Forgejo repo for this idea (if it doesn't exist) and register
+    the event-bus webhook on it. Returns 'owner/repo' or '' on failure.
+    """
+    try:
+        from coding_agent.forgejo_client import ForgejoClient
+        from coding_agent.config import settings as coding_settings
+    except ImportError:
+        log.warning("coding_agent_not_installed_skipping_repo_provision")
+        return ""
+
+    repo_name = _slugify(title)
+    if not repo_name:
+        return ""
+    owner = coding_settings.forgejo_base_url.rstrip("/").split("/")[-1] if False else "devadmin"
+
+    # Determine owner from Forgejo API (the token owner)
+    try:
+        import httpx
+        resp = httpx.get(
+            f"{coding_settings.forgejo_base_url}/api/v1/user",
+            headers={"Authorization": f"token {coding_settings.forgejo_api_token}"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        owner = resp.json().get("login", "devadmin")
+    except Exception as exc:
+        log.warning("forgejo_user_lookup_failed", error=str(exc))
+
+    repo_full = f"{owner}/{repo_name}"
+    try:
+        with ForgejoClient(coding_settings.forgejo_base_url, coding_settings.forgejo_api_token) as fj:
+            if not fj.repo_exists(owner, repo_name):
+                fj.create_repo(repo_name, description=title)
+            # Register webhook (idempotent — Forgejo allows duplicates but we accept that)
+            webhook_url = f"http://event-bus:8080/webhook/forgejo"
+            fj.create_webhook(owner, repo_name, webhook_url, settings.forgejo_webhook_secret)
+        log.info("project_repo_provisioned", repo=repo_full, idea=idea_id)
+    except Exception as exc:
+        log.error("project_repo_provision_failed", repo=repo_full, error=str(exc))
+        return ""
+
+    return repo_full
+
+
 async def _run_planner(item_id: str, title: str, description: str) -> None:
     """Run the Planner Agent in a thread and save resulting stories to SQLite."""
     cfg = get_config(_redis_or_503())
     model = cfg.models.planner
+
+    # Create a dedicated Forgejo repo for this project before decomposing
+    repo_full = await asyncio.to_thread(_provision_project_repo, item_id, title)
+    if repo_full:
+        set_repo(item_id, repo_full)
+        log.info("idea_repo_set", idea=item_id, repo=repo_full)
+
     try:
         from planner_agent.main import run_planner
-        plan = await asyncio.to_thread(run_planner, item_id, title, description, model)
+        plan = await asyncio.to_thread(run_planner, item_id, title, description, model,
+                                       repo_full_name=repo_full)
     except ImportError:
         log.error("planner_agent_not_installed")
         return
@@ -319,14 +380,17 @@ async def _run_planner(item_id: str, title: str, description: str) -> None:
             parent_id=item_id,
             sequence=i + 1,
             model_used=model,
+            repo=repo_full,
         )
-        log.info("story_created", id=story_item["id"], seq=i + 1, state=state, title=story_item["title"])
+        log.info("story_created", id=story_item["id"], seq=i + 1, state=state,
+                 title=story_item["title"], repo=repo_full)
 
     log.info(
         "planner_complete",
         idea_id=item_id,
         module=plan.get("module_name"),
         story_count=len(plan.get("stories", [])),
+        repo=repo_full,
     )
 
 
@@ -349,6 +413,10 @@ async def code_item(item_id: str):
 
 async def _run_coding_agent(item_id: str, title: str, description: str, story_prompt: str = "") -> None:
     """Run the Coding Agent in a thread; update state and PR URL on completion."""
+    # Prefer the explicit repo field (set by planner) over the description directive
+    repo = get_repo_for_story(item_id, default=settings.default_repo)
+    if repo and f"repo: {repo}" not in (description or ""):
+        description = f"repo: {repo}\n{description}"
     try:
         from coding_agent.main import run_coding_agent
         result = await asyncio.to_thread(run_coding_agent, item_id, title, description,

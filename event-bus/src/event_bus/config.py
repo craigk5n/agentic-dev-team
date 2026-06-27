@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     # OpenRouter API key — optional; increases rate limits when fetching model list
     openrouter_api_key: str = ""
 
+    # Fallback repo used when a story has no repo set and the planner didn't provision one
+    default_repo: str = "devadmin/sandbox"
+
     log_level: str = "INFO"
     port: int = 8080
 

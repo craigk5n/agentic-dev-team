@@ -67,3 +67,33 @@ class ForgejoClient:
         resp = self._http.get(f"{self._base}/api/v1{path}")
         resp.raise_for_status()
         return resp.json()
+
+    def create_repo(self, name: str, description: str = "", private: bool = False) -> dict[str, Any]:
+        resp = self._http.post(
+            f"{self._base}/api/v1/user/repos",
+            json={"name": name, "description": description, "private": private,
+                  "auto_init": True, "default_branch": "main"},
+        )
+        resp.raise_for_status()
+        repo = resp.json()
+        log.info("forgejo_repo_created", repo=repo.get("full_name"))
+        return repo
+
+    def repo_exists(self, owner: str, name: str) -> bool:
+        resp = self._http.get(f"{self._base}/api/v1/repos/{owner}/{name}")
+        return resp.status_code == 200
+
+    def create_webhook(self, owner: str, repo: str, url: str, secret: str,
+                       events: list[str] | None = None) -> dict[str, Any]:
+        resp = self._http.post(
+            f"{self._base}/api/v1/repos/{owner}/{repo}/hooks",
+            json={
+                "type": "gitea",
+                "active": True,
+                "events": events or ["push", "pull_request", "pull_request_review"],
+                "config": {"url": url, "content_type": "json", "secret": secret},
+            },
+        )
+        resp.raise_for_status()
+        log.info("forgejo_webhook_created", repo=f"{owner}/{repo}", url=url)
+        return resp.json()
