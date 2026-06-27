@@ -28,6 +28,22 @@ _CONFIG_KEY = "runtime_config"
 _PENDING_PREFIX = "pr_merge_pending:"
 
 
+def _notify_merged(repo_full_name: str, pr_number: int, pr_url: str) -> None:
+    """Tell the event-bus the PR was merged so it advances the story state."""
+    import httpx
+    url = f"{settings.event_bus_internal_url}/internal/pr-merged"
+    try:
+        resp = httpx.post(url, json={
+            "repo_full_name": repo_full_name,
+            "pr_number": pr_number,
+            "pr_url": pr_url,
+        }, timeout=10)
+        resp.raise_for_status()
+        log.info("pr_merge_notified", repo=repo_full_name, pr=pr_number)
+    except Exception as exc:
+        log.error("pr_merge_notify_failed", repo=repo_full_name, pr=pr_number, error=str(exc))
+
+
 def _trigger_recode(
     repo_full_name: str, pr_number: int, pr_url: str, head_ref: str, feedback: str
 ) -> None:
@@ -148,7 +164,12 @@ def _auto_merge(owner: str, repo: str, pr_number: int, repo_full_name: str) -> d
     try:
         with ForgejoClient(settings.forgejo_base_url, settings.forgejo_api_token) as fj:
             fj.merge_pr(owner, repo, pr_number)
+            pr_data = fj.get_pr(owner, repo, pr_number)
+        pr_url = pr_data.get("html_url", "")
         log.info("pr_auto_merged", repo=repo_full_name, pr=pr_number)
+        # Notify event-bus directly — Forgejo doesn't reliably fire the merged webhook
+        # for API-triggered merges, so we push the state update ourselves.
+        _notify_merged(repo_full_name, pr_number, pr_url)
         return {"gate_status": "merged"}
     except Exception as exc:
         log.error("pr_auto_merge_failed", repo=repo_full_name, pr=pr_number, error=str(exc))

@@ -200,6 +200,11 @@ async def forgejo_webhook(
         log.info("pr_merged_no_story", pr_url=pr_url)
         return {"result": "skipped", "reason": "no matching story for PR"}
 
+    # A new commit on the PR resets the recode retry counter
+    if event.action == "synchronize":
+        retry_key = f"recode_retries:{event.repo_full_name}:{event.pr_number}"
+        _redis_or_503().delete(retry_key)
+
     outcome = dispatch_forgejo_event(event, _queue_or_503())
     log.info("forgejo_webhook", result=outcome.result, reason=outcome.reason, job=outcome.job_id)
     return {"result": outcome.result, "job_id": outcome.job_id}
@@ -422,11 +427,30 @@ async def _run_recode_agent(review_event: ForgejoReviewEvent) -> None:
         update_state(item_id, "in-review")
 
 
+_MAX_RECODE_RETRIES = 3
+
+
+@app.post("/internal/pr-merged", status_code=status.HTTP_200_OK)
+async def internal_pr_merged(payload: dict):
+    """Called by the reviewer gate after auto-merging a PR via the API."""
+    pr_url = payload.get("pr_url", "")
+    pr_number = payload.get("pr_number", 0)
+    item = find_item_by_pr_url(pr_url) if pr_url else None
+    if not item:
+        raise HTTPException(status_code=404, detail="no story found for this PR")
+    updated = update_state(item["id"], "merged")
+    unlocked = unlock_next_story(item["id"])
+    log.info("internal_pr_merged", item_id=item["id"], pr=pr_number,
+             next=unlocked["id"] if unlocked else None)
+    return {"merged": updated, "unlocked": unlocked["id"] if unlocked else None}
+
+
 @app.post("/internal/recode-for-pr", status_code=status.HTTP_202_ACCEPTED)
 async def internal_recode_for_pr(payload: dict):
     """
     Called by the reviewer gate (worker) when checks fail.
     Triggers the recode agent without going through the Forgejo webhook chain.
+    Capped at _MAX_RECODE_RETRIES attempts per PR to break infinite loops.
     """
     repo_full_name = payload.get("repo_full_name", "")
     pr_number = payload.get("pr_number", 0)
@@ -436,6 +460,16 @@ async def internal_recode_for_pr(payload: dict):
     item = find_item_by_pr_url(pr_url) if pr_url else None
     if not item:
         raise HTTPException(status_code=404, detail="no story found for this PR")
+
+    # Retry cap — prevent infinite recode loops
+    r = _redis_or_503()
+    retry_key = f"recode_retries:{repo_full_name}:{pr_number}"
+    retries = int(r.get(retry_key) or 0)
+    if retries >= _MAX_RECODE_RETRIES:
+        log.warning("recode_retry_cap_reached", pr=pr_number, repo=repo_full_name, retries=retries)
+        update_state(item["id"], "changes-requested")
+        return {"status": "retry_cap_reached", "retries": retries, "item_id": item["id"]}
+    r.setex(retry_key, 86400, retries + 1)
 
     owner, repo_name = repo_full_name.split("/", 1)
     review_comments = [{"path": "", "body": feedback}]
@@ -452,8 +486,9 @@ async def internal_recode_for_pr(payload: dict):
     except Exception as exc:
         log.warning("recode_comment_fetch_failed", error=str(exc))
 
-    log.info("internal_recode_triggered", item_id=item["id"], pr=pr_number, repo=repo_full_name)
-    review_fix_prompt = get_prompt(_redis_or_503(), "coder.review_fix")
+    log.info("internal_recode_triggered", item_id=item["id"], pr=pr_number,
+             repo=repo_full_name, attempt=retries + 1)
+    review_fix_prompt = get_prompt(r, "coder.review_fix")
     from coding_agent.main import fix_pr_review
     asyncio.create_task(asyncio.to_thread(
         fix_pr_review,
@@ -463,7 +498,7 @@ async def internal_recode_for_pr(payload: dict):
         review_fix_prompt=review_fix_prompt,
     ))
     update_state(item["id"], "changes-requested")
-    return {"status": "recode_started", "item_id": item["id"]}
+    return {"status": "recode_started", "item_id": item["id"], "attempt": retries + 1}
 
 
 @app.post("/api/items/{item_id}/plan", status_code=status.HTTP_202_ACCEPTED)

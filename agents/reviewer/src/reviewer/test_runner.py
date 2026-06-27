@@ -44,14 +44,20 @@ def detect_test_command(repo_dir: str) -> list[str]:
 
 def _try_install_deps(repo_dir: str) -> None:
     p = Path(repo_dir)
-    if (p / "pyproject.toml").exists() or (p / "setup.py").exists():
-        subprocess.run(
-            ["pip", "install", "-e", ".", "--quiet", "--no-deps"],
-            cwd=repo_dir, capture_output=True, timeout=120,
-        )
-    elif (p / "requirements.txt").exists():
+    if (p / "requirements.txt").exists():
         subprocess.run(
             ["pip", "install", "-r", "requirements.txt", "--quiet"],
+            cwd=repo_dir, capture_output=True, timeout=120,
+        )
+    if (p / "pyproject.toml").exists() or (p / "setup.py").exists():
+        # Install with all extras so test dependencies (e.g. pytest) are included
+        subprocess.run(
+            ["pip", "install", "-e", ".[test,dev]", "--quiet"],
+            cwd=repo_dir, capture_output=True, timeout=120,
+        )
+        # Fallback: plain install if extras aren't defined
+        subprocess.run(
+            ["pip", "install", "-e", ".", "--quiet"],
             cwd=repo_dir, capture_output=True, timeout=120,
         )
 
