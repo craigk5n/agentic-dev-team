@@ -37,6 +37,8 @@ def run_code_reviewer(
     base_ref: str = "main",
     head_ref: str = "",
     model_override: str = "",
+    system_prompt: str = "",
+    task_prompt: str = "",
 ) -> dict:
     r, lim = _redis_and_limits()
     from event_bus.limits import acquire_slot, release_slot
@@ -55,6 +57,8 @@ def run_code_reviewer(
             base_ref=base_ref,
             head_ref=head_ref,
             model_override=model_override,
+            system_prompt=system_prompt,
+            task_prompt=task_prompt,
         )
     except ImportError:
         log.error("reviewer_not_installed")

@@ -115,11 +115,14 @@ def handle_pr_event(
     from rq import Queue
     from event_bus.config import settings
     from event_bus.config_store import get_config
+    from event_bus.prompt_store import get_prompt
     from event_bus.jobs.pr_jobs import run_code_reviewer, run_tester, run_security_scanner
     from event_bus.limits import check_rate
 
     r = redis.from_url(settings.redis_url, decode_responses=False)
     config = get_config(r)
+    reviewer_system_prompt = get_prompt(r, "reviewer.system")
+    reviewer_task_prompt = get_prompt(r, "reviewer.task")
 
     lim = config.limits
     rejected_roles = []
@@ -151,7 +154,9 @@ def handle_pr_event(
     jobs = []
     if reviewer_ok:
         jobs.append(q.enqueue(run_code_reviewer, **base_kwargs,
-                              model_override=config.models.reviewer))
+                              model_override=config.models.reviewer,
+                              system_prompt=reviewer_system_prompt,
+                              task_prompt=reviewer_task_prompt))
     if tester_ok:
         jobs.append(q.enqueue(run_tester, **base_kwargs,
                               model_override=config.models.tester))

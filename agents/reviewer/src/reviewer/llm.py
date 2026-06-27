@@ -90,14 +90,27 @@ Rules:
 """
 
 
-def review_diff(diff: str, *, model: str, api_key: str = "") -> dict:
+def review_diff(
+    diff: str,
+    *,
+    model: str,
+    api_key: str = "",
+    system_prompt: str = "",
+    task_prompt: str = "",
+) -> dict:
     """Call the LLM to review a git diff. Returns a structured verdict dict."""
     truncated = diff[:_MAX_DIFF_CHARS]
+    system = system_prompt or _REVIEW_SYSTEM
+    task = task_prompt or _REVIEW_PROMPT
+    try:
+        user_content = task.format(diff=truncated)
+    except (KeyError, ValueError):
+        user_content = task
     raw = complete(
         model,
         [
-            {"role": "system", "content": _REVIEW_SYSTEM},
-            {"role": "user", "content": _REVIEW_PROMPT.format(diff=truncated)},
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_content},
         ],
         api_key=api_key,
         telemetry_role="code_review",
@@ -120,12 +133,23 @@ Respond ONLY with valid JSON:
 """
 
 
-def summarise_test_output(output: str, *, model: str, api_key: str = "") -> dict:
+def summarise_test_output(
+    output: str,
+    *,
+    model: str,
+    api_key: str = "",
+    task_prompt: str = "",
+) -> dict:
     """Ask the LLM to parse raw test output into a structured verdict."""
     truncated = output[:_MAX_DIFF_CHARS]
+    template = task_prompt or _SUMMARISE_PROMPT
+    try:
+        content = template.format(output=truncated)
+    except (KeyError, ValueError):
+        content = template
     raw = complete(
         model,
-        [{"role": "user", "content": _SUMMARISE_PROMPT.format(output=truncated)}],
+        [{"role": "user", "content": content}],
         api_key=api_key,
         telemetry_role="test_run",
     )

@@ -33,6 +33,7 @@ from dataclasses import asdict
 
 from event_bus.config import settings
 from event_bus.config_store import get_config, patch_config
+from event_bus.prompt_store import get_prompt, set_prompt, delete_prompt, list_prompts
 from event_bus.dispatch import dispatch_forgejo_event, dispatch_plane_event
 from event_bus.work_store import (
     create_item, get_item, grouped_items, update_state, set_pr_url,
@@ -321,15 +322,17 @@ async def code_item(item_id: str):
         raise HTTPException(status_code=409, detail=f"story is '{item['state']}', not ready")
     # Claim atomically before returning
     update_state(item_id, "in-progress")
-    asyncio.create_task(_run_coding_agent(item_id, item["title"], item["description"] or ""))
+    story_prompt = get_prompt(_redis_or_503(), "coder.story")
+    asyncio.create_task(_run_coding_agent(item_id, item["title"], item["description"] or "", story_prompt))
     return {"status": "coding_started", "id": item_id}
 
 
-async def _run_coding_agent(item_id: str, title: str, description: str) -> None:
+async def _run_coding_agent(item_id: str, title: str, description: str, story_prompt: str = "") -> None:
     """Run the Coding Agent in a thread; update state and PR URL on completion."""
     try:
         from coding_agent.main import run_coding_agent
-        result = await asyncio.to_thread(run_coding_agent, item_id, title, description)
+        result = await asyncio.to_thread(run_coding_agent, item_id, title, description,
+                                         story_prompt=story_prompt)
     except ImportError:
         log.error("coding_agent_not_installed")
         update_state(item_id, "ready")  # unclaim
@@ -381,6 +384,7 @@ async def _run_recode_agent(review_event: ForgejoReviewEvent) -> None:
         if review_event.review.body.strip():
             review_comments = [{"path": "", "body": review_event.review.body}]
 
+    review_fix_prompt = get_prompt(_redis_or_503(), "coder.review_fix")
     try:
         from coding_agent.main import fix_pr_review
         result = await asyncio.to_thread(
@@ -388,6 +392,7 @@ async def _run_recode_agent(review_event: ForgejoReviewEvent) -> None:
             item["id"], item["title"], item.get("description", ""),
             review_event.head_ref, review_event.repo_full_name,
             review_comments,
+            review_fix_prompt=review_fix_prompt,
         )
     except Exception as exc:
         log.error("recode_agent_failed", item_id=item_id, error=str(exc))
@@ -530,6 +535,38 @@ async def patch_runtime_config(request: Request):
     except Exception:
         raise HTTPException(status_code=400, detail="invalid JSON")
     return asdict(patch_config(_redis_or_503(), body))
+
+
+# ── Prompt management API ─────────────────────────────────────────────────────
+
+@app.get("/api/prompts")
+async def get_prompts():
+    """Return all agent prompt templates with their defaults and current values."""
+    return list_prompts(_redis_or_503())
+
+
+@app.put("/api/prompts/{key:path}")
+async def update_prompt(key: str, request: Request):
+    """Save a custom prompt for the given key."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid JSON")
+    value = body.get("value", "")
+    if not isinstance(value, str):
+        raise HTTPException(status_code=400, detail="'value' must be a string")
+    try:
+        set_prompt(_redis_or_503(), key, value)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return {"key": key, "saved": True}
+
+
+@app.delete("/api/prompts/{key:path}", status_code=status.HTTP_200_OK)
+async def reset_prompt(key: str):
+    """Reset a prompt to its built-in default."""
+    delete_prompt(_redis_or_503(), key)
+    return {"key": key, "reset": True}
 
 
 # ── PR approval (Phase 6) ──────────────────────────────────────────────────────

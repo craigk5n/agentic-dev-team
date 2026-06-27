@@ -46,6 +46,7 @@ def run_coding_agent(
     title: str,
     description: str,
     model_override: str = "",
+    story_prompt: str = "",
 ) -> dict[str, Any]:
     """
     Run the full coding agent loop for one story.
@@ -82,6 +83,7 @@ def run_coding_agent(
                 repo_dir=tmpdir,
                 model=model,
                 openrouter_api_key=settings.openrouter_api_key,
+                prompt_template=story_prompt,
             )
 
             sha = git_ops.commit_all(tmpdir, f"feat: {title}\n\n{summary}")
@@ -124,6 +126,7 @@ def fix_pr_review(
     repo_full_name: str,
     review_comments: list[dict[str, Any]],
     model_override: str = "",
+    review_fix_prompt: str = "",
 ) -> dict[str, Any]:
     """
     Push a fix commit to an existing PR branch addressing review feedback.
@@ -152,6 +155,7 @@ def fix_pr_review(
                 model=model,
                 openrouter_api_key=settings.openrouter_api_key,
                 review_comments=review_comments,
+                prompt_template=review_fix_prompt,
             )
 
             sha = git_ops.commit_all(tmpdir, f"fix: address review comments\n\n{summary[:500]}")

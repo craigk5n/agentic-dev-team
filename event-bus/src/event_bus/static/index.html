@@ -559,6 +559,83 @@ button.merge-btn {
   cursor: pointer;
 }
 button.merge-btn:hover { background: rgba(34,197,94,.25); }
+/* ── Prompt editor ───────────────────────────────────────── */
+.prompt-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 18px 20px;
+  margin-bottom: 16px;
+}
+.prompt-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 4px;
+}
+.prompt-label {
+  font-weight: 600;
+  font-size: 14px;
+}
+.prompt-custom-badge {
+  font-size: 11px;
+  background: rgba(99,102,241,.18);
+  color: #818cf8;
+  border-radius: 4px;
+  padding: 1px 7px;
+  margin-left: 8px;
+}
+.prompt-desc {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 10px;
+}
+.prompt-textarea {
+  width: 100%;
+  min-height: 140px;
+  background: var(--surface2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  resize: vertical;
+  box-sizing: border-box;
+}
+.prompt-textarea:focus { outline: none; border-color: var(--accent); }
+.prompt-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+  align-items: center;
+}
+.prompt-char-count {
+  font-size: 11px;
+  color: var(--muted);
+  margin-left: auto;
+}
+.prompt-save-btn {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  padding: 5px 14px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.prompt-save-btn:hover { opacity: .85; }
+.prompt-reset-btn {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.prompt-reset-btn:hover { color: var(--text); border-color: var(--text); }
 .seq-badge {
   font-size: 11px;
   color: var(--muted);
@@ -648,6 +725,7 @@ button.merge-btn:hover { background: rgba(34,197,94,.25); }
     <button class="tab active" data-tab="board">Board</button>
     <button class="tab" data-tab="ideas">Ideas</button>
     <button class="tab" data-tab="config">Config</button>
+    <button class="tab" data-tab="prompts">Prompts</button>
     <button class="tab" data-tab="telemetry">Telemetry</button>
     <button class="tab" data-tab="health">Health</button>
   </nav>
@@ -779,6 +857,16 @@ button.merge-btn:hover { background: rgba(34,197,94,.25); }
   </div>
 
   <button class="primary" id="save-config-btn">Save Config</button>
+</section>
+
+<!-- ── Prompts ─────────────────────────────────────────────── -->
+<section id="prompts" class="tab-panel">
+  <h2>Agent Prompts</h2>
+  <p style="color:var(--muted);font-size:13px;margin-bottom:18px">
+    Edit the prompt templates used by each agent role. Changes take effect immediately —
+    no restart needed. Use the <strong>Reset</strong> button to restore the built-in default.
+  </p>
+  <div id="prompts-list"></div>
 </section>
 
 <!-- ── Telemetry ───────────────────────────────────────────── -->
@@ -1198,6 +1286,83 @@ document.getElementById('save-config-btn').addEventListener('click', async () =>
   }
 });
 
+// ── Prompts ───────────────────────────────────────────────────────────────────
+
+async function loadPrompts() {
+  const container = document.getElementById('prompts-list');
+  container.innerHTML = '<p style="color:var(--muted)">Loading…</p>';
+  let prompts;
+  try {
+    const r = await fetch('/api/prompts', { cache: 'no-store' });
+    prompts = await r.json();
+  } catch (e) {
+    container.innerHTML = `<p style="color:#f87171">Error loading prompts: ${e}</p>`;
+    return;
+  }
+  container.innerHTML = '';
+  prompts.forEach(p => {
+    const card = document.createElement('div');
+    card.className = 'prompt-card';
+    card.innerHTML = `
+      <div class="prompt-header">
+        <span class="prompt-label">${p.label}${p.is_custom ? '<span class="prompt-custom-badge">custom</span>' : ''}</span>
+        <code style="font-size:11px;color:var(--muted)">${p.key}</code>
+      </div>
+      <div class="prompt-desc">${p.description}</div>
+      <textarea class="prompt-textarea" data-key="${p.key}" spellcheck="false">${escHtml(p.current)}</textarea>
+      <div class="prompt-actions">
+        <button class="prompt-save-btn" data-key="${p.key}">Save</button>
+        <button class="prompt-reset-btn" data-key="${p.key}" ${!p.is_custom ? 'disabled style="opacity:.4;cursor:default"' : ''}>Reset to default</button>
+        <span class="prompt-char-count" id="cc-${p.key.replace(/\./g,'-')}">${p.current.length} chars</span>
+      </div>`;
+    container.appendChild(card);
+
+    const ta = card.querySelector('textarea');
+    const cc = card.querySelector('.prompt-char-count');
+    ta.addEventListener('input', () => { cc.textContent = ta.value.length + ' chars'; });
+
+    card.querySelector('.prompt-save-btn').addEventListener('click', async () => {
+      const btn = card.querySelector('.prompt-save-btn');
+      btn.textContent = 'Saving…'; btn.disabled = true;
+      try {
+        const res = await fetch(`/api/prompts/${encodeURIComponent(p.key)}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ value: ta.value }),
+        });
+        if (!res.ok) throw new Error(await res.text());
+        toast('Prompt saved ✓');
+        loadPrompts();
+      } catch (e) {
+        toast('Error: ' + e, true);
+        btn.textContent = 'Save'; btn.disabled = false;
+      }
+    });
+
+    card.querySelector('.prompt-reset-btn').addEventListener('click', async () => {
+      if (!confirm('Reset this prompt to the built-in default?')) return;
+      try {
+        await fetch(`/api/prompts/${encodeURIComponent(p.key)}`, { method: 'DELETE' });
+        toast('Prompt reset to default ✓');
+        loadPrompts();
+      } catch (e) {
+        toast('Error: ' + e, true);
+      }
+    });
+  });
+}
+
+function escHtml(str) {
+  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// Load prompts when the tab is activated
+document.querySelectorAll('.tab').forEach(t => {
+  if (t.dataset.tab === 'prompts') {
+    t.addEventListener('click', loadPrompts);
+  }
+});
+
 // ── Telemetry ─────────────────────────────────────────────────────────────────
 
 document.getElementById('refresh-telem-btn').addEventListener('click', loadTelemetry);
@@ -1331,7 +1496,7 @@ async function loadBoard() {
   const container = document.getElementById('board-items');
   container.innerHTML = '<div class="board-empty">Loading…</div>';
 
-  const r = await fetch('/api/items');
+  const r = await fetch('/api/items', { cache: 'no-store' });
   if (!r.ok) {
     const err = await r.json().catch(() => ({}));
     container.innerHTML = `<div class="board-empty" style="color:var(--red)">${err.detail || 'Failed to load items'}</div>`;
