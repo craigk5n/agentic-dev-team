@@ -21,7 +21,7 @@ import structlog
 from coding_agent.config import settings
 from coding_agent.forgejo_client import ForgejoClient
 from coding_agent import git_ops
-from coding_agent.claude_agent import run_agent
+from coding_agent.opencode_agent import run_opencode_agent
 
 log = structlog.get_logger()
 
@@ -74,14 +74,13 @@ def run_coding_agent(
             git_ops.configure_identity(tmpdir, settings.git_author_name, settings.git_author_email)
             git_ops.create_branch(tmpdir, branch)
 
-            model = model_override or settings.anthropic_model
-            summary = run_agent(
+            model = model_override or settings.model_coder
+            summary = run_opencode_agent(
                 story_title=title,
                 story_description=description,
                 repo_dir=tmpdir,
-                api_key=settings.anthropic_api_key,
                 model=model,
-                max_tokens=settings.anthropic_max_tokens,
+                openrouter_api_key=settings.openrouter_api_key,
             )
 
             sha = git_ops.commit_all(tmpdir, f"feat: {title}\n\n{summary}")

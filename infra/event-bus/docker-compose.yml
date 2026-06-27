@@ -24,6 +24,8 @@ x-event-bus-env: &event-bus-env
   # Idea / Planner model — defaults to sonnet via OpenRouter
   MODEL_IDEA: ${MODEL_IDEA:-openrouter/anthropic/claude-sonnet-4-6}
   MODEL_PLANNER: ${MODEL_PLANNER:-openrouter/anthropic/claude-sonnet-4-6}
+  # Coding Agent — uses opencode with OpenRouter free models (no Anthropic key needed)
+  MODEL_CODER: ${MODEL_CODER:-openrouter/nvidia/nemotron-3-super-120b-a12b:free}
   # Reviewer Agent — set OPENROUTER_API_KEY to route through OpenRouter
   OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
   MODEL_REVIEWER: ${MODEL_REVIEWER:-openrouter/anthropic/claude-sonnet-4-6}
@@ -77,12 +79,15 @@ services:
       start_period: 10s
     volumes:
       - event-bus-data:/data
+      # opencode binary + config (coding agent uses opencode, no Anthropic key needed)
+      - /home/cknudsen/.opencode/bin/opencode:/usr/local/bin/opencode:ro
+      - /home/cknudsen/.config/opencode:/root/.config/opencode:ro
     depends_on:
       - event-bus-redis
     deploy:
       resources:
         limits:
-          memory: 512m
+          memory: 1g
 
   event-bus-worker:
     build:
