@@ -66,7 +66,68 @@ def checkout_branch(repo_dir: str, branch_name: str) -> None:
     log.info("git_checkout", branch=branch_name)
 
 
+_PYTHON_GITIGNORE = """\
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+*.egg
+.env
+"""
+
+_NODE_GITIGNORE = """\
+node_modules/
+dist/
+.env
+*.log
+"""
+
+_GO_GITIGNORE = """\
+*.exe
+*.test
+*.out
+dist/
+vendor/
+.env
+"""
+
+
+def _ensure_gitignore(repo_dir: str) -> None:
+    """Create a language-appropriate .gitignore if one doesn't exist."""
+    root = Path(repo_dir)
+    if (root / ".gitignore").exists():
+        return
+    # Detect language from files present
+    has_py = any(root.rglob("*.py"))
+    has_go = any(root.rglob("go.mod"))
+    has_node = any(root.rglob("package.json"))
+    if has_py:
+        (root / ".gitignore").write_text(_PYTHON_GITIGNORE)
+        log.info("gitignore_created", lang="python")
+    elif has_go:
+        (root / ".gitignore").write_text(_GO_GITIGNORE)
+        log.info("gitignore_created", lang="go")
+    elif has_node:
+        (root / ".gitignore").write_text(_NODE_GITIGNORE)
+        log.info("gitignore_created", lang="node")
+
+
 def commit_all(repo_dir: str, message: str) -> str:
+    _ensure_gitignore(repo_dir)
+    # Un-track any artifact dirs that are now covered by .gitignore
+    for pattern in ["__pycache__", "node_modules"]:
+        subprocess.run(
+            ["git", "rm", "-r", "--cached", "--ignore-unmatch", pattern],
+            cwd=repo_dir, capture_output=True,
+        )
+    # Un-track egg-info dirs (name varies, find them)
+    for p in Path(repo_dir).glob("*.egg-info"):
+        subprocess.run(
+            ["git", "rm", "-r", "--cached", "--ignore-unmatch", p.name],
+            cwd=repo_dir, capture_output=True,
+        )
     _run(["git", "add", "-A"], cwd=repo_dir)
     result = subprocess.run(
         ["git", "diff", "--cached", "--stat"],
