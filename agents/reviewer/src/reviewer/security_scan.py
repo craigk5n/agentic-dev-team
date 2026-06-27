@@ -161,6 +161,17 @@ def run_security_scan(
         forgejo.post_pr_comment(owner, repo, pr_number, comment)
 
     r = redis.from_url(settings.redis_url, decode_responses=False)
+
+    # Record a scan call in telemetry (cost=0, no LLM used — static analysis only)
+    try:
+        import time
+        date = time.strftime("%Y-%m-%d")
+        key = f"telemetry:llm:{date}"
+        r.hincrby(key, "security::calls", 1)
+        r.expire(key, 30 * 86_400)
+    except Exception:
+        pass
+
     all_in = store_and_check(r, repo_full_name, pr_number, "security", verdict, settings.verdict_ttl)
     if all_in:
         post_aggregated_and_gate(r, repo_full_name, pr_number, all_in)

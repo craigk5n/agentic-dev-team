@@ -113,7 +113,7 @@ def review_diff(
             {"role": "user", "content": user_content},
         ],
         api_key=api_key,
-        telemetry_role="code_review",
+        telemetry_role="reviewer",
     )
     return _parse_json_response(raw, role="code_review")
 
@@ -151,7 +151,7 @@ def summarise_test_output(
         model,
         [{"role": "user", "content": content}],
         api_key=api_key,
-        telemetry_role="test_run",
+        telemetry_role="tester",
     )
     return _parse_json_response(raw, role="test_run")
 
