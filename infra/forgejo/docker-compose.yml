@@ -1,0 +1,106 @@
+# Forgejo — self-hosted Git forge
+# Run from the infra/ directory: docker compose -f forgejo/docker-compose.yml --env-file .env up -d
+
+version: "3.8"
+
+services:
+  forgejo-db:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: forgejo
+      POSTGRES_USER: forgejo
+      POSTGRES_PASSWORD: ${FORGEJO_DB_PASSWORD}
+    volumes:
+      - forgejo-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U forgejo"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+
+  forgejo:
+    image: codeberg.org/forgejo/forgejo:10
+    restart: unless-stopped
+    ports:
+      - "${FORGEJO_HTTP_PORT:-3000}:3000"
+      - "${FORGEJO_SSH_PORT:-2222}:22"
+    environment:
+      USER_UID: 1000
+      USER_GID: 1000
+      # Database
+      FORGEJO__database__DB_TYPE: postgres
+      FORGEJO__database__HOST: forgejo-db:5432
+      FORGEJO__database__NAME: forgejo
+      FORGEJO__database__USER: forgejo
+      FORGEJO__database__PASSWD: ${FORGEJO_DB_PASSWORD}
+      # Server
+      FORGEJO__server__ROOT_URL: ${FORGEJO_URL:-http://localhost:3000}
+      FORGEJO__server__SSH_DOMAIN: ${FORGEJO_SSH_DOMAIN:-localhost}
+      FORGEJO__server__SSH_PORT: ${FORGEJO_SSH_PORT:-2222}
+      FORGEJO__server__LFS_START_SERVER: "true"
+      # Security
+      FORGEJO__security__SECRET_KEY: ${FORGEJO_SECRET_KEY}
+      FORGEJO__security__INTERNAL_TOKEN: ${FORGEJO_INTERNAL_TOKEN}
+      # Registration — disable after initial admin creation
+      FORGEJO__service__DISABLE_REGISTRATION: "${FORGEJO_DISABLE_REGISTRATION:-false}"
+      # Webhooks: allow delivery to local addresses (e.g., Plane running on same host)
+      FORGEJO__webhook__ALLOWED_HOST_LIST: "*"
+      FORGEJO__webhook__SKIP_TLS_VERIFY: "${FORGEJO_WEBHOOK_SKIP_TLS:-true}"
+      # Mailer (optional — set SMTP vars in .env to enable)
+      FORGEJO__mailer__ENABLED: "${FORGEJO_MAILER_ENABLED:-false}"
+      FORGEJO__mailer__SMTP_ADDR: "${FORGEJO_SMTP_HOST:-}"
+      FORGEJO__mailer__SMTP_PORT: "${FORGEJO_SMTP_PORT:-587}"
+      FORGEJO__mailer__FROM: "${FORGEJO_SMTP_FROM:-}"
+      FORGEJO__mailer__USER: "${FORGEJO_SMTP_USER:-}"
+      FORGEJO__mailer__PASSWD: "${FORGEJO_SMTP_PASSWORD:-}"
+      # Actions (CI)
+      FORGEJO__actions__ENABLED: "true"
+    volumes:
+      - forgejo-data:/data
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      forgejo-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+  # Forgejo Actions runner — executes CI workflows
+  # The runner token must be obtained from Forgejo admin UI after first start:
+  #   Site Administration → Actions → Runners → Create runner
+  # Then set FORGEJO_RUNNER_TOKEN in .env and restart this service.
+  forgejo-runner:
+    image: code.forgejo.org/forgejo/runner:3
+    restart: unless-stopped
+    environment:
+      CONFIG_FILE: /runner/config.yml
+    volumes:
+      - forgejo-runner-data:/data
+      - ./runner-config.yml:/runner/config.yml:ro
+      # Docker socket lets runner spawn containers for each CI job
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      forgejo:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+
+volumes:
+  forgejo-db-data:
+  forgejo-data:
+  forgejo-runner-data:

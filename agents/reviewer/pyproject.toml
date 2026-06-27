@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "reviewer-agent"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "httpx>=0.27.0",
+    "litellm>=1.40.0",
+    "pydantic-settings>=2.6.0",
+    "redis>=5.0.0",
+    "structlog>=24.4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "fakeredis>=2.23.0",
+    "pytest>=8.3.0",
+    "pytest-cov>=5.0.0",
+    "respx>=0.21.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/reviewer"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--cov=reviewer --cov-report=term-missing --cov-fail-under=80"

@@ -1,0 +1,35 @@
+# Forgejo Actions runner configuration
+# https://code.forgejo.org/forgejo/runner
+
+log:
+  level: info
+
+runner:
+  file: /data/.runner
+  capacity: 2          # concurrent jobs; raise if the host has spare CPU
+  env_vars: {}
+  timeout: 3h
+  insecure: false
+  fetch_timeout: 5s
+  fetch_interval: 2s
+  labels:
+    - "ubuntu-latest:docker://node:20-bullseye"
+    - "ubuntu-22.04:docker://node:20-bullseye"
+
+cache:
+  enabled: true
+  dir: /data/cache
+  host: ""
+  port: 0
+
+container:
+  network: ""
+  privileged: false
+  options:
+  valid_volumes: []
+  docker_host: ""
+  # Pull images every time to avoid stale layers in CI
+  force_pull: false
+
+host:
+  workdir_parent: /data/work

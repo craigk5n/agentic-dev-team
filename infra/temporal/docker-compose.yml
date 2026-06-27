@@ -1,0 +1,102 @@
+# Temporal durable workflow server + Web UI
+#
+# Start alongside the other services:
+#   docker compose -f temporal/docker-compose.yml --env-file ../.env up -d
+#
+# Temporal Web UI:  http://localhost:${TEMPORAL_UI_PORT:-8233}
+# Temporal gRPC:   localhost:${TEMPORAL_PORT:-7233}  (used by workers + event-bus)
+#
+# To connect the Temporal worker:
+#   docker compose -f temporal/docker-compose.yml \
+#                  -f event-bus/docker-compose.yml \
+#                  --env-file .env up -d temporal-worker
+#
+# Set TEMPORAL_ADDRESS=temporal:7233 in .env to enable the Temporal signal path
+# for PR approvals (POST /api/prs/.../approve).
+
+version: "3.8"
+
+services:
+  temporal-postgresql:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: ${TEMPORAL_DB_PASSWORD:-temporal-dev}
+      POSTGRES_DB: temporal
+    volumes:
+      - temporal_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  temporal:
+    image: temporalio/auto-setup:1.24.2
+    depends_on:
+      temporal-postgresql:
+        condition: service_healthy
+    environment:
+      DB: postgresql
+      DB_PORT: 5432
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: ${TEMPORAL_DB_PASSWORD:-temporal-dev}
+      POSTGRES_SEEDS: temporal-postgresql
+      DYNAMIC_CONFIG_FILE_PATH: /etc/temporal/dynamicconfig/development-sql.yaml
+    ports:
+      - "${TEMPORAL_PORT:-7233}:7233"
+    volumes:
+      - ./dynamicconfig:/etc/temporal/dynamicconfig
+    restart: unless-stopped
+
+  temporal-ui:
+    image: temporalio/ui:2.26.2
+    depends_on:
+      - temporal
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:3000
+    ports:
+      - "${TEMPORAL_UI_PORT:-8233}:8080"
+    restart: unless-stopped
+
+  # Temporal worker — runs the PR review workflow
+  # Shares plane_network so it can reach Redis and Forgejo
+  temporal-worker:
+    build:
+      context: ../..
+      dockerfile: event-bus/Dockerfile
+    image: dev-agents/event-bus:latest
+    command: ["python", "-m", "temporal_worker.worker"]
+    depends_on:
+      - temporal
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      FORGEJO_API_TOKEN: ${FORGEJO_API_TOKEN}
+      FORGEJO_BASE_URL: http://forgejo:3000
+      FORGEJO_GIT_URL: http://forgejo:3000
+      REDIS_URL: redis://plane-redis:6379/1
+      MODEL_REVIEWER: ${MODEL_REVIEWER:-openrouter/anthropic/claude-sonnet-4-6}
+      MODEL_TESTER: ${MODEL_TESTER:-openrouter/anthropic/claude-haiku-4-5}
+      MODEL_SECURITY: ${MODEL_SECURITY:-openrouter/anthropic/claude-haiku-4-5}
+    networks:
+      - plane_network
+      - temporal_network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+volumes:
+  temporal_pg_data:
+
+networks:
+  plane_network:
+    external: true
+    name: plane_default
+  temporal_network:
+    driver: bridge

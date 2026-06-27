@@ -1,0 +1,41 @@
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(extra="ignore")
+
+    # LLM credentials — set openrouter_api_key to route everything through OpenRouter,
+    # or anthropic_api_key for direct Anthropic calls.
+    openrouter_api_key: str = ""
+    anthropic_api_key: str = ""
+
+    # Per-role model selection (litellm model strings).
+    # OpenRouter format:  openrouter/{provider}/{model}
+    # Anthropic direct:   anthropic/{model}
+    # Ollama local:       ollama/{model}
+    model_reviewer: str = "openrouter/anthropic/claude-sonnet-4-6"
+    model_tester: str = "openrouter/anthropic/claude-haiku-4-5"
+    model_security: str = "openrouter/anthropic/claude-haiku-4-5"
+
+    # Forgejo
+    forgejo_api_token: str = ""
+    forgejo_base_url: str = "http://localhost:3000"
+    forgejo_git_url: str = ""
+
+    # Redis — same db as event-bus worker
+    redis_url: str = "redis://localhost:6379/1"
+    # How long verdicts live in Redis (seconds)
+    verdict_ttl: int = 3600
+
+    log_level: str = "INFO"
+
+    @property
+    def effective_api_key(self) -> str:
+        return self.openrouter_api_key or self.anthropic_api_key
+
+    @property
+    def forgejo_clone_base(self) -> str:
+        return self.forgejo_git_url or self.forgejo_base_url
+
+
+settings = Settings()
