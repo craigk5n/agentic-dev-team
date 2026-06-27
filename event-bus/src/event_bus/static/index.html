@@ -846,6 +846,35 @@ button.code-btn:hover { background: rgba(59,130,246,.25); }
   </div>
 
   <button class="primary" id="save-config-btn">Save Config</button>
+
+  <!-- Approve PR — only needed when PR Merge Approval gate is ON -->
+  <hr class="divider">
+  <div class="card">
+    <div class="section-title">Approve PR for Merge</div>
+    <p style="color:var(--muted);font-size:12px;margin-bottom:14px">
+      Only needed when the <strong>PR Merge Approval</strong> gate is ON.
+    </p>
+    <div class="approve-form">
+      <div class="field">
+        <label>Owner</label>
+        <input id="apr-owner" placeholder="devadmin">
+      </div>
+      <div class="field">
+        <label>Repo</label>
+        <input id="apr-repo" placeholder="sandbox">
+      </div>
+      <div class="field">
+        <label>PR #</label>
+        <input id="apr-pr" name="pr_number" type="number" min="1" placeholder="42">
+      </div>
+      <div class="field">
+        <label>Approver</label>
+        <input id="apr-approver" value="human" placeholder="human">
+      </div>
+      <button class="primary" id="approve-btn">Approve →</button>
+    </div>
+    <div id="approve-result" class="result"></div>
+  </div>
 </section>
 
 <!-- ── Prompts ─────────────────────────────────────────────── -->
@@ -880,36 +909,6 @@ button.code-btn:hover { background: rgba(59,130,246,.25); }
   </div>
 
   <div class="role-grid" id="role-grid"></div>
-
-  <hr class="divider">
-
-  <!-- Approve PR -->
-  <div class="card">
-    <div class="section-title">Approve PR for Merge</div>
-    <p style="color:var(--muted);font-size:12px;margin-bottom:14px">
-      Only needed when the <strong>PR Merge Approval</strong> gate is ON.
-    </p>
-    <div class="approve-form">
-      <div class="field">
-        <label>Owner</label>
-        <input id="apr-owner" placeholder="devadmin">
-      </div>
-      <div class="field">
-        <label>Repo</label>
-        <input id="apr-repo" placeholder="sandbox">
-      </div>
-      <div class="field">
-        <label>PR #</label>
-        <input id="apr-pr" name="pr_number" type="number" min="1" placeholder="42">
-      </div>
-      <div class="field">
-        <label>Approver</label>
-        <input id="apr-approver" value="human" placeholder="human">
-      </div>
-      <button class="primary" id="approve-btn">Approve →</button>
-    </div>
-    <div id="approve-result" class="result"></div>
-  </div>
 </section>
 
 <!-- ── Board ───────────────────────────────────────────────── -->
