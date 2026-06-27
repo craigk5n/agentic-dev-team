@@ -9,12 +9,13 @@ Work items (replaces Plane):
 POST /api/ideas                    — submit idea, LLM expands, saves to SQLite
 GET  /api/items                    — list all items grouped by state
 GET  /api/items/{id}               — get single item with full description
-POST /api/items/{id}/approve       — approve pending idea
+POST /api/items/{id}/approve       — approve pending idea → triggers Planner Agent
 POST /api/items/{id}/reject        — reject pending idea
 POST /api/items/migrate-from-plane — import existing Plane issues
 """
 
 from __future__ import annotations
+import asyncio
 import structlog
 import logging
 from contextlib import asynccontextmanager
@@ -233,7 +234,54 @@ async def approve_item(item_id: str):
         raise HTTPException(status_code=409, detail=f"item is '{item['state']}', not pending-approval")
     updated = update_state(item_id, "approved")
     log.info("idea_approved", id=item_id, title=item["title"])
+    # Kick off planner in the background so the response returns immediately
+    asyncio.create_task(_run_planner(item_id, item["title"], item["description"] or ""))
     return updated
+
+
+async def _run_planner(item_id: str, title: str, description: str) -> None:
+    """Run the Planner Agent in a thread and save resulting stories to SQLite."""
+    cfg = get_config(_redis_or_503())
+    model = cfg.models.planner
+    try:
+        from planner_agent.main import run_planner
+        plan = await asyncio.to_thread(run_planner, item_id, title, description, model)
+    except ImportError:
+        log.error("planner_agent_not_installed")
+        return
+    except Exception as exc:
+        log.error("planner_failed", id=item_id, error=str(exc))
+        return
+
+    for story in plan.get("stories", []):
+        story_item = create_item(
+            item_type="story",
+            title=story["title"],
+            description=story.get("description", ""),
+            state="ready",
+            parent_id=item_id,
+            model_used=model,
+        )
+        log.info("story_created", id=story_item["id"], title=story_item["title"])
+
+    log.info(
+        "planner_complete",
+        idea_id=item_id,
+        module=plan.get("module_name"),
+        story_count=len(plan.get("stories", [])),
+    )
+
+
+@app.post("/api/items/{item_id}/plan", status_code=status.HTTP_202_ACCEPTED)
+async def plan_item(item_id: str):
+    """(Re-)run the Planner Agent for any approved idea, creating/recreating its stories."""
+    item = get_item(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="item not found")
+    if item["type"] != "idea":
+        raise HTTPException(status_code=409, detail="only ideas can be planned")
+    asyncio.create_task(_run_planner(item_id, item["title"], item["description"] or ""))
+    return {"status": "planning_started", "id": item_id}
 
 
 @app.post("/api/items/{item_id}/reject", status_code=status.HTTP_200_OK)
