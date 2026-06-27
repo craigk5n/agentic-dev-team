@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     forgejo_base_url: str = "http://localhost:3000"
     forgejo_git_url: str = ""
 
+    # Event-bus internal URL — used to trigger recode without going through Forgejo webhooks
+    event_bus_internal_url: str = "http://event-bus:8080"
+
     # Redis — same db as event-bus worker
     redis_url: str = "redis://localhost:6379/1"
     # How long verdicts live in Redis (seconds)

@@ -422,6 +422,50 @@ async def _run_recode_agent(review_event: ForgejoReviewEvent) -> None:
         update_state(item_id, "in-review")
 
 
+@app.post("/internal/recode-for-pr", status_code=status.HTTP_202_ACCEPTED)
+async def internal_recode_for_pr(payload: dict):
+    """
+    Called by the reviewer gate (worker) when checks fail.
+    Triggers the recode agent without going through the Forgejo webhook chain.
+    """
+    repo_full_name = payload.get("repo_full_name", "")
+    pr_number = payload.get("pr_number", 0)
+    pr_url = payload.get("pr_url", "")
+    feedback = payload.get("feedback", "Automated checks failed — see PR comments for details.")
+
+    item = find_item_by_pr_url(pr_url) if pr_url else None
+    if not item:
+        raise HTTPException(status_code=404, detail="no story found for this PR")
+
+    owner, repo_name = repo_full_name.split("/", 1)
+    review_comments = [{"path": "", "body": feedback}]
+
+    # Pull inline PR comments from Forgejo for richer context
+    try:
+        from coding_agent.forgejo_client import ForgejoClient as CodingFJ
+        from coding_agent.config import settings as cs
+        with CodingFJ(cs.forgejo_base_url, cs.forgejo_api_token) as fg:
+            for c in fg.get(f"/repos/{owner}/{repo_name}/issues/{pr_number}/comments"):
+                body = c.get("body", "").strip()
+                if body:
+                    review_comments.append({"path": "", "body": body})
+    except Exception as exc:
+        log.warning("recode_comment_fetch_failed", error=str(exc))
+
+    log.info("internal_recode_triggered", item_id=item["id"], pr=pr_number, repo=repo_full_name)
+    review_fix_prompt = get_prompt(_redis_or_503(), "coder.review_fix")
+    from coding_agent.main import fix_pr_review
+    asyncio.create_task(asyncio.to_thread(
+        fix_pr_review,
+        item["id"], item["title"], item.get("description", ""),
+        payload.get("head_ref", ""), repo_full_name,
+        review_comments,
+        review_fix_prompt=review_fix_prompt,
+    ))
+    update_state(item["id"], "changes-requested")
+    return {"status": "recode_started", "item_id": item["id"]}
+
+
 @app.post("/api/items/{item_id}/plan", status_code=status.HTTP_202_ACCEPTED)
 async def plan_item(item_id: str):
     """(Re-)run the Planner Agent for any approved idea, creating/recreating its stories."""

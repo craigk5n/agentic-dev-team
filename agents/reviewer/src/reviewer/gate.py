@@ -28,6 +28,26 @@ _CONFIG_KEY = "runtime_config"
 _PENDING_PREFIX = "pr_merge_pending:"
 
 
+def _trigger_recode(
+    repo_full_name: str, pr_number: int, pr_url: str, head_ref: str, feedback: str
+) -> None:
+    """Call the event-bus internal endpoint to start the recode agent."""
+    import httpx
+    url = f"{settings.event_bus_internal_url}/internal/recode-for-pr"
+    try:
+        resp = httpx.post(url, json={
+            "repo_full_name": repo_full_name,
+            "pr_number": pr_number,
+            "pr_url": pr_url,
+            "head_ref": head_ref,
+            "feedback": feedback,
+        }, timeout=10)
+        resp.raise_for_status()
+        log.info("recode_triggered", repo=repo_full_name, pr=pr_number)
+    except Exception as exc:
+        log.error("recode_trigger_failed", repo=repo_full_name, pr=pr_number, error=str(exc))
+
+
 def _clear_verdicts(r: "redis_module.Redis", repo_full_name: str, pr_number: int) -> None:
     """Delete all per-role verdict keys so the next push triggers a fresh review round."""
     owner, repo = repo_full_name.split("/", 1)
@@ -67,9 +87,9 @@ def apply_gate(
     overall = aggregate_status(all_verdicts)
     security_status = all_verdicts.get("security", {}).get("status", "warn")
 
-    # Gate 0: any check failed — post a formal REQUEST_CHANGES review so Forgejo
-    # fires pull_request_review_rejected, which triggers the recode agent.
-    # Clear the stale verdicts so the next push starts a fresh review round.
+    # Gate 0: any check failed — post a comment and directly call the event-bus
+    # recode endpoint. Forgejo's pull_request_review_rejected webhook doesn't fire
+    # reliably for API-submitted reviews, so we bypass the webhook chain entirely.
     if overall == "fail":
         failing = [
             role for role, v in all_verdicts.items() if v.get("status") == "fail"
@@ -79,10 +99,13 @@ def apply_gate(
             + ", ".join(failing)
             + ".\n\nThe coding agent will push a fix automatically."
         )
-        review_token = settings.forgejo_reviewer_token or settings.forgejo_api_token
-        with ForgejoClient(settings.forgejo_base_url, review_token) as fj:
-            fj.create_review(owner, repo, pr_number, "REQUEST_CHANGES", body)
+        with ForgejoClient(settings.forgejo_base_url, settings.forgejo_api_token) as fj:
+            fj.post_pr_comment(owner, repo, pr_number, body)
+            pr_data = fj.get_pr(owner, repo, pr_number)
+        head_ref = pr_data.get("head", {}).get("ref", "")
+        pr_url = pr_data.get("html_url", "")
         _clear_verdicts(r, repo_full_name, pr_number)
+        _trigger_recode(repo_full_name, pr_number, pr_url, head_ref, body)
         log.info("gate_changes_requested", repo=repo_full_name, pr=pr_number, failing=failing)
         return {"gate_status": "changes_requested", "failing": failing}
 
