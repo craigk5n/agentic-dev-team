@@ -152,6 +152,20 @@ def update_state(item_id: str, new_state: str) -> dict | None:
     return get_item(item_id)
 
 
+def find_item_by_pr_url(pr_url: str) -> dict | None:
+    """Find an in-review story by PR URL, matching on path to tolerate host differences."""
+    from urllib.parse import urlparse
+    target_path = urlparse(pr_url).path
+    with _lock:
+        rows = get_db().execute(
+            "SELECT * FROM work_items WHERE pr_url IS NOT NULL AND state IN ('in-review','changes-requested')"
+        ).fetchall()
+    for row in rows:
+        if urlparse(row["pr_url"]).path == target_path:
+            return dict(row)
+    return None
+
+
 def unlock_next_story(item_id: str) -> dict | None:
     """Transition the next sequenced backlog story to ready after item_id completes."""
     item = get_item(item_id)

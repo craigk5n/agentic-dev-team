@@ -22,7 +22,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import redis
-from fastapi import FastAPI, Header, HTTPException, Request, status
+from fastapi import FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
@@ -36,10 +36,10 @@ from event_bus.config_store import get_config, patch_config
 from event_bus.dispatch import dispatch_forgejo_event, dispatch_plane_event
 from event_bus.work_store import (
     create_item, get_item, grouped_items, update_state, set_pr_url,
-    unlock_next_story, STATE_COLORS, get_db
+    unlock_next_story, find_item_by_pr_url, STATE_COLORS, get_db
 )
 from event_bus.telemetry import get_telemetry_summary, render_prometheus
-from event_bus.events.forgejo import ForgejoPREvent
+from event_bus.events.forgejo import ForgejoPREvent, ForgejoReviewEvent
 from event_bus.events.plane import PlaneEvent
 from event_bus.signatures import verify_forgejo, verify_plane
 
@@ -141,14 +141,33 @@ async def forgejo_webhook(
         log.warning("forgejo_signature_invalid")
         raise HTTPException(status_code=403, detail="invalid signature")
 
+    _REVIEW_EVENTS = {"pull_request_review", "pull_request_review_rejected"}
+
+    try:
+        payload = _json.loads(body)
+    except _json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="invalid JSON") from exc
+
+    # Handle "changes requested" review events
+    if x_gitea_event in _REVIEW_EVENTS:
+        try:
+            review_event = ForgejoReviewEvent.model_validate(payload)
+        except ValidationError as exc:
+            log.warning("forgejo_review_parse_error", error=str(exc))
+            return {"result": "skipped", "reason": "review payload parse failed"}
+
+        if not review_event.is_changes_requested():
+            return {"result": "skipped", "reason": f"review type not changes-requested: {review_event.review.type!r}"}
+
+        asyncio.create_task(_run_recode_agent(review_event))
+        log.info("forgejo_review_webhook", pr=review_event.pr_number, repo=review_event.repo_full_name)
+        return {"result": "accepted", "reason": "changes_requested"}
+
     if x_gitea_event != "pull_request":
         return {"result": "skipped", "reason": f"unhandled event type: {x_gitea_event}"}
 
     try:
-        payload = _json.loads(body)
         event = ForgejoPREvent.model_validate(payload)
-    except _json.JSONDecodeError as exc:
-        raise HTTPException(status_code=400, detail="invalid JSON") from exc
     except ValidationError as exc:
         log.warning("forgejo_parse_error", error=str(exc))
         raise HTTPException(status_code=400, detail="payload validation failed") from exc
@@ -202,8 +221,9 @@ async def submit_idea(request: Request):
 # ── Work items API ────────────────────────────────────────────────────────────
 
 @app.get("/api/items")
-async def list_work_items():
+async def list_work_items(response: Response):
     """Return all work items grouped by state with state metadata."""
+    response.headers["Cache-Control"] = "no-store"
     groups = grouped_items()
     return {
         "groups": [
@@ -315,6 +335,59 @@ async def _run_coding_agent(item_id: str, title: str, description: str) -> None:
     else:
         log.warning("coding_agent_no_changes", id=item_id)
         update_state(item_id, "ready")
+
+
+async def _run_recode_agent(review_event: ForgejoReviewEvent) -> None:
+    """Fetch review comments and re-run the coding agent on the existing PR branch."""
+    pr_url = review_event.pr_html_url
+    item = find_item_by_pr_url(pr_url)
+    if not item:
+        log.warning("recode_no_story_found", pr_url=pr_url)
+        return
+
+    item_id = item["id"]
+    update_state(item_id, "changes-requested")
+    log.info("recode_agent_queued", item_id=item_id, pr=review_event.pr_number)
+
+    # Fetch review comments from Forgejo API
+    review_comments: list[dict] = []
+    try:
+        from coding_agent.forgejo_client import ForgejoClient
+        from coding_agent.config import settings as coding_settings
+        owner, repo_name = review_event.repo_full_name.split("/", 1)
+        with ForgejoClient(coding_settings.forgejo_base_url, coding_settings.forgejo_api_token) as fg:
+            # General review body
+            if review_event.review.body.strip():
+                review_comments.append({"path": "", "body": review_event.review.body})
+            # Inline comments on the review
+            inline = fg.get(f"/repos/{owner}/{repo_name}/pulls/{review_event.pr_number}/reviews/{review_event.review.id}/comments")
+            for c in inline:
+                if c.get("body", "").strip():
+                    review_comments.append({"path": c.get("path", ""), "body": c["body"]})
+    except Exception as exc:
+        log.warning("recode_comment_fetch_failed", error=str(exc))
+        if review_event.review.body.strip():
+            review_comments = [{"path": "", "body": review_event.review.body}]
+
+    try:
+        from coding_agent.main import fix_pr_review
+        result = await asyncio.to_thread(
+            fix_pr_review,
+            item["id"], item["title"], item.get("description", ""),
+            review_event.head_ref, review_event.repo_full_name,
+            review_comments,
+        )
+    except Exception as exc:
+        log.error("recode_agent_failed", item_id=item_id, error=str(exc))
+        update_state(item_id, "in-review")
+        return
+
+    if result.get("status") == "success":
+        update_state(item_id, "in-review")
+        log.info("recode_agent_complete", item_id=item_id, sha=result.get("sha", "")[:8])
+    else:
+        log.warning("recode_no_changes", item_id=item_id)
+        update_state(item_id, "in-review")
 
 
 @app.post("/api/items/{item_id}/plan", status_code=status.HTTP_202_ACCEPTED)

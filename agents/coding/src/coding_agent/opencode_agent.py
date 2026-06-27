@@ -24,6 +24,7 @@ def run_opencode_agent(
     model: str,
     openrouter_api_key: str = "",
     timeout: int = DEFAULT_TIMEOUT,
+    review_comments: list[dict] | None = None,
 ) -> str:
     """
     Run opencode non-interactively on the given repo and story.
@@ -37,20 +38,36 @@ def run_opencode_agent(
             "Mount the opencode binary into the container or install it."
         )
 
-    prompt = (
-        f"## Story: {story_title}\n\n"
-        f"{story_description or '(no description)'}\n\n"
-        "INSTRUCTIONS:\n"
-        "1. First, list all files in the repo to understand what already exists.\n"
-        "2. If the repo has an existing app (e.g. main.py, app.py, package.json, go.mod), "
-        "read the key files and implement the story on top of that stack.\n"
-        "3. If the repo is EMPTY or only has a README, create a minimal working app from "
-        "scratch using Python + FastAPI (unless the story or description specifies another "
-        "language/framework). Set up pyproject.toml or requirements.txt, then implement "
-        "the story on top of that scaffold.\n"
-        "4. Make focused, working changes. Commit-worthy code only — no placeholders.\n"
-        "5. Do not modify files unrelated to this story."
-    )
+    if review_comments:
+        feedback = "\n".join(
+            f"- [{c.get('path', 'general')}] {c.get('body', '').strip()}"
+            for c in review_comments if c.get("body", "").strip()
+        )
+        prompt = (
+            f"## Fix review feedback for: {story_title}\n\n"
+            f"## Review comments to address\n{feedback}\n\n"
+            f"## Original story description\n{story_description or '(none)'}\n\n"
+            "INSTRUCTIONS:\n"
+            "1. Read the existing code in the repo first.\n"
+            "2. Address ALL review comments listed above — that is the primary objective.\n"
+            "3. Make only the changes needed to satisfy the feedback.\n"
+            "4. Do not introduce unrelated changes."
+        )
+    else:
+        prompt = (
+            f"## Story: {story_title}\n\n"
+            f"{story_description or '(no description)'}\n\n"
+            "INSTRUCTIONS:\n"
+            "1. First, list all files in the repo to understand what already exists.\n"
+            "2. If the repo has an existing app (e.g. main.py, app.py, package.json, go.mod), "
+            "read the key files and implement the story on top of that stack.\n"
+            "3. If the repo is EMPTY or only has a README, create a minimal working app from "
+            "scratch using Python + FastAPI (unless the story or description specifies another "
+            "language/framework). Set up pyproject.toml or requirements.txt, then implement "
+            "the story on top of that scaffold.\n"
+            "4. Make focused, working changes. Commit-worthy code only — no placeholders.\n"
+            "5. Do not modify files unrelated to this story."
+        )
 
     cmd = [opencode_bin, "run", "--dir", repo_dir, "--model", model, prompt]
     env = {**os.environ}

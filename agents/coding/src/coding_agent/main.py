@@ -22,6 +22,7 @@ from coding_agent.config import settings
 from coding_agent.forgejo_client import ForgejoClient
 from coding_agent import git_ops
 from coding_agent.opencode_agent import run_opencode_agent
+from typing import Any
 
 log = structlog.get_logger()
 
@@ -113,3 +114,52 @@ def run_coding_agent(
         "sha": sha,
         "summary": summary,
     }
+
+
+def fix_pr_review(
+    item_id: str,
+    title: str,
+    description: str,
+    branch: str,
+    repo_full_name: str,
+    review_comments: list[dict[str, Any]],
+    model_override: str = "",
+) -> dict[str, Any]:
+    """
+    Push a fix commit to an existing PR branch addressing review feedback.
+    Returns {status, item_id, sha, summary} — does not open a new PR.
+    """
+    log.info("recode_agent_start", item_id=item_id, branch=branch, comments=len(review_comments))
+    owner, repo_name = repo_full_name.split("/", 1)
+
+    with ForgejoClient(settings.forgejo_base_url, settings.forgejo_api_token) as forgejo:
+        with tempfile.TemporaryDirectory(prefix="coding-agent-fix-") as tmpdir:
+            git_ops.clone(
+                clone_base_url=settings.forgejo_clone_base,
+                owner=owner,
+                repo=repo_name,
+                api_token=settings.forgejo_api_token,
+                target_dir=tmpdir,
+            )
+            git_ops.configure_identity(tmpdir, settings.git_author_name, settings.git_author_email)
+            git_ops.checkout_branch(tmpdir, branch)
+
+            model = model_override or settings.model_coder
+            summary = run_opencode_agent(
+                story_title=title,
+                story_description=description,
+                repo_dir=tmpdir,
+                model=model,
+                openrouter_api_key=settings.openrouter_api_key,
+                review_comments=review_comments,
+            )
+
+            sha = git_ops.commit_all(tmpdir, f"fix: address review comments\n\n{summary[:500]}")
+            if not sha:
+                log.warning("recode_no_changes", item_id=item_id)
+                return {"status": "no_changes", "item_id": item_id, "summary": summary}
+
+            git_ops.push(tmpdir, branch)
+
+    log.info("recode_agent_done", item_id=item_id, sha=sha[:8])
+    return {"status": "success", "item_id": item_id, "sha": sha, "summary": summary}
