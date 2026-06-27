@@ -14,7 +14,7 @@ import structlog
 
 log = structlog.get_logger()
 
-DEFAULT_TIMEOUT = 600  # 10 minutes per story
+DEFAULT_TIMEOUT = 900  # 15 minutes per story
 
 
 def run_opencode_agent(
@@ -55,18 +55,21 @@ def run_opencode_agent(
         )
     else:
         prompt = (
+            f"You are a coding agent. Implement the following story right now. "
+            f"Do NOT ask for clarification — the story description is your complete specification. "
+            f"Do NOT say you are ready to help. Just implement it.\n\n"
             f"## Story: {story_title}\n\n"
             f"{story_description or '(no description)'}\n\n"
-            "INSTRUCTIONS:\n"
-            "1. First, list all files in the repo to understand what already exists.\n"
-            "2. If the repo has an existing app (e.g. main.py, app.py, package.json, go.mod), "
-            "read the key files and implement the story on top of that stack.\n"
-            "3. If the repo is EMPTY or only has a README, create a minimal working app from "
-            "scratch using Python + FastAPI (unless the story or description specifies another "
-            "language/framework). Set up pyproject.toml or requirements.txt, then implement "
-            "the story on top of that scaffold.\n"
-            "4. Make focused, working changes. Commit-worthy code only — no placeholders.\n"
-            "5. Do not modify files unrelated to this story."
+            "STEPS:\n"
+            "1. List the files in the repo to understand what exists.\n"
+            "2. Read the relevant existing files.\n"
+            "3. Implement the story by writing or modifying files. "
+            "If an existing app is present, build on top of it. "
+            "If the repo is empty or only has a README, create a minimal scaffold "
+            "(Python + FastAPI by default) then implement the story.\n"
+            "4. Write real, working code — no placeholders or stubs unless the story explicitly asks for them.\n"
+            "5. Do not touch files unrelated to this story.\n"
+            "Start implementing now."
         )
 
     cmd = [opencode_bin, "run", "--dir", repo_dir, "--model", model, prompt]
