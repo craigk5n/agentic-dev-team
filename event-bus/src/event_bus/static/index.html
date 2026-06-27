@@ -530,6 +530,24 @@ button.reject-btn {
   cursor: pointer;
 }
 button.reject-btn:hover { background: rgba(107,114,128,.25); }
+button.code-btn {
+  background: rgba(59,130,246,.15);
+  border: 1px solid rgba(59,130,246,.4);
+  color: #3b82f6;
+  border-radius: 5px;
+  padding: 3px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+button.code-btn:hover { background: rgba(59,130,246,.25); }
+.pr-link {
+  font-size: 12px;
+  color: var(--accent);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.pr-link:hover { text-decoration: underline; }
 
 .board-empty {
   color: var(--muted);
@@ -1316,12 +1334,21 @@ async function loadBoard() {
       <span class="board-group-count">${group.items.length}</span>
     </div>`;
     for (const item of group.items) {
-      const isPending = item.state === 'pending-approval';
-      const actions = isPending ? `
-        <div class="board-item-actions">
+      let actions = '';
+      if (item.state === 'pending-approval') {
+        actions = `<div class="board-item-actions">
           <button class="approve-btn" data-id="${item.id}">Approve</button>
           <button class="reject-btn" data-id="${item.id}">Reject</button>
-        </div>` : '';
+        </div>`;
+      } else if (item.state === 'ready') {
+        actions = `<div class="board-item-actions">
+          <button class="code-btn" data-id="${item.id}">▶ Code</button>
+        </div>`;
+      } else if (item.pr_url) {
+        actions = `<div class="board-item-actions">
+          <a class="pr-link" href="${escHtml(item.pr_url)}" target="_blank">PR ↗</a>
+        </div>`;
+      }
       const date = fmtDate(item.created_at);
       html += `<div class="board-item" data-id="${item.id}">
         <div class="board-item-title" data-id="${item.id}">${escHtml(item.title)}</div>
@@ -1354,6 +1381,24 @@ async function loadBoard() {
     });
   });
 
+  // Code buttons
+  container.querySelectorAll('.code-btn').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const id = btn.dataset.id;
+      btn.disabled = true;
+      btn.textContent = '…';
+      const r = await fetch(`/api/items/${id}/code`, {method:'POST'});
+      if (r.ok) { toast('Coding agent started'); loadBoard(); }
+      else {
+        const err = await r.json().catch(() => ({}));
+        toast(err.detail || 'Failed to start coding agent', 'error');
+        btn.disabled = false;
+        btn.textContent = '▶ Code';
+      }
+    });
+  });
+
   // Click title to open drawer
   container.querySelectorAll('.board-item-title[data-id]').forEach(el => {
     el.addEventListener('click', () => openDrawer(el.dataset.id));
@@ -1382,7 +1427,7 @@ async function openDrawer(id) {
   }
   document.getElementById('drawer-description').innerHTML = body;
 
-  // Footer: approve/reject if pending
+  // Footer actions
   const footer = document.getElementById('drawer-footer');
   if (item.state === 'pending-approval') {
     footer.innerHTML = `
@@ -1396,6 +1441,15 @@ async function openDrawer(id) {
       const r = await fetch(`/api/items/${id}/reject`, {method:'POST'});
       if (r.ok) { toast('Idea rejected'); closeDrawer(); loadBoard(); }
     });
+  } else if (item.state === 'ready') {
+    footer.innerHTML = `<button class="code-btn" id="drawer-code">▶ Start Coding Agent</button>`;
+    document.getElementById('drawer-code').addEventListener('click', async () => {
+      const r = await fetch(`/api/items/${id}/code`, {method:'POST'});
+      if (r.ok) { toast('Coding agent started'); closeDrawer(); loadBoard(); }
+      else { toast('Failed to start coding agent', 'error'); }
+    });
+  } else if (item.pr_url) {
+    footer.innerHTML = `<a class="pr-link" href="${escHtml(item.pr_url)}" target="_blank">Open PR ↗</a>`;
   } else {
     footer.innerHTML = '';
   }

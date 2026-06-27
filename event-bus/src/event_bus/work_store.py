@@ -64,13 +64,19 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             state       TEXT NOT NULL DEFAULT 'pending-approval',
             parent_id   TEXT REFERENCES work_items(id),
             model_used  TEXT,
+            pr_url      TEXT,
             created_at  TEXT NOT NULL,
             updated_at  TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_state ON work_items(state);
         CREATE INDEX IF NOT EXISTS idx_parent ON work_items(parent_id);
     """)
-    conn.commit()
+    # Migrate existing DBs that pre-date the pr_url column
+    try:
+        conn.execute("ALTER TABLE work_items ADD COLUMN pr_url TEXT")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # column already exists
 
 
 def create_item(
@@ -135,6 +141,17 @@ def update_state(item_id: str, new_state: str) -> dict | None:
         db.execute(
             "UPDATE work_items SET state=?, updated_at=? WHERE id=?",
             (new_state, _now(), item_id),
+        )
+        db.commit()
+    return get_item(item_id)
+
+
+def set_pr_url(item_id: str, pr_url: str) -> dict | None:
+    with _lock:
+        db = get_db()
+        db.execute(
+            "UPDATE work_items SET pr_url=?, updated_at=? WHERE id=?",
+            (pr_url, _now(), item_id),
         )
         db.commit()
     return get_item(item_id)

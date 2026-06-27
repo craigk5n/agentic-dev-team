@@ -35,7 +35,7 @@ from event_bus.config import settings
 from event_bus.config_store import get_config, patch_config
 from event_bus.dispatch import dispatch_forgejo_event, dispatch_plane_event
 from event_bus.work_store import (
-    create_item, get_item, grouped_items, update_state, STATE_COLORS, get_db
+    create_item, get_item, grouped_items, update_state, set_pr_url, STATE_COLORS, get_db
 )
 from event_bus.telemetry import get_telemetry_summary, render_prometheus
 from event_bus.events.forgejo import ForgejoPREvent
@@ -270,6 +270,46 @@ async def _run_planner(item_id: str, title: str, description: str) -> None:
         module=plan.get("module_name"),
         story_count=len(plan.get("stories", [])),
     )
+
+
+@app.post("/api/items/{item_id}/code", status_code=status.HTTP_202_ACCEPTED)
+async def code_item(item_id: str):
+    """Claim a ready story and run the Coding Agent asynchronously."""
+    item = get_item(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="item not found")
+    if item["type"] != "story":
+        raise HTTPException(status_code=409, detail="only stories can be coded")
+    if item["state"] != "ready":
+        raise HTTPException(status_code=409, detail=f"story is '{item['state']}', not ready")
+    # Claim atomically before returning
+    update_state(item_id, "in-progress")
+    asyncio.create_task(_run_coding_agent(item_id, item["title"], item["description"] or ""))
+    return {"status": "coding_started", "id": item_id}
+
+
+async def _run_coding_agent(item_id: str, title: str, description: str) -> None:
+    """Run the Coding Agent in a thread; update state and PR URL on completion."""
+    try:
+        from coding_agent.main import run_coding_agent
+        result = await asyncio.to_thread(run_coding_agent, item_id, title, description)
+    except ImportError:
+        log.error("coding_agent_not_installed")
+        update_state(item_id, "ready")  # unclaim
+        return
+    except Exception as exc:
+        log.error("coding_agent_failed", id=item_id, error=str(exc))
+        update_state(item_id, "ready")  # unclaim so it can be retried
+        return
+
+    if result.get("status") == "success":
+        update_state(item_id, "in-review")
+        if result.get("pr_url"):
+            set_pr_url(item_id, result["pr_url"])
+        log.info("coding_agent_complete", id=item_id, pr=result.get("pr_url"))
+    else:
+        log.warning("coding_agent_no_changes", id=item_id)
+        update_state(item_id, "ready")
 
 
 @app.post("/api/items/{item_id}/plan", status_code=status.HTTP_202_ACCEPTED)
