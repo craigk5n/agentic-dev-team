@@ -116,14 +116,18 @@ def run_tests(
 
     # For complex output or many failures, ask the LLM for a clean summary
     if result.returncode != 0 and not failures:
-        llm_result = llm.summarise_test_output(
-            combined,
-            model=model,
-            api_key=settings.effective_api_key,
-        )
-        status = llm_result.get("status", "fail")
-        failures = llm_result.get("failures", [])
-        summary = llm_result.get("summary", "Tests failed.")
+        try:
+            llm_result = llm.summarise_test_output(
+                combined,
+                model=model,
+                api_key=settings.effective_api_key,
+            )
+            status = llm_result.get("status", "fail")
+            failures = llm_result.get("failures", [])
+            summary = llm_result.get("summary", "Tests failed.")
+        except Exception as exc:
+            log.warning("test_llm_summary_failed", error=str(exc)[:120])
+            summary = f"Tests failed (LLM summary unavailable): {combined[:200]}"
     else:
         summary = f"Tests {'passed' if status == 'pass' else 'failed'}."
 
