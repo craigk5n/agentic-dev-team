@@ -12,6 +12,7 @@ Redis key layout (shared with event-bus config_store):
 
 from __future__ import annotations
 import json
+import time
 from typing import TYPE_CHECKING
 
 import structlog
@@ -156,8 +157,108 @@ def apply_gate(
         log.info("gate_awaiting_approval", repo=repo_full_name, pr=pr_number)
         return {"gate_status": "awaiting_approval"}
 
+    # Gate 3: CI must be green before auto-merge. A red CI triggers a recode; a
+    # hang holds the merge. Repos with no CI workflow report no status and pass.
+    ci_outcome = _ci_gate(r, owner, repo, pr_number, repo_full_name)
+    if ci_outcome is not None:
+        return ci_outcome
+
     # All checks pass — auto-merge
     return _auto_merge(owner, repo, pr_number, repo_full_name)
+
+
+def _wait_for_ci(
+    fj: "ForgejoClient",
+    owner: str,
+    repo: str,
+    pr_number: int,
+    *,
+    timeout: int,
+    interval: int,
+    grace: int,
+    sleep=time.sleep,
+    clock=time.monotonic,
+) -> str:
+    """
+    Poll the PR head commit's combined CI status until it resolves.
+
+    Returns:
+      "success" — combined status is success
+      "failure" — combined status is failure/error
+      "none"    — no status reported within `grace` seconds (repo has no CI)
+      "timeout" — status stayed pending past `timeout` seconds
+    """
+    start = clock()
+    while True:
+        try:
+            pr = fj.get_pr(owner, repo, pr_number)
+            sha = (pr.get("head") or {}).get("sha", "")
+            status = fj.get_combined_status(owner, repo, sha) if sha else {}
+        except Exception as exc:
+            log.warning("ci_status_fetch_failed", repo=f"{owner}/{repo}", pr=pr_number, error=str(exc))
+            status = {}
+        statuses = status.get("statuses") or []
+        state = status.get("state") or ""
+        elapsed = clock() - start
+        if statuses:
+            if state == "success":
+                return "success"
+            if state in ("failure", "error"):
+                return "failure"
+        elif elapsed >= grace:
+            return "none"
+        if elapsed >= timeout:
+            return "timeout"
+        sleep(interval)
+
+
+def _ci_gate(
+    r: "redis_module.Redis",
+    owner: str,
+    repo: str,
+    pr_number: int,
+    repo_full_name: str,
+) -> dict | None:
+    """Wait for CI; return a gate-outcome dict if it blocks the merge, else None."""
+    if not settings.ci_wait_enabled:
+        return None
+
+    with ForgejoClient(settings.forgejo_base_url, settings.forgejo_api_token) as fj:
+        result = _wait_for_ci(
+            fj, owner, repo, pr_number,
+            timeout=settings.ci_wait_timeout,
+            interval=settings.ci_wait_interval,
+            grace=settings.ci_wait_grace,
+        )
+
+    if result in ("success", "none"):
+        log.info("ci_gate_pass", repo=repo_full_name, pr=pr_number, ci=result)
+        return None
+
+    if result == "failure":
+        body = (
+            "❌ **CI failed** — the automated test workflow did not pass.\n\n"
+            "The coding agent will push a fix automatically."
+        )
+        with ForgejoClient(settings.forgejo_base_url, settings.forgejo_api_token) as fj:
+            fj.post_pr_comment(owner, repo, pr_number, body)
+            pr_data = fj.get_pr(owner, repo, pr_number)
+        head_ref = (pr_data.get("head") or {}).get("ref", "")
+        pr_url = pr_data.get("html_url", "")
+        _clear_verdicts(r, repo_full_name, pr_number)
+        _trigger_recode(repo_full_name, pr_number, pr_url, head_ref, body)
+        log.info("ci_gate_failed", repo=repo_full_name, pr=pr_number)
+        return {"gate_status": "changes_requested", "failing": ["ci"]}
+
+    # timeout — hold the merge for a human/retry rather than merging on unknown CI
+    with ForgejoClient(settings.forgejo_base_url, settings.forgejo_api_token) as fj:
+        fj.post_pr_comment(
+            owner, repo, pr_number,
+            "⏳ **Merge held** — CI did not finish within the timeout. "
+            "Push a new commit or re-run the workflow to retry.",
+        )
+    log.info("ci_gate_timeout", repo=repo_full_name, pr=pr_number)
+    return {"gate_status": "blocked", "reason": "ci_timeout"}
 
 
 def _auto_merge(owner: str, repo: str, pr_number: int, repo_full_name: str) -> dict:

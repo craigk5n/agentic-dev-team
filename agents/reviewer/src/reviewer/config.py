@@ -31,6 +31,15 @@ class Settings(BaseSettings):
     # How long verdicts live in Redis (seconds)
     verdict_ttl: int = 3600
 
+    # CI wait gate — before auto-merging, wait for the Forgejo Actions CI status on
+    # the PR head to resolve. A red CI triggers a recode; a hang holds the merge.
+    # Repos with no CI workflow report no status, so after ci_wait_grace seconds with
+    # zero statuses we treat CI as absent and proceed (don't block uninstrumented repos).
+    ci_wait_enabled: bool = True
+    ci_wait_timeout: int = 600   # max seconds to wait for CI to finish
+    ci_wait_interval: int = 5    # seconds between status polls
+    ci_wait_grace: int = 45      # seconds to wait for the first status before assuming no CI
+
     log_level: str = "INFO"
 
     @property

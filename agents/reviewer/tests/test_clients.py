@@ -46,6 +46,21 @@ def test_create_review():
     assert result["id"] == 1
 
 
+def test_get_combined_status():
+    with respx.mock:
+        respx.get(f"{BASE}/api/v1/repos/alice/backend/commits/abc123/status").mock(
+            return_value=httpx.Response(200, json={
+                "state": "success",
+                "total_count": 1,
+                "statuses": [{"context": "CI / test (pull_request)", "status": "success"}],
+            })
+        )
+        with ForgejoClient(BASE, "token") as client:
+            res = client.get_combined_status("alice", "backend", "abc123")
+    assert res["state"] == "success"
+    assert res["statuses"][0]["context"] == "CI / test (pull_request)"
+
+
 def test_http_error_raises():
     with respx.mock:
         respx.get(f"{BASE}/api/v1/repos/alice/nope/pulls/1").mock(

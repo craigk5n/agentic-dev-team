@@ -23,6 +23,14 @@ def _verdicts(security_status: str = "pass") -> dict:
     }
 
 
+@pytest.fixture(autouse=True)
+def _ci_absent_by_default():
+    """Most gate tests don't set up CI status; default the CI gate to 'no CI' (proceed).
+    CI-specific tests override reviewer.gate._wait_for_ci themselves."""
+    with patch("reviewer.gate._wait_for_ci", return_value="none"):
+        yield
+
+
 class TestApplyGate:
     def test_auto_merge_when_no_gates_blocking(self):
         r = _make_redis({"security_signoff": False, "pr_merge_approval": False})
@@ -147,6 +155,50 @@ class TestApplyGate:
         assert result["failing"] == ["code_review"]
         ctx.post_pr_comment.assert_called_once()
         mock_recode.assert_called_once()
+
+    def test_ci_failure_triggers_recode(self):
+        # Gate 3: CI red → changes_requested + recode, no merge
+        r = _make_redis({"security_signoff": True, "pr_merge_approval": False})
+        with patch("reviewer.gate._wait_for_ci", return_value="failure"), \
+             patch("reviewer.gate.ForgejoClient") as mock_fj, \
+             patch("reviewer.gate._trigger_recode") as mock_recode:
+            ctx = MagicMock()
+            ctx.get_pr.return_value = {
+                "head": {"ref": "feature/x"}, "html_url": "http://forgejo.test/pr/1",
+            }
+            mock_fj.return_value.__enter__.return_value = ctx
+            from reviewer.gate import apply_gate
+            result = apply_gate(r, "owner/repo", 1, _verdicts("pass"))
+        assert result["gate_status"] == "changes_requested"
+        assert result["failing"] == ["ci"]
+        ctx.merge_pr.assert_not_called()
+        mock_recode.assert_called_once()
+
+    def test_ci_timeout_blocks_merge(self):
+        # Gate 3: CI never finishes → blocked, no merge
+        r = _make_redis({"security_signoff": False, "pr_merge_approval": False})
+        with patch("reviewer.gate._wait_for_ci", return_value="timeout"), \
+             patch("reviewer.gate.ForgejoClient") as mock_fj:
+            ctx = MagicMock()
+            mock_fj.return_value.__enter__.return_value = ctx
+            from reviewer.gate import apply_gate
+            result = apply_gate(r, "owner/repo", 1, _verdicts("pass"))
+        assert result["gate_status"] == "blocked"
+        assert result["reason"] == "ci_timeout"
+        ctx.merge_pr.assert_not_called()
+        ctx.post_pr_comment.assert_called_once()
+
+    def test_ci_success_allows_merge(self):
+        r = _make_redis({"security_signoff": False, "pr_merge_approval": False})
+        with patch("reviewer.gate._wait_for_ci", return_value="success"), \
+             patch("reviewer.gate.ForgejoClient") as mock_fj:
+            ctx = MagicMock()
+            ctx.merge_pr.return_value = {"merged": True}
+            mock_fj.return_value.__enter__.return_value = ctx
+            from reviewer.gate import apply_gate
+            result = apply_gate(r, "owner/repo", 1, _verdicts("pass"))
+        assert result["gate_status"] == "merged"
+        ctx.merge_pr.assert_called_once_with("owner", "repo", 1)
 
     def test_missing_security_verdict_treated_as_warn(self):
         # If security verdict is absent (only code_review + test_run arrived), status defaults to 'warn'

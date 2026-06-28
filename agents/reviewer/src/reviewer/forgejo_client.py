@@ -31,6 +31,12 @@ class ForgejoClient:
         resp.raise_for_status()
         return resp.json()
 
+    def get_combined_status(self, owner: str, repo: str, sha: str) -> dict:
+        """Combined CI status for a commit: {state, statuses[], total_count}."""
+        resp = self._client.get(f"/api/v1/repos/{owner}/{repo}/commits/{sha}/status")
+        resp.raise_for_status()
+        return resp.json()
+
     def create_review(
         self, owner: str, repo: str, pr_number: int, event: str, body: str
     ) -> dict:
