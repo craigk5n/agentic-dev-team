@@ -39,7 +39,7 @@ from event_bus.config_store import get_config, patch_config
 from event_bus.prompt_store import get_prompt, set_prompt, delete_prompt, list_prompts
 from event_bus.dispatch import dispatch_forgejo_event, dispatch_plane_event
 from event_bus.work_store import (
-    create_item, get_item, grouped_items, update_state, set_pr_url, set_repo,
+    create_item, get_item, grouped_items, list_items, update_state, set_pr_url, set_repo,
     unlock_next_story, find_item_by_pr_url, get_repo_for_story, STATE_COLORS, get_db
 )
 from event_bus.telemetry import get_telemetry_summary, render_prometheus
@@ -605,6 +605,7 @@ async def _run_coding_agent(item_id: str, title: str, description: str, story_pr
     if repo and f"repo: {repo}" not in (description or ""):
         description = f"repo: {repo}\n{description}"
     log_cb = _make_log_cb(item_id)
+    log.info("coding_agent_dispatch", id=item_id, mode=settings.sandbox_mode)
     try:
         if settings.sandbox_mode == "docker":
             result = await asyncio.to_thread(
@@ -634,8 +635,12 @@ async def _run_coding_agent(item_id: str, title: str, description: str, story_pr
         if result.get("pr_url"):
             set_pr_url(item_id, result["pr_url"])
         log.info("coding_agent_complete", id=item_id, pr=result.get("pr_url"))
+    elif result.get("status") == "error":
+        # Agent crashed (OOM, network failure, etc.) — reset so it can be retried
+        log.error("coding_agent_error", id=item_id, error=result.get("error", "unknown"))
+        update_state(item_id, "ready")
     else:
-        # Nothing to implement — mark done and advance sequence; dispatch will pick up next
+        # Agent ran but found nothing to implement — mark done and advance sequence
         log.warning("coding_agent_no_changes", id=item_id)
         update_state(item_id, "done")
         unlock_next_story(item_id)  # backlog → ready; release+dispatch below will trigger it
