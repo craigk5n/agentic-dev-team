@@ -13,9 +13,9 @@ class Settings(BaseSettings):
     # OpenRouter format:  openrouter/{provider}/{model}
     # Anthropic direct:   anthropic/{model}
     # Ollama local:       ollama/{model}
-    model_reviewer: str = "openrouter/anthropic/claude-sonnet-4-6"
-    model_tester: str = "openrouter/anthropic/claude-haiku-4-5"
-    model_security: str = "openrouter/anthropic/claude-haiku-4-5"
+    model_reviewer: str = "openrouter/nvidia/nemotron-3-super-120b-a12b:free"
+    model_tester: str = "openrouter/meta-llama/llama-3.3-70b-instruct:free"
+    model_security: str = "openrouter/meta-llama/llama-3.3-70b-instruct:free"
 
     # Forgejo
     forgejo_api_token: str = ""

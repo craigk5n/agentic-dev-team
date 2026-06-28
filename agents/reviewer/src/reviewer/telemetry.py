@@ -39,11 +39,14 @@ def record_usage(
         if not usage:
             return
 
-        try:
-            import litellm
-            cost = litellm.completion_cost(completion_response=response)
-        except Exception:
-            cost = 0.0
+        # Prefer OpenRouter's upstream cost field (already computed, model-agnostic)
+        cost = float(getattr(usage, "cost", None) or 0.0)
+        if cost == 0.0:
+            try:
+                import litellm
+                cost = litellm.completion_cost(completion_response=response)
+            except Exception:
+                cost = 0.0
 
         date = time.strftime("%Y-%m-%d")
         key = f"telemetry:llm:{date}"

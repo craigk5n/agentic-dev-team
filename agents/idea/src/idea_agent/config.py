@@ -6,7 +6,7 @@ class Settings(BaseSettings):
 
     openrouter_api_key: str = ""
     anthropic_api_key: str = ""
-    model_idea: str = "openrouter/anthropic/claude-sonnet-4-6"
+    model_idea: str = "openrouter/nvidia/nemotron-3-super-120b-a12b:free"
 
     plane_api_token: str = ""
     plane_base_url: str = "http://localhost:8181"
