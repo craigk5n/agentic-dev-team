@@ -31,6 +31,8 @@ from rq import Queue
 import json as _json
 from dataclasses import asdict
 
+from collections.abc import Callable
+
 from event_bus.config import settings
 from event_bus.config_store import get_config, patch_config
 from event_bus.prompt_store import get_prompt, set_prompt, delete_prompt, list_prompts
@@ -97,6 +99,28 @@ def _redis_or_503() -> redis.Redis:
     if _redis_conn is None:
         raise HTTPException(status_code=503, detail="redis not ready")
     return _redis_conn
+
+
+_LOG_TTL = 86_400  # keep agent logs for 24 h
+
+
+def _make_log_cb(item_id: str) -> Callable[[str], None]:
+    """Return a callable that pushes each agent output line to a Redis list."""
+    key = f"agent_log:{item_id}"
+    if _redis_conn:
+        _redis_conn.delete(key)
+
+    def _push(line: str) -> None:
+        r = _redis_conn
+        if r:
+            r.rpush(key, line.encode("utf-8", errors="replace"))
+
+    return _push
+
+
+def _expire_log(item_id: str) -> None:
+    if _redis_conn:
+        _redis_conn.expire(f"agent_log:{item_id}", _LOG_TTL)
 
 
 # ── Plane webhook ──────────────────────────────────────────────────────────────
@@ -417,10 +441,11 @@ async def _run_coding_agent(item_id: str, title: str, description: str, story_pr
     repo = get_repo_for_story(item_id, default=settings.default_repo)
     if repo and f"repo: {repo}" not in (description or ""):
         description = f"repo: {repo}\n{description}"
+    log_cb = _make_log_cb(item_id)
     try:
         from coding_agent.main import run_coding_agent
         result = await asyncio.to_thread(run_coding_agent, item_id, title, description,
-                                         story_prompt=story_prompt)
+                                         story_prompt=story_prompt, log_line=log_cb)
     except ImportError:
         log.error("coding_agent_not_installed")
         update_state(item_id, "ready")  # unclaim
@@ -429,6 +454,8 @@ async def _run_coding_agent(item_id: str, title: str, description: str, story_pr
         log.error("coding_agent_failed", id=item_id, error=str(exc))
         update_state(item_id, "ready")  # unclaim so it can be retried
         return
+    finally:
+        _expire_log(item_id)
 
     if result.get("status") == "success":
         update_state(item_id, "in-review")
@@ -473,6 +500,7 @@ async def _run_recode_agent(review_event: ForgejoReviewEvent) -> None:
             review_comments = [{"path": "", "body": review_event.review.body}]
 
     review_fix_prompt = get_prompt(_redis_or_503(), "coder.review_fix")
+    log_cb = _make_log_cb(item_id)
     try:
         from coding_agent.main import fix_pr_review
         result = await asyncio.to_thread(
@@ -481,11 +509,14 @@ async def _run_recode_agent(review_event: ForgejoReviewEvent) -> None:
             review_event.head_ref, review_event.repo_full_name,
             review_comments,
             review_fix_prompt=review_fix_prompt,
+            log_line=log_cb,
         )
     except Exception as exc:
         log.error("recode_agent_failed", item_id=item_id, error=str(exc))
         update_state(item_id, "in-review")
         return
+    finally:
+        _expire_log(item_id)
 
     if result.get("status") == "success":
         update_state(item_id, "in-review")
@@ -557,14 +588,23 @@ async def internal_recode_for_pr(payload: dict):
     log.info("internal_recode_triggered", item_id=item["id"], pr=pr_number,
              repo=repo_full_name, attempt=retries + 1)
     review_fix_prompt = get_prompt(r, "coder.review_fix")
-    from coding_agent.main import fix_pr_review
-    asyncio.create_task(asyncio.to_thread(
-        fix_pr_review,
-        item["id"], item["title"], item.get("description", ""),
-        payload.get("head_ref", ""), repo_full_name,
-        review_comments,
-        review_fix_prompt=review_fix_prompt,
-    ))
+    log_cb = _make_log_cb(item["id"])
+
+    async def _recode_task() -> None:
+        from coding_agent.main import fix_pr_review
+        try:
+            await asyncio.to_thread(
+                fix_pr_review,
+                item["id"], item["title"], item.get("description", ""),
+                payload.get("head_ref", ""), repo_full_name,
+                review_comments,
+                review_fix_prompt=review_fix_prompt,
+                log_line=log_cb,
+            )
+        finally:
+            _expire_log(item["id"])
+
+    asyncio.create_task(_recode_task())
     update_state(item["id"], "changes-requested")
     return {"status": "recode_started", "item_id": item["id"], "attempt": retries + 1}
 
@@ -828,6 +868,64 @@ async def get_metrics():
     from fastapi.responses import PlainTextResponse
     text = render_prometheus(_redis_or_503())
     return PlainTextResponse(text, media_type="text/plain; version=0.0.4; charset=utf-8")
+
+
+# ── Agent log stream (SSE) ────────────────────────────────────────────────────
+
+@app.get("/api/items/{item_id}/log-stream")
+async def log_stream(item_id: str):
+    """
+    Server-Sent Events stream of agent output lines for a work item.
+
+    Streams live while the item is in-progress or changes-requested.
+    When the agent finishes, drains remaining lines and sends an `event: done` frame.
+    Historical logs (24h TTL) are replayed immediately for completed items.
+    """
+    from fastapi.responses import StreamingResponse as _SR
+
+    if not get_item(item_id):
+        raise HTTPException(status_code=404, detail="item not found")
+
+    r = _redis_conn
+    if r is None:
+        raise HTTPException(status_code=503, detail="redis not ready")
+
+    key = f"agent_log:{item_id}"
+    _ACTIVE = {"in-progress", "changes-requested"}
+
+    async def _generate():
+        offset = 0
+        elapsed = 0.0
+        MAX_S = 1_200.0   # hard stop after 20 min in case state never changes
+        POLL_S = 0.5
+
+        while elapsed < MAX_S:
+            # Drain any new lines since last poll
+            raw_lines = r.lrange(key, offset, -1)
+            for raw in raw_lines:
+                text = raw.decode("utf-8", errors="replace")
+                yield f"data: {text}\n\n"
+                offset += 1
+
+            # Check whether the agent is still running
+            item = get_item(item_id)
+            if not item or item["state"] not in _ACTIVE:
+                # Final drain to catch lines written after the last LRANGE
+                for raw in r.lrange(key, offset, -1):
+                    yield f"data: {raw.decode('utf-8', errors='replace')}\n\n"
+                yield "event: done\ndata: finished\n\n"
+                return
+
+            await asyncio.sleep(POLL_S)
+            elapsed += POLL_S
+
+        yield "event: done\ndata: timeout\n\n"
+
+    return _SR(
+        _generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ── Health ─────────────────────────────────────────────────────────────────────

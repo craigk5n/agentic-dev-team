@@ -2,19 +2,29 @@
 opencode-based agentic coding loop.
 
 Runs `opencode run --dir <repo> --model <model> <prompt>` as a subprocess,
-streams output to the log, and returns a summary string.
+streams output line-by-line via an optional callback, and returns a summary string.
 opencode handles all file reads/writes/commands inside the repo directory.
 """
 
 from __future__ import annotations
 import os
+import re
 import shutil
 import subprocess
+import threading
+from collections.abc import Callable
+
 import structlog
 
 log = structlog.get_logger()
 
 DEFAULT_TIMEOUT = 900  # 15 minutes per story
+
+_ANSI_ESCAPE = re.compile(r'\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+
+
+def _clean(line: str) -> str:
+    return _ANSI_ESCAPE.sub("", line).rstrip("\r")
 
 
 def run_opencode_agent(
@@ -26,6 +36,7 @@ def run_opencode_agent(
     timeout: int = DEFAULT_TIMEOUT,
     review_comments: list[dict] | None = None,
     prompt_template: str = "",
+    log_line: Callable[[str], None] | None = None,
 ) -> str:
     """
     Run opencode non-interactively on the given repo and story.
@@ -97,27 +108,48 @@ def run_opencode_agent(
 
     log.info("opencode_start", model=model, repo=repo_dir, story=story_title)
 
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,  # merge stderr so caller sees everything
+        text=True,
+        env=env,
+    )
+
+    collected: list[str] = []
+
+    def _reader() -> None:
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            line = _clean(raw)
+            collected.append(line)
+            if log_line:
+                try:
+                    log_line(line)
+                except Exception:
+                    pass
+
+    reader = threading.Thread(target=_reader, daemon=True)
+    reader.start()
+
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=env,
-        )
+        proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        reader.join(timeout=5)
         raise RuntimeError(f"opencode timed out after {timeout}s")
 
-    # Log output regardless of exit code
-    if result.stdout:
-        log.info("opencode_stdout", output=result.stdout[-1000:])
-    if result.stderr:
-        log.warning("opencode_stderr", output=result.stderr[-500:])
+    reader.join(timeout=5)
+    output = "\n".join(collected)
 
-    if result.returncode != 0:
+    if output:
+        log.info("opencode_stdout", chars=len(output))
+
+    if proc.returncode != 0:
         raise RuntimeError(
-            f"opencode exited {result.returncode}: {result.stderr.strip()[-400:]}"
+            f"opencode exited {proc.returncode}: {output[-400:]}"
         )
 
     log.info("opencode_done", story=story_title)
-    return result.stdout.strip() or "Implementation complete"
+    return output.strip() or "Implementation complete"

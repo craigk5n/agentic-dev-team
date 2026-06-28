@@ -704,6 +704,49 @@ button.code-btn:hover { background: rgba(59,130,246,.25); }
   display: flex;
   gap: 8px;
 }
+
+/* ── Agent log pane ──────────────────────────────────────────── */
+
+.log-section { margin-top: 20px; }
+
+.log-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.log-header-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.log-status {
+  font-size: 11px;
+  color: var(--accent);
+}
+.log-status.live::before {
+  content: '●';
+  margin-right: 4px;
+  animation: blink 1s step-start infinite;
+}
+@keyframes blink { 50% { opacity: 0; } }
+
+.log-pre {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: #94a3b8;
+  font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: 11px;
+  height: 280px;
+  line-height: 1.5;
+  overflow-y: auto;
+  padding: 10px 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
 </style>
 </head>
 
@@ -933,6 +976,13 @@ button.code-btn:hover { background: rgba(59,130,246,.25); }
     <div class="drawer-body">
       <div class="drawer-meta" id="drawer-meta"></div>
       <div class="drawer-description" id="drawer-description"></div>
+      <div class="log-section" id="drawer-log-section" style="display:none">
+        <div class="log-header">
+          <span class="log-header-label">Agent Log</span>
+          <span class="log-status" id="drawer-log-status"></span>
+        </div>
+        <pre class="log-pre" id="drawer-log-pre"></pre>
+      </div>
     </div>
     <div class="drawer-footer" id="drawer-footer"></div>
   </div>
@@ -1593,6 +1643,12 @@ async function loadBoard() {
 
 // ── Item drawer ───────────────────────────────────────────────────────────────
 
+let _sseConn = null;
+
+function _closeSse() {
+  if (_sseConn) { _sseConn.close(); _sseConn = null; }
+}
+
 async function openDrawer(id) {
   const r = await fetch(`/api/items/${id}`);
   if (!r.ok) return;
@@ -1645,10 +1701,50 @@ async function openDrawer(id) {
     footer.innerHTML = '';
   }
 
+  // ── Log pane ───────────────────────────────────────────────────────────────
+  _closeSse();
+  const logSection = document.getElementById('drawer-log-section');
+  const logPre = document.getElementById('drawer-log-pre');
+  const logStatus = document.getElementById('drawer-log-status');
+
+  if (item.type === 'story') {
+    logSection.style.display = 'block';
+    logPre.textContent = '';
+
+    const isActive = ['in-progress', 'changes-requested'].includes(item.state);
+    logStatus.textContent = isActive ? 'Live' : 'Loading…';
+    logStatus.className = 'log-status' + (isActive ? ' live' : '');
+
+    const sse = new EventSource(`/api/items/${id}/log-stream`);
+    _sseConn = sse;
+
+    sse.onmessage = e => {
+      logPre.textContent += e.data + '\n';
+      logPre.scrollTop = logPre.scrollHeight;
+    };
+
+    sse.addEventListener('done', () => {
+      logStatus.textContent = logPre.textContent.trim() ? 'Done' : 'No log';
+      logStatus.className = 'log-status';
+      sse.close();
+      _sseConn = null;
+    });
+
+    sse.onerror = () => {
+      if (logStatus.textContent === 'Loading…') logStatus.textContent = 'No log';
+      logStatus.className = 'log-status';
+      sse.close();
+      _sseConn = null;
+    };
+  } else {
+    logSection.style.display = 'none';
+  }
+
   document.getElementById('drawer-overlay').classList.add('open');
 }
 
 function closeDrawer() {
+  _closeSse();
   document.getElementById('drawer-overlay').classList.remove('open');
 }
 

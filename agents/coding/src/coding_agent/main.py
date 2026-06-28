@@ -14,6 +14,7 @@ Flow:
 from __future__ import annotations
 import re
 import tempfile
+from collections.abc import Callable
 from typing import Any
 
 import structlog
@@ -47,6 +48,7 @@ def run_coding_agent(
     description: str,
     model_override: str = "",
     story_prompt: str = "",
+    log_line: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """
     Run the full coding agent loop for one story.
@@ -84,6 +86,7 @@ def run_coding_agent(
                 model=model,
                 openrouter_api_key=settings.openrouter_api_key,
                 prompt_template=story_prompt,
+                log_line=log_line,
             )
 
             sha = git_ops.commit_all(tmpdir, f"feat: {title}\n\n{summary}")
@@ -140,6 +143,7 @@ def fix_pr_review(
     review_comments: list[dict[str, Any]],
     model_override: str = "",
     review_fix_prompt: str = "",
+    log_line: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """
     Push a fix commit to an existing PR branch addressing review feedback.
@@ -169,6 +173,7 @@ def fix_pr_review(
                 openrouter_api_key=settings.openrouter_api_key,
                 review_comments=review_comments,
                 prompt_template=review_fix_prompt,
+                log_line=log_line,
             )
 
             sha = git_ops.commit_all(tmpdir, f"fix: address review comments\n\n{summary[:500]}")
