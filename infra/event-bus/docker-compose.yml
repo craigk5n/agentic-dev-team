@@ -26,23 +26,16 @@ x-event-bus-env: &event-bus-env
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
   ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-6}
   DEFAULT_REPO: ${DEFAULT_REPO:-devadmin/sandbox}
-  # Idea / Planner model — defaults to sonnet via OpenRouter
-  MODEL_IDEA: ${MODEL_IDEA:-openrouter/anthropic/claude-sonnet-4-6}
-  MODEL_PLANNER: ${MODEL_PLANNER:-openrouter/anthropic/claude-sonnet-4-6}
-  # Coding Agent — uses opencode with OpenRouter free models (no Anthropic key needed)
-  MODEL_CODER: ${MODEL_CODER:-opencode/deepseek-v4-flash-free}
-  # Reviewer Agent — set OPENROUTER_API_KEY to route through OpenRouter
+  # Idea / Planner — free models; override MODEL_IDEA / MODEL_PLANNER for higher quality
+  MODEL_IDEA: ${MODEL_IDEA:-openrouter/nvidia/nemotron-3-super-120b-a12b:free}
+  MODEL_PLANNER: ${MODEL_PLANNER:-openrouter/nvidia/nemotron-3-super-120b-a12b:free}
+  # Coding Agent — uses opencode with OpenRouter free model (no Anthropic key needed)
+  MODEL_CODER: ${MODEL_CODER:-openrouter/nvidia/nemotron-3-super-120b-a12b:free}
+  # Reviewer Agent — Sonnet for quality; set OPENROUTER_API_KEY to route through OpenRouter
   OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
   MODEL_REVIEWER: ${MODEL_REVIEWER:-openrouter/anthropic/claude-sonnet-4-6}
-  MODEL_TESTER: ${MODEL_TESTER:-openrouter/anthropic/claude-haiku-4-5}
-  MODEL_SECURITY: ${MODEL_SECURITY:-openrouter/anthropic/claude-haiku-4-5}
-  # Forgejo webhook secret (still used for PR webhooks)
-  PLANE_WEBHOOK_SECRET: ""
-  PLANE_API_TOKEN: ""
-  PLANE_BASE_URL: ""
-  PLANE_PUBLIC_URL: ""
-  PLANE_WORKSPACE_SLUG: ""
-  PLANE_PROJECT_ID: ""
+  MODEL_TESTER: ${MODEL_TESTER:-openrouter/meta-llama/llama-3.3-70b-instruct:free}
+  MODEL_SECURITY: ${MODEL_SECURITY:-openrouter/meta-llama/llama-3.3-70b-instruct:free}
 
 services:
   event-bus-redis:

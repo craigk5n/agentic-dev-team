@@ -27,7 +27,7 @@ The design principle is **the event-bus is the coordination backbone**: agents d
 | Work board / coordination state | **SQLite** embedded in the event-bus | Work items (ideas + stories) stored locally. Built-in kanban board UI served by the event-bus at `/`. No external service required. |
 | Git forge | **Forgejo** (self-hosted, single Go binary) | ~1 GB RAM, runs on a Pi. Pull requests, code review, branch protection, webhooks, REST API. Gitea is an interchangeable fallback. |
 | CI (tester role) | **Forgejo Actions** (GitHub-workflow-compatible) or **Woodpecker CI** | Lightweight; avoids the GitLab monolith. |
-| High-reasoning agents | **Claude Agent SDK** (headless, Python or TS) | Idea, planning, code review. Authenticate with a **direct Anthropic API key (pay-as-you-go)** — NOT a subscription. Headless subscription usage is metered against a small capped credit and will hard-stop mid-month. |
+| High-reasoning agents | **litellm** (Python) | Idea, planning, code review. Routes to any provider via a single API — OpenRouter, Anthropic direct, or local Ollama. Authenticate with `OPENROUTER_API_KEY` (recommended) or `ANTHROPIC_API_KEY`. |
 | Mechanical / high-volume agents | **opencode** (`-p` non-interactive mode, JSON output) | Model-agnostic (75+ providers incl. local Ollama). Use cheaper or local models for test-running and first-pass triage. |
 | Model routing | **OpenRouter** | Single API key routes to any provider/model. Free-tier models used by default for idea, planner, tester, and security agents; paid models for reviewer. |
 | Job queue | **Redis + RQ** | Webhook events enqueued in Redis, processed by RQ workers. Replaces Temporal for most use cases. |
@@ -85,11 +85,11 @@ Provide via environment variables (`.env` file in `infra/`):
 
 - `ANTHROPIC_API_KEY` — direct API key for Claude Agent SDK agents.
 - `OPENROUTER_API_KEY` — routes idea, planner, reviewer, tester, and security agents through OpenRouter.
-- Model routing config per role:
-  - `MODEL_IDEA`, `MODEL_PLANNER` — default to OpenRouter free models
-  - `MODEL_CODER` — opencode with OpenRouter free model
-  - `MODEL_REVIEWER` — OpenRouter Sonnet (paid)
-  - `MODEL_TESTER`, `MODEL_SECURITY` — OpenRouter Haiku (cheap)
+- Model routing config per role (all overridable via env var):
+  - `MODEL_IDEA`, `MODEL_PLANNER` — default to `openrouter/nvidia/nemotron-3-super-120b-a12b:free`
+  - `MODEL_CODER` — opencode with `openrouter/nvidia/nemotron-3-super-120b-a12b:free`
+  - `MODEL_REVIEWER` — defaults to `openrouter/anthropic/claude-sonnet-4-6`; code review benefits from higher reasoning quality
+  - `MODEL_TESTER`, `MODEL_SECURITY` — default to `openrouter/meta-llama/llama-3.3-70b-instruct:free`
 - `FORGEJO_API_TOKEN`, `FORGEJO_WEBHOOK_SECRET`, `FORGEJO_BASE_URL`, default branch protection rules.
 - `DEFAULT_REPO` — default Forgejo repo for coding agent.
 - `TEMPORAL_ADDRESS` (optional) — leave blank to use RQ fallback.
@@ -97,7 +97,14 @@ Provide via environment variables (`.env` file in `infra/`):
 - Gate flags from §8.
 - Per-agent rate limits and concurrency caps (cost control).
 
-## 10. Non-Functional Requirements
+## 10. Testing Standards
+
+- **Target coverage: 90%.** Failing threshold: **80%** — CI fails if any package drops below 80%.
+- **Test-driven development (TDD):** write tests first (RED), implement to pass (GREEN), refactor (IMPROVE). No feature code ships without a corresponding test.
+- **Local CI script:** `./ci.sh` at the repo root runs all packages' test suites with coverage in one command. Must pass before pushing.
+- **Omit runtime-only entry points** (e.g. worker scripts, sandbox runners) from coverage measurement — these are integration-tested via the running system, not unit tests.
+
+## 11. Non-Functional Requirements
 
 - **Cost control:** continuous multi-agent execution at API rates is the dominant cost. Mix models per role via OpenRouter, rate-limit polling, and cap concurrent agent runs. Surface a running token/cost estimate via `/telemetry`.
 - **Isolation:** each agent run executes in its own ephemeral container (when `SANDBOX_MODE=docker`) with a scoped token; no shared host shell; least-privilege git credentials (cannot push to `main`).
@@ -105,7 +112,7 @@ Provide via environment variables (`.env` file in `infra/`):
 - **Observability:** structured logs per run, linked to the work item ID and PR; `/telemetry` endpoint exposes cost and token counts per agent role.
 - **Auditability:** every status transition and verdict is traceable to an agent run and a board/PR comment.
 
-## 11. Suggested Build Phases
+## 12. Suggested Build Phases
 
 1. **Infra:** Stand up Forgejo and a CI runner. Configure branch protection on `main`. Verify REST APIs and webhooks.
 2. **Event bus:** Build a webhook receiver that validates signatures and dispatches events to an RQ job queue. Implement the SQLite work item store and kanban board UI. Define the work-item status model (§7).
@@ -115,7 +122,7 @@ Provide via environment variables (`.env` file in `infra/`):
 6. **Gates + durability:** Introduce toggleable gates; optionally upgrade from RQ to Temporal-backed durable runs with human-approval waits.
 7. **Hardening:** Per-agent sandboxing, rate/concurrency limits, cost telemetry, and observability dashboards.
 
-## 12. Acceptance Criteria
+## 13. Acceptance Criteria
 
 - Operator submits a project description; Idea Agent produces proposals in the board.
 - Approving an idea produces stories without further input.
@@ -124,7 +131,7 @@ Provide via environment variables (`.env` file in `infra/`):
 - A killed agent mid-run resumes or safely retries without duplicate PRs or corrupted state.
 - Whole stack runs within the resource budget of a single modest server.
 
-## 13. Open Decisions
+## 14. Open Decisions
 
 - Confirm Forgejo Actions vs Woodpecker CI for the tester.
 - Whether to introduce Temporal (Phase 6) or stay on RQ long-term.
