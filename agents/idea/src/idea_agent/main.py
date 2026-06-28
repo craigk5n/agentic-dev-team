@@ -18,6 +18,7 @@ log = structlog.get_logger()
 def expand_idea(
     prompt: str,
     model_override: str = "",
+    redis_conn=None,
 ) -> dict:
     """
     Expand a prompt into a structured proposal dict.
@@ -28,6 +29,7 @@ def expand_idea(
         prompt,
         model=model_override or settings.model_idea,
         api_key=settings.effective_api_key,
+        redis_conn=redis_conn,
     )
     log.info("idea_agent_done", title=proposal.get("title", ""))
     return proposal

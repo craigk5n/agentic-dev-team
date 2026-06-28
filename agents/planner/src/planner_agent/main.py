@@ -15,6 +15,7 @@ def run_planner(
     description: str,
     model_override: str = "",
     repo_full_name: str = "",
+    redis_conn=None,
 ) -> dict:
     """
     Decompose an approved idea into stories and return the plan.
@@ -30,6 +31,7 @@ def run_planner(
         model=model_override or settings.model_planner,
         api_key=settings.effective_api_key,
         default_repo=repo_full_name or settings.default_repo,
+        redis_conn=redis_conn,
     )
 
     log.info(

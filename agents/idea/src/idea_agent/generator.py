@@ -28,7 +28,7 @@ Respond ONLY with valid JSON (no markdown fences):
 """
 
 
-def expand_prompt(prompt: str, *, model: str, api_key: str = "") -> dict:
+def expand_prompt(prompt: str, *, model: str, api_key: str = "", redis_conn=None) -> dict:
     """Call LLM to turn a one-liner into a structured idea dict."""
     kwargs: dict = {
         "model": model,
@@ -42,6 +42,12 @@ def expand_prompt(prompt: str, *, model: str, api_key: str = "") -> dict:
         kwargs["api_key"] = api_key
 
     resp = litellm.completion(**kwargs)
+    if redis_conn is not None:
+        try:
+            from reviewer.telemetry import record_usage
+            record_usage(redis_conn, "idea", model, resp)
+        except Exception:
+            pass
     raw = resp.choices[0].message.content or ""
     return _parse(raw, prompt)
 

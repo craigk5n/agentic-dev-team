@@ -263,7 +263,7 @@ async def submit_idea(request: Request):
 
     try:
         from idea_agent.main import expand_idea
-        proposal = expand_idea(prompt, model_override=model_override)
+        proposal = expand_idea(prompt, model_override=model_override, redis_conn=_redis_conn)
     except ImportError:
         raise HTTPException(status_code=503, detail="idea_agent package not installed")
     except Exception as exc:
@@ -391,7 +391,7 @@ async def _run_planner(item_id: str, title: str, description: str) -> None:
     try:
         from planner_agent.main import run_planner
         plan = await asyncio.to_thread(run_planner, item_id, title, description, model,
-                                       repo_full_name=repo_full)
+                                       repo_full_name=repo_full, redis_conn=_redis_conn)
     except ImportError:
         log.error("planner_agent_not_installed")
         return
@@ -483,6 +483,20 @@ async def _run_coding_agent(item_id: str, title: str, description: str, story_pr
     else:
         log.warning("coding_agent_no_changes", id=item_id)
         update_state(item_id, "ready")
+
+    # Record coder call — opencode runs as subprocess so no token counts available
+    if _redis_conn:
+        try:
+            from reviewer.telemetry import record_usage
+            from coding_agent.config import settings as _cs
+            model = _cs.model_coder or "opencode"
+            import time
+            key = f"telemetry:llm:{time.strftime('%Y-%m-%d')}"
+            prefix = f"coder:{model}"
+            _redis_conn.hincrby(key, f"{prefix}:calls", 1)
+            _redis_conn.expire(key, 30 * 86_400)
+        except Exception:
+            pass
 
 
 async def _run_recode_agent(review_event: ForgejoReviewEvent) -> None:

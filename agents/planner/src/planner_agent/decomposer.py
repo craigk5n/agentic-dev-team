@@ -53,6 +53,7 @@ def decompose_idea(
     model: str,
     api_key: str = "",
     default_repo: str = "devadmin/sandbox",
+    redis_conn=None,
 ) -> dict:
     kwargs: dict = {
         "model": model,
@@ -73,6 +74,12 @@ def decompose_idea(
         kwargs["api_key"] = api_key
 
     resp = litellm.completion(**kwargs)
+    if redis_conn is not None:
+        try:
+            from reviewer.telemetry import record_usage
+            record_usage(redis_conn, "planner", model, resp)
+        except Exception:
+            pass
     raw = resp.choices[0].message.content or ""
     return _parse(raw, title, default_repo)
 
