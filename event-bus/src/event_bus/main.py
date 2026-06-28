@@ -481,8 +481,17 @@ async def _run_coding_agent(item_id: str, title: str, description: str, story_pr
             set_pr_url(item_id, result["pr_url"])
         log.info("coding_agent_complete", id=item_id, pr=result.get("pr_url"))
     else:
+        # Nothing to implement — mark done and advance to the next story so we don't loop
         log.warning("coding_agent_no_changes", id=item_id)
-        update_state(item_id, "ready")
+        update_state(item_id, "done")
+        unlocked = unlock_next_story(item_id)
+        if unlocked:
+            update_state(unlocked["id"], "in-progress")
+            story_prompt = get_prompt(_redis_or_503(), "coder.story")
+            asyncio.create_task(_run_coding_agent(
+                unlocked["id"], unlocked["title"], unlocked.get("description") or "", story_prompt,
+            ))
+            log.info("coding_agent_auto_triggered", story_id=unlocked["id"], reason="no_changes_skip")
 
     # Record coder call — opencode runs as subprocess so no token counts available
     if _redis_conn:
