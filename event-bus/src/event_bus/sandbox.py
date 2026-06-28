@@ -40,7 +40,7 @@ _CPUS = float(os.environ.get("SANDBOX_CPUS", "1.0"))
 # Keys are prefixes that appear in func dotted paths.
 _ROLE_ENV: dict[str, list[str]] = {
     "reviewer": [
-        "FORGEJO_API_TOKEN", "FORGEJO_BASE_URL", "FORGEJO_GIT_URL",
+        "FORGEJO_API_TOKEN", "FORGEJO_REVIEWER_TOKEN", "FORGEJO_BASE_URL", "FORGEJO_GIT_URL",
         "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY",
         "MODEL_REVIEWER", "MODEL_TESTER", "MODEL_SECURITY",
         "REDIS_URL",

@@ -810,6 +810,10 @@ class TestProvisionProjectRepo:
         fj.set_branch_protection.assert_called_once()
         bp_args, _ = fj.set_branch_protection.call_args
         assert "add-login-page" in bp_args and "main" in bp_args
+        # reviewer-bot granted write access for least-privilege review/merge
+        fj.add_collaborator.assert_called_once()
+        co_args, _ = fj.add_collaborator.call_args
+        assert "reviewer-bot" in co_args and "write" in co_args
         fj.create_webhook.assert_called_once()
 
     def test_existing_repo_skips_workflow_commit(self, monkeypatch):
@@ -823,6 +827,7 @@ class TestProvisionProjectRepo:
         fj.create_repo.assert_not_called()
         fj.create_file.assert_not_called()
         fj.set_branch_protection.assert_not_called()
+        fj.add_collaborator.assert_not_called()
         fj.create_webhook.assert_called_once()
 
     def test_ci_workflow_commit_failure_is_non_fatal(self, monkeypatch):

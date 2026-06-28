@@ -135,7 +135,7 @@ def run_security_scan(
     log.info("security_scan_start", repo=repo_full_name, pr=pr_number, sha=head_sha[:8])
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        git_ops.clone(settings.forgejo_clone_base, owner, repo, settings.forgejo_api_token, tmpdir, branch=head_ref)
+        git_ops.clone(settings.forgejo_clone_base, owner, repo, settings.effective_forgejo_token, tmpdir, branch=head_ref)
         git_ops.checkout(tmpdir, head_sha)
 
         semgrep_findings, semgrep_err = _run_semgrep(tmpdir)
@@ -157,7 +157,7 @@ def run_security_scan(
         "secret_count": len(secret_findings),
     }
 
-    with ForgejoClient(settings.forgejo_base_url, settings.forgejo_api_token) as forgejo:
+    with ForgejoClient(settings.forgejo_base_url, settings.effective_forgejo_token) as forgejo:
         forgejo.post_pr_comment(owner, repo, pr_number, comment)
 
     r = redis.from_url(settings.redis_url, decode_responses=False)

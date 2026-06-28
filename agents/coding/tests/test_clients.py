@@ -102,6 +102,23 @@ def test_forgejo_set_branch_protection():
     assert sent["required_approvals"] == 0      # no hard approval gate (admin auto-merge)
 
 
+def test_forgejo_add_collaborator():
+    captured = {}
+
+    def _handler(request):
+        captured["body"] = request.content
+        return httpx.Response(204)
+
+    with respx.mock:
+        respx.put(
+            f"{BASE_FORGEJO}/api/v1/repos/alice/backend/collaborators/reviewer-bot"
+        ).mock(side_effect=_handler)
+        with ForgejoClient(BASE_FORGEJO, "token") as client:
+            client.add_collaborator("alice", "backend", "reviewer-bot", "write")
+    import json as _json
+    assert _json.loads(captured["body"])["permission"] == "write"
+
+
 def test_forgejo_http_error_raises():
     with respx.mock:
         respx.get(f"{BASE_FORGEJO}/api/v1/repos/alice/nope").mock(

@@ -47,6 +47,12 @@ class Settings(BaseSettings):
         return self.openrouter_api_key or self.anthropic_api_key
 
     @property
+    def effective_forgejo_token(self) -> str:
+        """Forgejo token for the reviewer's PR operations — prefer the least-privilege
+        reviewer-bot identity, falling back to the admin token if unset."""
+        return self.forgejo_reviewer_token or self.forgejo_api_token
+
+    @property
     def forgejo_clone_base(self) -> str:
         return self.forgejo_git_url or self.forgejo_base_url
 

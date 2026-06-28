@@ -124,6 +124,18 @@ class ForgejoClient:
         log.info("forgejo_branch_protected", repo=f"{owner}/{repo}", branch=branch)
         return resp.json()
 
+    def add_collaborator(self, owner: str, repo: str, username: str,
+                         permission: str = "write") -> None:
+        """Grant `username` collaborator access (permission: read|write|admin).
+        Idempotent — Forgejo returns 204 whether adding or updating."""
+        resp = self._http.put(
+            f"{self._base}/api/v1/repos/{owner}/{repo}/collaborators/{username}",
+            json={"permission": permission},
+        )
+        resp.raise_for_status()
+        log.info("forgejo_collaborator_added", repo=f"{owner}/{repo}",
+                 user=username, permission=permission)
+
     def repo_exists(self, owner: str, name: str) -> bool:
         resp = self._http.get(f"{self._base}/api/v1/repos/{owner}/{name}")
         return resp.status_code == 200

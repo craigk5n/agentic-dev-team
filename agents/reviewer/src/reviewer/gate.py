@@ -116,7 +116,7 @@ def apply_gate(
             + ", ".join(failing)
             + ".\n\nThe coding agent will push a fix automatically."
         )
-        with ForgejoClient(settings.forgejo_base_url, settings.forgejo_api_token) as fj:
+        with ForgejoClient(settings.forgejo_base_url, settings.effective_forgejo_token) as fj:
             fj.post_pr_comment(owner, repo, pr_number, body)
             pr_data = fj.get_pr(owner, repo, pr_number)
         head_ref = pr_data.get("head", {}).get("ref", "")
@@ -132,7 +132,7 @@ def apply_gate(
             "⛔ **Merge blocked** — security scan failed.\n\n"
             "Resolve the findings above and push a new commit to re-run checks."
         )
-        with ForgejoClient(settings.forgejo_base_url, settings.forgejo_api_token) as fj:
+        with ForgejoClient(settings.forgejo_base_url, settings.effective_forgejo_token) as fj:
             fj.post_pr_comment(owner, repo, pr_number, msg)
         log.info("gate_blocked_security", repo=repo_full_name, pr=pr_number)
         return {"gate_status": "blocked", "reason": "security_fail"}
@@ -152,7 +152,7 @@ def apply_gate(
             "```\n"
             "Or set `gate.pr_merge_approval = false` in `/api/config` for auto-merge."
         )
-        with ForgejoClient(settings.forgejo_base_url, settings.forgejo_api_token) as fj:
+        with ForgejoClient(settings.forgejo_base_url, settings.effective_forgejo_token) as fj:
             fj.post_pr_comment(owner, repo, pr_number, msg)
         log.info("gate_awaiting_approval", repo=repo_full_name, pr=pr_number)
         return {"gate_status": "awaiting_approval"}
@@ -223,7 +223,7 @@ def _ci_gate(
     if not settings.ci_wait_enabled:
         return None
 
-    with ForgejoClient(settings.forgejo_base_url, settings.forgejo_api_token) as fj:
+    with ForgejoClient(settings.forgejo_base_url, settings.effective_forgejo_token) as fj:
         result = _wait_for_ci(
             fj, owner, repo, pr_number,
             timeout=settings.ci_wait_timeout,
@@ -240,7 +240,7 @@ def _ci_gate(
             "❌ **CI failed** — the automated test workflow did not pass.\n\n"
             "The coding agent will push a fix automatically."
         )
-        with ForgejoClient(settings.forgejo_base_url, settings.forgejo_api_token) as fj:
+        with ForgejoClient(settings.forgejo_base_url, settings.effective_forgejo_token) as fj:
             fj.post_pr_comment(owner, repo, pr_number, body)
             pr_data = fj.get_pr(owner, repo, pr_number)
         head_ref = (pr_data.get("head") or {}).get("ref", "")
@@ -251,7 +251,7 @@ def _ci_gate(
         return {"gate_status": "changes_requested", "failing": ["ci"]}
 
     # timeout — hold the merge for a human/retry rather than merging on unknown CI
-    with ForgejoClient(settings.forgejo_base_url, settings.forgejo_api_token) as fj:
+    with ForgejoClient(settings.forgejo_base_url, settings.effective_forgejo_token) as fj:
         fj.post_pr_comment(
             owner, repo, pr_number,
             "⏳ **Merge held** — CI did not finish within the timeout. "
@@ -263,7 +263,7 @@ def _ci_gate(
 
 def _auto_merge(owner: str, repo: str, pr_number: int, repo_full_name: str) -> dict:
     try:
-        with ForgejoClient(settings.forgejo_base_url, settings.forgejo_api_token) as fj:
+        with ForgejoClient(settings.forgejo_base_url, settings.effective_forgejo_token) as fj:
             fj.merge_pr(owner, repo, pr_number)
             pr_data = fj.get_pr(owner, repo, pr_number)
         pr_url = pr_data.get("html_url", "")

@@ -160,7 +160,7 @@ def post_aggregated_and_gate(
 
     owner, repo = repo_full_name.split("/", 1)
     body = format_summary_comment(all_verdicts)
-    with ForgejoClient(settings.forgejo_base_url, settings.forgejo_api_token) as fj:
+    with ForgejoClient(settings.forgejo_base_url, settings.effective_forgejo_token) as fj:
         fj.post_pr_comment(owner, repo, pr_number, body)
     log.info("aggregated_verdict_posted", repo=repo_full_name, pr=pr_number)
 

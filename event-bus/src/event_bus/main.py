@@ -413,12 +413,20 @@ def _provision_project_repo(idea_id: str, title: str) -> str:
                 except Exception as exc:
                     log.warning("ci_workflow_commit_failed", repo=repo_full, error=str(exc))
                 # Protect main: block direct pushes (agents work via PRs). No required
-                # approvals/status — the reviewer auto-merges as admin and a hard gate
-                # would deadlock that; the event-bus verdicts remain the real gate.
+                # approvals/status — the reviewer auto-merges and a hard gate would
+                # deadlock that; the event-bus verdicts remain the real gate.
                 try:
                     fj.set_branch_protection(owner, repo_name, "main")
                 except Exception as exc:
                     log.warning("branch_protection_failed", repo=repo_full, error=str(exc))
+                # Grant the reviewer-bot write access so the reviewer agent can
+                # comment/merge with its own least-privilege token (not the admin token).
+                reviewer_user = settings.forgejo_reviewer_user
+                if reviewer_user and reviewer_user != owner:
+                    try:
+                        fj.add_collaborator(owner, repo_name, reviewer_user, "write")
+                    except Exception as exc:
+                        log.warning("reviewer_collaborator_failed", repo=repo_full, error=str(exc))
             # Register webhook (idempotent — Forgejo allows duplicates but we accept that)
             webhook_url = f"http://event-bus:8080/webhook/forgejo"
             fj.create_webhook(owner, repo_name, webhook_url, settings.forgejo_webhook_secret)

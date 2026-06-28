@@ -49,7 +49,7 @@ def run_code_review(
     log.info("code_review_start", repo=repo_full_name, pr=pr_number, sha=head_sha[:8], model=model)
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        git_ops.clone(settings.forgejo_clone_base, owner, repo, settings.forgejo_api_token, tmpdir, branch=head_ref)
+        git_ops.clone(settings.forgejo_clone_base, owner, repo, settings.effective_forgejo_token, tmpdir, branch=head_ref)
         diff = git_ops.get_diff(tmpdir, base_ref, head_sha)
 
     if not diff.strip():
@@ -65,7 +65,7 @@ def run_code_review(
 
     verdict["role"] = "code_review"
 
-    with ForgejoClient(settings.forgejo_base_url, settings.forgejo_api_token) as forgejo:
+    with ForgejoClient(settings.forgejo_base_url, settings.effective_forgejo_token) as forgejo:
         forgejo.post_pr_comment(owner, repo, pr_number, _format_review_comment(verdict))
 
     r = redis.from_url(settings.redis_url, decode_responses=False)
