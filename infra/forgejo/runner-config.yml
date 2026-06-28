@@ -23,7 +23,10 @@ cache:
   port: 0
 
 container:
-  network: ""
+  # Attach job containers to Forgejo's network so `actions/checkout` can resolve
+  # the internal `forgejo:3000` clone host. Without this, the runner puts each job
+  # on an isolated per-workflow network and checkout fails ("Could not resolve host").
+  network: "forgejo_default"
   privileged: false
   options:
   valid_volumes: []

@@ -773,3 +773,65 @@ class TestApprovePrTemporal:
         resp = client.post("/api/prs/owner/repo/5/approve", json={})
         assert resp.status_code == 502
         assert "Temporal signal failed" in resp.json()["detail"]
+
+
+# ── _provision_project_repo: commits CI workflow on fresh repos ───────────────
+
+class TestProvisionProjectRepo:
+    def _patch_common(self, monkeypatch, fj):
+        from event_bus import main as m
+        FakeClient = MagicMock()
+        FakeClient.return_value.__enter__.return_value = fj
+        FakeClient.return_value.__exit__.return_value = False
+        import coding_agent.forgejo_client as fc
+        monkeypatch.setattr(fc, "ForgejoClient", FakeClient)
+        resp = MagicMock()
+        resp.json.return_value = {"login": "devadmin"}
+        resp.raise_for_status.return_value = None
+        monkeypatch.setattr("httpx.get", lambda *a, **k: resp)
+        return m
+
+    def test_fresh_repo_commits_ci_workflow(self, monkeypatch):
+        from event_bus.ci_workflow import CI_WORKFLOW_PATH, CI_WORKFLOW_YAML
+        fj = MagicMock()
+        fj.repo_exists.return_value = False
+        m = self._patch_common(monkeypatch, fj)
+
+        result = m._provision_project_repo("idea-1", "Add Login Page")
+
+        assert result == "devadmin/add-login-page"
+        fj.create_repo.assert_called_once()
+        fj.create_file.assert_called_once()
+        args, kwargs = fj.create_file.call_args
+        assert kwargs.get("branch") == "main"
+        assert CI_WORKFLOW_PATH in args
+        assert CI_WORKFLOW_YAML in args
+        # branch protection set on fresh repo (block direct push to main)
+        fj.set_branch_protection.assert_called_once()
+        bp_args, _ = fj.set_branch_protection.call_args
+        assert "add-login-page" in bp_args and "main" in bp_args
+        fj.create_webhook.assert_called_once()
+
+    def test_existing_repo_skips_workflow_commit(self, monkeypatch):
+        fj = MagicMock()
+        fj.repo_exists.return_value = True
+        m = self._patch_common(monkeypatch, fj)
+
+        result = m._provision_project_repo("idea-2", "Existing Project")
+
+        assert result == "devadmin/existing-project"
+        fj.create_repo.assert_not_called()
+        fj.create_file.assert_not_called()
+        fj.set_branch_protection.assert_not_called()
+        fj.create_webhook.assert_called_once()
+
+    def test_ci_workflow_commit_failure_is_non_fatal(self, monkeypatch):
+        fj = MagicMock()
+        fj.repo_exists.return_value = False
+        fj.create_file.side_effect = RuntimeError("contents API down")
+        m = self._patch_common(monkeypatch, fj)
+
+        # Failure to commit the workflow must not fail provisioning
+        result = m._provision_project_repo("idea-3", "Resilient Repo")
+        assert result == "devadmin/resilient-repo"
+        fj.create_webhook.assert_called_once()

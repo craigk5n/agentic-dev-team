@@ -33,6 +33,7 @@ from dataclasses import asdict
 from collections.abc import Callable
 
 from event_bus.config import settings
+from event_bus.ci_workflow import CI_WORKFLOW_PATH, CI_WORKFLOW_YAML
 from event_bus.config_store import get_config, patch_config
 from event_bus.prompt_store import get_prompt, set_prompt, delete_prompt, list_prompts
 from event_bus.dispatch import dispatch_forgejo_event
@@ -397,12 +398,31 @@ def _provision_project_repo(idea_id: str, title: str) -> str:
     repo_full = f"{owner}/{repo_name}"
     try:
         with ForgejoClient(coding_settings.forgejo_base_url, coding_settings.forgejo_api_token) as fj:
+            created = False
             if not fj.repo_exists(owner, repo_name):
                 fj.create_repo(repo_name, description=title)
+                created = True
+            # Commit the default CI workflow on fresh repos so the Actions runner
+            # tests every push/PR and reports a status the Tester verdict can gate on.
+            if created:
+                try:
+                    fj.create_file(
+                        owner, repo_name, CI_WORKFLOW_PATH, CI_WORKFLOW_YAML,
+                        message="ci: add default test workflow", branch="main",
+                    )
+                except Exception as exc:
+                    log.warning("ci_workflow_commit_failed", repo=repo_full, error=str(exc))
+                # Protect main: block direct pushes (agents work via PRs). No required
+                # approvals/status — the reviewer auto-merges as admin and a hard gate
+                # would deadlock that; the event-bus verdicts remain the real gate.
+                try:
+                    fj.set_branch_protection(owner, repo_name, "main")
+                except Exception as exc:
+                    log.warning("branch_protection_failed", repo=repo_full, error=str(exc))
             # Register webhook (idempotent — Forgejo allows duplicates but we accept that)
             webhook_url = f"http://event-bus:8080/webhook/forgejo"
             fj.create_webhook(owner, repo_name, webhook_url, settings.forgejo_webhook_secret)
-        log.info("project_repo_provisioned", repo=repo_full, idea=idea_id)
+        log.info("project_repo_provisioned", repo=repo_full, idea=idea_id, ci_workflow=created)
     except Exception as exc:
         log.error("project_repo_provision_failed", repo=repo_full, error=str(exc))
         return ""

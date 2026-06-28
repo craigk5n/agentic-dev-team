@@ -87,6 +87,43 @@ class ForgejoClient:
         log.info("forgejo_repo_created", repo=repo.get("full_name"))
         return repo
 
+    def create_file(self, owner: str, repo: str, path: str, content: str,
+                    message: str, branch: str = "main") -> dict[str, Any]:
+        """Create a new file on `branch` via the Forgejo contents API (base64 body)."""
+        import base64
+        b64 = base64.b64encode(content.encode("utf-8")).decode("ascii")
+        resp = self._http.post(
+            f"{self._base}/api/v1/repos/{owner}/{repo}/contents/{path}",
+            json={"content": b64, "message": message, "branch": branch},
+        )
+        resp.raise_for_status()
+        log.info("forgejo_file_created", repo=f"{owner}/{repo}", path=path, branch=branch)
+        return resp.json()
+
+    def set_branch_protection(self, owner: str, repo: str, branch: str = "main",
+                              enable_push: bool = False,
+                              required_approvals: int = 0) -> dict[str, Any]:
+        """
+        Protect `branch`: block direct pushes so all changes go through PRs.
+
+        Defaults intentionally do NOT require approvals or status checks: the
+        reviewer agent auto-merges via the API as a repo admin, and Forgejo blocks
+        even admin merges when a required approval/status check is unmet — so a hard
+        gate here would deadlock the autonomous merge. CI still runs and reports a
+        status; the event-bus verdict aggregation is the real merge gate.
+        """
+        resp = self._http.post(
+            f"{self._base}/api/v1/repos/{owner}/{repo}/branch_protections",
+            json={
+                "branch_name": branch,
+                "enable_push": enable_push,
+                "required_approvals": required_approvals,
+            },
+        )
+        resp.raise_for_status()
+        log.info("forgejo_branch_protected", repo=f"{owner}/{repo}", branch=branch)
+        return resp.json()
+
     def repo_exists(self, owner: str, name: str) -> bool:
         resp = self._http.get(f"{self._base}/api/v1/repos/{owner}/{name}")
         return resp.status_code == 200
