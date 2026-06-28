@@ -88,7 +88,7 @@ Provide via environment variables (`.env` file in `infra/`):
 - Model routing config per role (all overridable via env var):
   - `MODEL_IDEA`, `MODEL_PLANNER` — default to `openrouter/nvidia/nemotron-3-super-120b-a12b:free`
   - `MODEL_CODER` — opencode with `openrouter/nvidia/nemotron-3-super-120b-a12b:free`
-  - `MODEL_REVIEWER` — defaults to `openrouter/anthropic/claude-sonnet-4-6`; code review benefits from higher reasoning quality
+  - `MODEL_REVIEWER` — defaults to `openrouter/nvidia/nemotron-3-super-120b-a12b:free`
   - `MODEL_TESTER`, `MODEL_SECURITY` — default to `openrouter/meta-llama/llama-3.3-70b-instruct:free`
 - `FORGEJO_API_TOKEN`, `FORGEJO_WEBHOOK_SECRET`, `FORGEJO_BASE_URL`, default branch protection rules.
 - `DEFAULT_REPO` — default Forgejo repo for coding agent.

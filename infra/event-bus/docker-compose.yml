@@ -33,7 +33,7 @@ x-event-bus-env: &event-bus-env
   MODEL_CODER: ${MODEL_CODER:-openrouter/nvidia/nemotron-3-super-120b-a12b:free}
   # Reviewer Agent — Sonnet for quality; set OPENROUTER_API_KEY to route through OpenRouter
   OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
-  MODEL_REVIEWER: ${MODEL_REVIEWER:-openrouter/anthropic/claude-sonnet-4-6}
+  MODEL_REVIEWER: ${MODEL_REVIEWER:-openrouter/nvidia/nemotron-3-super-120b-a12b:free}
   MODEL_TESTER: ${MODEL_TESTER:-openrouter/meta-llama/llama-3.3-70b-instruct:free}
   MODEL_SECURITY: ${MODEL_SECURITY:-openrouter/meta-llama/llama-3.3-70b-instruct:free}
 
