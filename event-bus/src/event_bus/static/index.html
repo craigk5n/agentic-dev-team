@@ -697,6 +697,23 @@ button.code-btn:hover { background: rgba(59,130,246,.25); }
   color: var(--text);
   white-space: pre-wrap;
 }
+.drawer-description.md-body { white-space: normal; }
+.md-body h1,.md-body h2,.md-body h3 { font-size:13px; font-weight:600; margin:14px 0 4px; color:var(--text); }
+.md-body p { margin:0 0 8px; }
+.md-body ul,.md-body ol { padding-left:18px; margin:0 0 8px; }
+.md-body li { margin-bottom:2px; }
+.md-body code { background:var(--surface2); padding:1px 5px; border-radius:3px; font-family:monospace; font-size:12px; }
+.md-body pre { background:var(--surface2); padding:10px 12px; border-radius:6px; overflow-x:auto; margin:0 0 8px; }
+.md-body pre code { background:none; padding:0; }
+.md-body strong { color:var(--text); font-weight:600; }
+.plan-story-list { display:flex; flex-direction:column; gap:6px; }
+.plan-story-row { display:flex; align-items:flex-start; gap:8px; padding:8px 10px; background:var(--surface2); border-radius:6px; }
+.plan-story-row:hover { background:var(--surface3,#2a2d3a); }
+.plan-seq { font-size:11px; color:var(--muted); min-width:18px; padding-top:2px; }
+.plan-dot { width:8px; height:8px; border-radius:50%; margin-top:5px; flex-shrink:0; }
+.plan-story-text { flex:1; min-width:0; }
+.plan-story-title { font-size:13px; font-weight:500; }
+.plan-story-desc { font-size:12px; color:var(--muted); margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .drawer-description h2 { font-size: 14px; margin: 16px 0 6px; color: var(--text); }
 .drawer-footer {
   padding: 16px 24px;
@@ -1658,16 +1675,53 @@ async function openDrawer(id) {
     `<span>${item.type}</span><span>${item.state.replace(/-/g,' ')}</span><span>${fmtDate(item.created_at)}</span>`;
 
   // Show prompt (the original user input) then LLM description
+  const md = typeof marked !== 'undefined' ? t => marked.parse(t, {breaks:true}) : t => `<pre style="white-space:pre-wrap">${escHtml(t)}</pre>`;
   let body = '';
   if (item.prompt) {
     body += `<div style="color:var(--muted);font-size:12px;margin-bottom:8px">Original prompt</div>`;
     body += `<div style="background:var(--surface2);border-radius:6px;padding:10px 14px;margin-bottom:16px;font-size:13px">${escHtml(item.prompt)}</div>`;
   }
   if (item.description) {
-    body += `<div style="color:var(--muted);font-size:12px;margin-bottom:8px">Proposal</div>`;
-    body += `<div class="drawer-description">${escHtml(item.description)}</div>`;
+    const label = item.type === 'idea' ? 'Proposal' : 'Description';
+    body += `<div style="color:var(--muted);font-size:12px;margin-bottom:8px">${label}</div>`;
+    body += `<div class="drawer-description md-body">${md(item.description)}</div>`;
   }
+
+  // For approved/planned ideas, also show the child stories as a plan view
+  if (item.type === 'idea' && item.state !== 'pending-approval') {
+    const br = await fetch('/api/items');
+    if (br.ok) {
+      const board = await br.json();
+      const children = board.groups.flatMap(g => g.items.filter(i => i.parent_id === item.id))
+        .sort((a, b) => (a.sequence || 0) - (b.sequence || 0));
+      if (children.length) {
+        body += `<div style="color:var(--muted);font-size:12px;margin:16px 0 8px">Plan (${children.length} stories)</div>`;
+        body += `<div class="plan-story-list">`;
+        for (const s of children) {
+          const stateColor = {'ready':'#22c55e','in-progress':'#f59e0b','in-review':'#a78bfa',
+            'merged':'#60a5fa','done':'#60a5fa','backlog':'#6b7280','approved':'#22c55e'}[s.state] || '#6b7280';
+          const desc = (s.description || '').replace(/^repo:[^\n]*\n?/, '').split('\n')[0].trim();
+          body += `<div class="plan-story-row" data-id="${s.id}">
+            <span class="plan-seq">${s.sequence || '?'}</span>
+            <span class="plan-dot" style="background:${stateColor}"></span>
+            <div class="plan-story-text">
+              <div class="plan-story-title">${escHtml(s.title)}</div>
+              ${desc ? `<div class="plan-story-desc">${escHtml(desc)}</div>` : ''}
+            </div>
+          </div>`;
+        }
+        body += `</div>`;
+      }
+    }
+  }
+
   document.getElementById('drawer-description').innerHTML = body;
+
+  // Child story rows open that story's drawer
+  document.getElementById('drawer-description').querySelectorAll('.plan-story-row[data-id]').forEach(el => {
+    el.style.cursor = 'pointer';
+    el.addEventListener('click', () => openDrawer(el.dataset.id));
+  });
 
   // Footer actions
   const footer = document.getElementById('drawer-footer');
@@ -1761,5 +1815,6 @@ buildConfigForms();
 loadBoard();
 loadHealth();
 </script>
+<script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
 </body>
 </html>
