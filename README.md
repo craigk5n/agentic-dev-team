@@ -2,6 +2,14 @@
 
 A self-hosted autonomous coding team. You describe what to build and approve ideas; a pipeline of AI agents handles planning, coding, review, testing, and security checking end-to-end.
 
+> ## ⚠️ Read this before you deploy
+>
+> **This is a single-user system with NO authentication on the board.** The board UI and API (`http://<host>:8090`) are wide open — there is no login. **Anyone who can reach that URL can submit ideas, and every idea kicks off LLM calls across the whole pipeline (idea → planner → coder → reviewer + tester + security).**
+>
+> **If you expose this URL on the public internet — or any network you don't fully trust — a stranger can run up your LLM bill,** exhaust your API quota, or get your provider account flagged for abuse. With a paid `ANTHROPIC_API_KEY` / `OPENROUTER_API_KEY`, that is real money.
+>
+> **Keep it bound to `localhost` or a trusted private LAN.** If you need remote access, put it behind a VPN or an authenticating reverse proxy. See [Security & access](#security--access).
+
 ## How it works
 
 **Core principle:** The work board is the coordination backbone. Agents never talk to each other directly — they react to board and git events, claim work items, do their job, and post results back.
@@ -55,7 +63,26 @@ cp .env.example .env        # fill in API keys and secrets
 ./verify.sh                 # smoke-tests all APIs
 ```
 
-Then open `http://localhost:8090` to access the board.
+Then open `http://localhost:8090` to access the board — **on this machine only.** Do not forward this port or bind it to a public interface (see below).
+
+## Security & access
+
+This system is designed for a **single operator on a trusted machine or LAN.** Understand these properties before deploying:
+
+- **The board has no authentication.** Every endpoint under `http://<host>:8090` — submitting ideas, approving/rejecting, approving PR merges, and changing runtime config (gate flags, model selection, rate limits) — is reachable by anyone who can open the URL. There is no login, token, or user concept on the board.
+- **Open access = open wallet.** Submitting an idea triggers the full agent pipeline, and every stage is an LLM call. A malicious or careless visitor can submit ideas in a loop and **drive up your LLM bill, burn through your API quota, or get your provider account suspended for abuse.** This risk is highest with a paid `ANTHROPIC_API_KEY` or `OPENROUTER_API_KEY`; even "free" OpenRouter models have rate limits an attacker can exhaust.
+- **Agents can act on your forge.** A submitted idea ultimately creates repos, branches, and PRs in Forgejo and merges them. Exposing the board hands that capability to whoever reaches it.
+
+**Do:**
+- Keep the board bound to `localhost` (default) or a private network segment you control.
+- For remote access, front it with a **VPN** (e.g. WireGuard/Tailscale) or an **authenticating reverse proxy** (nginx/Caddy/oauth2-proxy with HTTP basic auth or SSO). Never put the raw port on the public internet.
+- Set per-role **rate and concurrency limits** (`PATCH /api/config`) and prefer free/local models as a cost backstop — but treat these as defense-in-depth, not a substitute for network isolation.
+- Keep `SANDBOX_MODE=docker` so coding agents run with scoped, least-privilege credentials that cannot push to `main`.
+
+**Don't:**
+- Don't port-forward `:8090` on your router, bind it to `0.0.0.0` on an untrusted network, or share the URL with people you wouldn't hand your API key to.
+
+Forgejo itself *does* require a login (admin password in `FORGEJO_ADMIN_PASSWORD`); the open surface is the board. Adding authentication to the board is a known gap — until it exists, **network isolation is the control.**
 
 ## Environment variables
 
