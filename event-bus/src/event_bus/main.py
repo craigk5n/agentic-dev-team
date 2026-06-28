@@ -56,6 +56,39 @@ log = structlog.get_logger()
 _redis_conn: redis.Redis | None = None
 _queue: Queue | None = None
 
+_CODER_SLOT_KEY = "coder:in_flight"
+
+
+def _coder_slot_acquire() -> bool:
+    """Atomically claim one coding slot. Returns False if the cap is reached."""
+    if not _redis_conn:
+        return True
+    n = _redis_conn.incr(_CODER_SLOT_KEY)
+    if n > settings.max_coding_agents:
+        _redis_conn.decr(_CODER_SLOT_KEY)
+        return False
+    return True
+
+
+def _coder_slot_release_and_dispatch() -> None:
+    """Release one coding slot, then trigger the next queued ready story if a slot is free."""
+    if _redis_conn:
+        _redis_conn.decr(_CODER_SLOT_KEY)
+        _redis_conn.expire(_CODER_SLOT_KEY, 86_400)
+    ready = [s for s in list_items(state="ready", item_type="story")]
+    if not ready:
+        return
+    candidate = min(ready, key=lambda s: (s.get("sequence") or 999, s["created_at"]))
+    update_state(candidate["id"], "in-progress")
+    try:
+        sp = get_prompt(_redis_or_503(), "coder.story")
+    except Exception:
+        sp = ""
+    asyncio.create_task(_run_coding_agent(
+        candidate["id"], candidate["title"], candidate.get("description") or "", sp,
+    ))
+    log.info("coder_dequeued", story_id=candidate["id"])
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -487,6 +520,12 @@ async def code_item(item_id: str):
 
 async def _run_coding_agent(item_id: str, title: str, description: str, story_prompt: str = "") -> None:
     """Run the Coding Agent in a thread; update state and PR URL on completion."""
+    # Enforce concurrency cap — leave story queued in ready if full
+    if not _coder_slot_acquire():
+        log.info("coder_cap_hit", id=item_id, cap=settings.max_coding_agents)
+        update_state(item_id, "ready")
+        return
+
     # Prefer the explicit repo field (set by planner) over the description directive
     repo = get_repo_for_story(item_id, default=settings.default_repo)
     if repo and f"repo: {repo}" not in (description or ""):
@@ -498,11 +537,13 @@ async def _run_coding_agent(item_id: str, title: str, description: str, story_pr
                                          story_prompt=story_prompt, log_line=log_cb)
     except ImportError:
         log.error("coding_agent_not_installed")
-        update_state(item_id, "ready")  # unclaim
+        update_state(item_id, "ready")
+        _coder_slot_release_and_dispatch()
         return
     except Exception as exc:
         log.error("coding_agent_failed", id=item_id, error=str(exc))
         update_state(item_id, "ready")  # unclaim so it can be retried
+        _coder_slot_release_and_dispatch()
         return
     finally:
         _expire_log(item_id)
@@ -513,22 +554,14 @@ async def _run_coding_agent(item_id: str, title: str, description: str, story_pr
             set_pr_url(item_id, result["pr_url"])
         log.info("coding_agent_complete", id=item_id, pr=result.get("pr_url"))
     else:
-        # Nothing to implement — mark done and advance to the next story so we don't loop
+        # Nothing to implement — mark done and advance sequence; dispatch will pick up next
         log.warning("coding_agent_no_changes", id=item_id)
         update_state(item_id, "done")
-        unlocked = unlock_next_story(item_id)
-        if unlocked:
-            update_state(unlocked["id"], "in-progress")
-            story_prompt = get_prompt(_redis_or_503(), "coder.story")
-            asyncio.create_task(_run_coding_agent(
-                unlocked["id"], unlocked["title"], unlocked.get("description") or "", story_prompt,
-            ))
-            log.info("coding_agent_auto_triggered", story_id=unlocked["id"], reason="no_changes_skip")
+        unlock_next_story(item_id)  # backlog → ready; release+dispatch below will trigger it
 
     # Record coder call — opencode runs as subprocess so no token counts available
     if _redis_conn:
         try:
-            from reviewer.telemetry import record_usage
             from coding_agent.config import settings as _cs
             model = _cs.model_coder or "opencode"
             import time
@@ -538,6 +571,9 @@ async def _run_coding_agent(item_id: str, title: str, description: str, story_pr
             _redis_conn.expire(key, 30 * 86_400)
         except Exception:
             pass
+
+    # Release slot and trigger next queued story (after all state updates are done)
+    _coder_slot_release_and_dispatch()
 
 
 async def _run_recode_agent(review_event: ForgejoReviewEvent) -> None:
@@ -1022,4 +1058,13 @@ async def health():
                 queue_depth = len(_queue)
     except Exception as exc:
         log.warning("redis_ping_failed", error=str(exc))
-    return {"status": "ok", "redis": redis_ok, "queue_depth": queue_depth}
+    coders_in_flight = 0
+    if _redis_conn and redis_ok:
+        coders_in_flight = int(_redis_conn.get(_CODER_SLOT_KEY) or 0)
+    return {
+        "status": "ok",
+        "redis": redis_ok,
+        "queue_depth": queue_depth,
+        "coders_in_flight": coders_in_flight,
+        "max_coding_agents": settings.max_coding_agents,
+    }

@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     # Fallback repo used when a story has no repo set and the planner didn't provision one
     default_repo: str = "devadmin/sandbox"
 
+    # Max coding agents running in parallel; extras queue in ready state
+    max_coding_agents: int = 2
+
     log_level: str = "INFO"
     port: int = 8080
 
