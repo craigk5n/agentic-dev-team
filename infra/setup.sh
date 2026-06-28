@@ -94,6 +94,8 @@ env_set() {
 # Run the Forgejo CLI inside the container as the git user (root is rejected).
 fj_cli() { dc_forgejo exec -u git -T forgejo forgejo "$@"; }
 
+_rand_pass() { openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | cut -c1-20; }
+
 _fj_user_exists() {
   fj_cli admin user list 2>/dev/null | awk 'NR>1{print $2}' | grep -qx "$1"
 }
@@ -107,13 +109,13 @@ _fj_token_valid_for() {  # <token> <expected-username>
   [[ -n "$login" && "$login" == "$expect" ]]
 }
 
-ensure_user() {  # <username> <email> <admin-flag: --admin|"">
-  local username="$1" email="$2" admin="$3" pass
+ensure_user() {  # <username> <email> <admin-flag: --admin|""> [password]
+  local username="$1" email="$2" admin="$3" pass="${4:-}"
   if _fj_user_exists "$username"; then
     yellow "  user '${username}' already exists"
     return 0
   fi
-  pass="$(openssl rand -base64 24)"
+  [[ -z "$pass" ]] && pass="$(_rand_pass)"
   # shellcheck disable=SC2086
   if fj_cli admin user create --username "$username" --email "$email" \
        --password "$pass" --must-change-password=false $admin >/dev/null 2>&1; then
@@ -145,27 +147,54 @@ ensure_token() {  # <username> <env-key> <scopes>
 
 provision_accounts() {
   bold "Provisioning Forgejo accounts + tokens..."
-  local admin_user admin_email rev_user rev_email
+  local admin_user admin_email rev_user rev_email admin_pass
   admin_user="$(env_get FORGEJO_ADMIN_USER)";    admin_user="${admin_user:-devadmin}"
   admin_email="$(env_get FORGEJO_ADMIN_EMAIL)";  admin_email="${admin_email:-${admin_user}@localhost}"
   rev_user="$(env_get FORGEJO_REVIEWER_USER)";   rev_user="${rev_user:-reviewer-bot}"
   rev_email="$(env_get FORGEJO_REVIEWER_EMAIL)"; rev_email="${rev_email:-${rev_user}@localhost}"
 
-  # Operator/admin account — used by the coding agent + event-bus repo provisioning.
-  ensure_user  "$admin_user" "$admin_email" "--admin"
+  # Admin operator — this is the HUMAN login for the Forgejo web UI, and also backs
+  # the agent API token. Its web password lives in FORGEJO_ADMIN_PASSWORD (.env) so a
+  # human can always retrieve it. Agents authenticate with tokens, not this password.
+  admin_pass="$(env_get FORGEJO_ADMIN_PASSWORD)"
+  if _fj_user_exists "$admin_user"; then
+    if [[ -n "$admin_pass" ]]; then
+      if fj_cli admin user change-password -u "$admin_user" -p "$admin_pass" \
+           --must-change-password=false >/dev/null 2>&1; then
+        yellow "  user '${admin_user}' exists — web password synced to FORGEJO_ADMIN_PASSWORD"
+      else
+        yellow "  user '${admin_user}' exists (password unchanged)"
+      fi
+    else
+      yellow "  user '${admin_user}' exists — FORGEJO_ADMIN_PASSWORD not set; web login uses your existing password"
+      yellow "    (set FORGEJO_ADMIN_PASSWORD in .env and re-run to reset it)"
+    fi
+  else
+    if [[ -z "$admin_pass" ]]; then
+      admin_pass="$(_rand_pass)"
+      env_set FORGEJO_ADMIN_PASSWORD "$admin_pass"
+      green "  generated FORGEJO_ADMIN_PASSWORD (saved to .env)"
+    fi
+    ensure_user "$admin_user" "$admin_email" "--admin" "$admin_pass"
+  fi
   ensure_token "$admin_user" FORGEJO_API_TOKEN \
     "write:repository,write:user,write:issue,write:organization,write:misc,write:admin"
 
   # Reviewer-bot account — least-privilege identity for review/merge operations.
-  # read:user lets the bot identify itself (and the token to be validated).
+  # Token-only (no human login); read:user lets the bot identify itself.
   ensure_user  "$rev_user" "$rev_email" ""
   ensure_token "$rev_user" FORGEJO_REVIEWER_TOKEN \
     "read:user,write:repository,write:issue"
 
   # Lock down self-registration now that the admin exists (effective on next forgejo restart).
   env_set FORGEJO_DISABLE_REGISTRATION true
+
+  local port; port="$(env_get FORGEJO_HTTP_PORT)"; port="${port:-3000}"
   green "Accounts ready."
-  yellow "  Set FORGEJO_DISABLE_REGISTRATION=true — restart Forgejo to enforce: ./setup.sh forgejo"
+  bold  "  Human Forgejo login → http://localhost:${port}"
+  echo  "    username: ${admin_user}"
+  echo  "    password: value of FORGEJO_ADMIN_PASSWORD in infra/.env"
+  yellow "  (FORGEJO_DISABLE_REGISTRATION=true — restart Forgejo to enforce: ./setup.sh forgejo)"
 }
 
 # ── Forgejo runner registration ───────────────────────────────────────────────
