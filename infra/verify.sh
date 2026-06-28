@@ -56,6 +56,17 @@ check_json_field() {
   fi
 }
 
+check_token_identity() {  # <token> <expected-login> <label>
+  local token="$1" expect="$2" label="$3" login
+  login="$(curl -sf -H "Authorization: token ${token}" "${FORGEJO_BASE}/api/v1/user" 2>/dev/null \
+           | grep -o '"login":"[^"]*"' | head -1 | cut -d'"' -f4 || true)"
+  if [[ "$login" == "$expect" ]]; then
+    green "${label} — resolves to '${login}'"
+  else
+    red "${label} — expected '${expect}', got '${login:-<none>}' (run: ./setup.sh accounts)"
+  fi
+}
+
 # ── Forgejo checks ────────────────────────────────────────────────────────────
 bold "── Forgejo (${FORGEJO_BASE}) ──"
 
@@ -90,6 +101,24 @@ if [[ -n "${FORGEJO_API_TOKEN:-}" ]]; then
 else
   yellow "FORGEJO_API_TOKEN not set — skipping authenticated checks"
   yellow "  Set it in .env after creating a token in Forgejo's application settings"
+fi
+
+# ── Forgejo accounts ──────────────────────────────────────────────────────────
+bold "── Forgejo accounts (./setup.sh accounts) ──"
+
+admin_user="${FORGEJO_ADMIN_USER:-devadmin}"
+rev_user="${FORGEJO_REVIEWER_USER:-reviewer-bot}"
+
+if [[ -n "${FORGEJO_API_TOKEN:-}" ]]; then
+  check_token_identity "${FORGEJO_API_TOKEN}" "${admin_user}" "Admin token (FORGEJO_API_TOKEN)"
+else
+  red "FORGEJO_API_TOKEN not set — run: ./setup.sh accounts"
+fi
+
+if [[ -n "${FORGEJO_REVIEWER_TOKEN:-}" ]]; then
+  check_token_identity "${FORGEJO_REVIEWER_TOKEN}" "${rev_user}" "Reviewer token (FORGEJO_REVIEWER_TOKEN)"
+else
+  yellow "FORGEJO_REVIEWER_TOKEN not set — run: ./setup.sh accounts"
 fi
 
 # ── Forgejo Actions runner ────────────────────────────────────────────────────
@@ -140,12 +169,11 @@ if [[ $FAILURES -eq 0 ]]; then
   echo -e "\033[32mAll checks passed.\033[0m"
   echo ""
   echo "Phase 1+2 complete. Next steps:"
-  echo "  1. Configure the Forgejo webhook:"
-  echo "       Forgejo: repo Settings → Webhooks → http://event-bus:${EVENT_BUS_PORT}/webhook/forgejo"
-  echo "  2. Create a repository in Forgejo."
-  echo "  3. Set branch protection on 'main' in Forgejo:"
-  echo "       repo → Settings → Branches → require 1 review, status checks, no force-push"
-  echo "  4. Move to Phase 3: Coding Agent (ready → branch → PR)."
+  echo "  1. Register the Actions runner if not yet running: ./setup.sh runner"
+  echo "  2. Submit an idea on the board (http://localhost:${EVENT_BUS_PORT}/ui/). The"
+  echo "     planner auto-provisions a repo per idea — committing a CI workflow,"
+  echo "     protecting 'main' (no direct push), and registering the webhook."
+  echo "  3. Move to Phase 3: Coding Agent (ready → branch → PR)."
 else
   echo -e "\033[31m${FAILURES} check(s) failed. Fix the issues above before proceeding.\033[0m"
   exit 1

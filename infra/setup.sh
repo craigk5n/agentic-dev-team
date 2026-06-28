@@ -2,7 +2,8 @@
 # Phase 1 setup: stand up Forgejo + Forgejo Actions runner + event bus
 # Usage:
 #   ./setup.sh          — first-time setup (generates secrets, starts all services)
-#   ./setup.sh forgejo  — start/restart only Forgejo
+#   ./setup.sh forgejo  — start/restart Forgejo and provision accounts
+#   ./setup.sh accounts — create Forgejo bot accounts + API tokens (writes .env)
 #   ./setup.sh runner   — register and start the Actions runner (run after obtaining token)
 #   ./setup.sh eventbus — build and start the event bus
 
@@ -77,6 +78,96 @@ dc_eventbus() {
   $DC -f event-bus/docker-compose.yml --env-file .env "$@"
 }
 
+# ── .env read/write helpers ───────────────────────────────────────────────────
+env_get() { grep "^$1=" .env 2>/dev/null | head -1 | cut -d= -f2- || true; }
+
+env_set() {
+  local key="$1" val="$2"
+  if grep -q "^${key}=" .env; then
+    sed -i "s|^${key}=.*|${key}=${val}|" .env
+  else
+    printf '%s=%s\n' "$key" "$val" >> .env
+  fi
+}
+
+# ── Forgejo account + token provisioning ──────────────────────────────────────
+# Run the Forgejo CLI inside the container as the git user (root is rejected).
+fj_cli() { dc_forgejo exec -u git -T forgejo forgejo "$@"; }
+
+_fj_user_exists() {
+  fj_cli admin user list 2>/dev/null | awk 'NR>1{print $2}' | grep -qx "$1"
+}
+
+_fj_token_valid_for() {  # <token> <expected-username>
+  local token="$1" expect="$2" port login
+  port="$(env_get FORGEJO_HTTP_PORT)"; port="${port:-3000}"
+  login="$(curl -s -H "Authorization: token ${token}" \
+           "http://localhost:${port}/api/v1/user" 2>/dev/null \
+           | grep -o '"login":"[^"]*"' | head -1 | cut -d'"' -f4 || true)"
+  [[ -n "$login" && "$login" == "$expect" ]]
+}
+
+ensure_user() {  # <username> <email> <admin-flag: --admin|"">
+  local username="$1" email="$2" admin="$3" pass
+  if _fj_user_exists "$username"; then
+    yellow "  user '${username}' already exists"
+    return 0
+  fi
+  pass="$(openssl rand -base64 24)"
+  # shellcheck disable=SC2086
+  if fj_cli admin user create --username "$username" --email "$email" \
+       --password "$pass" --must-change-password=false $admin >/dev/null 2>&1; then
+    green "  created user '${username}'"
+  else
+    red "  failed to create user '${username}'"; return 1
+  fi
+}
+
+ensure_token() {  # <username> <env-key> <scopes>
+  local username="$1" env_key="$2" scopes="$3" existing out token name
+  existing="$(env_get "$env_key")"
+  if [[ -n "$existing" ]] && _fj_token_valid_for "$existing" "$username"; then
+    yellow "  ${env_key} already valid for '${username}'"
+    return 0
+  fi
+  [[ -n "$existing" ]] && yellow "  ${env_key} present but does not resolve — regenerating"
+  name="agentic-$(date +%Y%m%d%H%M%S)"
+  out="$(fj_cli admin user generate-access-token -u "$username" -t "$name" \
+         --scopes "$scopes" 2>&1 || true)"
+  token="$(echo "$out" | grep -oiE '[a-f0-9]{40}' | head -1)"
+  if [[ -n "$token" ]]; then
+    env_set "$env_key" "$token"
+    green "  generated ${env_key} for '${username}'"
+  else
+    red "  token generation failed for '${username}': ${out}"; return 1
+  fi
+}
+
+provision_accounts() {
+  bold "Provisioning Forgejo accounts + tokens..."
+  local admin_user admin_email rev_user rev_email
+  admin_user="$(env_get FORGEJO_ADMIN_USER)";    admin_user="${admin_user:-devadmin}"
+  admin_email="$(env_get FORGEJO_ADMIN_EMAIL)";  admin_email="${admin_email:-${admin_user}@localhost}"
+  rev_user="$(env_get FORGEJO_REVIEWER_USER)";   rev_user="${rev_user:-reviewer-bot}"
+  rev_email="$(env_get FORGEJO_REVIEWER_EMAIL)"; rev_email="${rev_email:-${rev_user}@localhost}"
+
+  # Operator/admin account — used by the coding agent + event-bus repo provisioning.
+  ensure_user  "$admin_user" "$admin_email" "--admin"
+  ensure_token "$admin_user" FORGEJO_API_TOKEN \
+    "write:repository,write:user,write:issue,write:organization,write:misc,write:admin"
+
+  # Reviewer-bot account — least-privilege identity for review/merge operations.
+  # read:user lets the bot identify itself (and the token to be validated).
+  ensure_user  "$rev_user" "$rev_email" ""
+  ensure_token "$rev_user" FORGEJO_REVIEWER_TOKEN \
+    "read:user,write:repository,write:issue"
+
+  # Lock down self-registration now that the admin exists (effective on next forgejo restart).
+  env_set FORGEJO_DISABLE_REGISTRATION true
+  green "Accounts ready."
+  yellow "  Set FORGEJO_DISABLE_REGISTRATION=true — restart Forgejo to enforce: ./setup.sh forgejo"
+}
+
 # ── Forgejo runner registration ───────────────────────────────────────────────
 register_runner() {
   local token
@@ -135,9 +226,12 @@ main() {
       dc_forgejo up -d forgejo-db forgejo
       local port; port="$(grep ^FORGEJO_HTTP_PORT= .env | cut -d= -f2 || echo 3000)"
       wait_for_url "http://localhost:${port}/api/healthz" "Forgejo"
+      provision_accounts
       green "Forgejo is ready."
-      yellow "Next: create the admin account at http://localhost:${port}"
-      yellow "Then set FORGEJO_DISABLE_REGISTRATION=true in .env and run: ./setup.sh forgejo"
+      ;;
+
+    accounts)
+      provision_accounts
       ;;
 
     runner)
@@ -165,10 +259,8 @@ main() {
       green "Forgejo ready at http://localhost:${fg_port}"
       echo ""
 
-      bold "── Step 2/3: Manual steps needed ──"
-      echo "  Forgejo: http://localhost:${fg_port} → register the admin account"
-      echo "    Then:  set FORGEJO_DISABLE_REGISTRATION=true in .env"
-      echo "    Then:  Profile → Settings → Applications → create token → add to FORGEJO_API_TOKEN in .env"
+      bold "── Step 2/3: Forgejo accounts + tokens ──"
+      provision_accounts
       echo ""
 
       bold "── Step 3/3: Event bus ──"
@@ -187,7 +279,7 @@ main() {
       ;;
 
     *)
-      echo "Usage: $0 [all|forgejo|runner|eventbus]"
+      echo "Usage: $0 [all|forgejo|accounts|runner|eventbus]"
       exit 1
       ;;
   esac
