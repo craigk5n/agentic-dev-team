@@ -1560,9 +1560,21 @@ function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-function fmtDate(iso) {
+function timeAgo(iso) {
   if (!iso) return '';
-  return new Date(iso).toLocaleDateString(undefined, {month:'short', day:'numeric', year:'numeric'});
+  const secs = Math.round((Date.now() - new Date(iso).getTime()) / 1000);
+  if (secs < 60) return 'just now';
+  if (secs < 3600) return Math.floor(secs / 60) + ' min ago';
+  if (secs < 86400) return Math.floor(secs / 3600) + ' hr ago';
+  const days = Math.floor(secs / 86400);
+  if (days < 7) return days + ' day' + (days > 1 ? 's' : '') + ' ago';
+  return new Date(iso).toLocaleDateString(undefined, {month:'short', day:'numeric'});
+}
+
+function refreshTimestamps() {
+  document.querySelectorAll('.rel-ts[data-ts]').forEach(el => {
+    el.textContent = timeAgo(el.dataset.ts);
+  });
 }
 
 function verdictPip(label, status) {
@@ -1618,7 +1630,7 @@ async function loadBoard() {
         </div>`;
       }
       const seqBadge = item.sequence ? `<span class="seq-badge">${item.sequence}</span>` : '';
-      const date = fmtDate(item.created_at);
+      const tsSpan = item.created_at ? `<span class="rel-ts" data-ts="${item.created_at}">${timeAgo(item.created_at)}</span>` : '';
       const backlogClass = item.state === 'backlog' ? ' backlog' : '';
       const v = item.verdicts || {};
       const verdictRow = (v.reviewer || v.tester || v.security) ? `
@@ -1628,13 +1640,14 @@ async function loadBoard() {
       html += `<div class="board-item${backlogClass}" data-id="${item.id}">
         ${seqBadge}
         <div class="board-item-title" data-id="${item.id}">${escHtml(item.title)}</div>
-        <div class="board-item-meta">${item.type}${date ? ' · ' + date : ''}</div>
+        <div class="board-item-meta">${item.type}${tsSpan ? ' · ' + tsSpan : ''}</div>
         ${verdictRow}
         ${actions}
       </div>`;
     }
   }
   container.innerHTML = html;
+  refreshTimestamps();
 
   // Approve / Reject buttons
   container.querySelectorAll('.approve-btn').forEach(btn => {
@@ -1696,7 +1709,7 @@ async function openDrawer(id) {
   const item = await r.json();
   document.getElementById('drawer-title').textContent = item.title;
   document.getElementById('drawer-meta').innerHTML =
-    `<span>${item.type}</span><span>${item.state.replace(/-/g,' ')}</span><span>${fmtDate(item.created_at)}</span>`;
+    `<span>${item.type}</span><span>${item.state.replace(/-/g,' ')}</span><span class="rel-ts" data-ts="${item.created_at || ''}">${timeAgo(item.created_at)}</span>`;
 
   // Show prompt (the original user input) then LLM description
   const md = typeof marked !== 'undefined' ? t => marked.parse(t, {breaks:true}) : t => `<pre style="white-space:pre-wrap">${escHtml(t)}</pre>`;
@@ -1838,6 +1851,7 @@ document.getElementById('refresh-board-btn').addEventListener('click', () => loa
 buildConfigForms();
 loadBoard();
 loadHealth();
+setInterval(refreshTimestamps, 30000);
 </script>
 <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
 </body>
