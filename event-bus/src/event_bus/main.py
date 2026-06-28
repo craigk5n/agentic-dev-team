@@ -559,6 +559,13 @@ async def internal_pr_merged(payload: dict):
     unlocked = unlock_next_story(item["id"])
     log.info("internal_pr_merged", item_id=item["id"], pr=pr_number,
              next=unlocked["id"] if unlocked else None)
+    if unlocked:
+        update_state(unlocked["id"], "in-progress")
+        story_prompt = get_prompt(_redis_or_503(), "coder.story")
+        asyncio.create_task(_run_coding_agent(
+            unlocked["id"], unlocked["title"], unlocked.get("description") or "", story_prompt,
+        ))
+        log.info("coding_agent_auto_triggered", story_id=unlocked["id"])
     return {"merged": updated, "unlocked": unlocked["id"] if unlocked else None}
 
 

@@ -2,7 +2,7 @@ FROM python:3.12-slim
 
 # git for coding/review agents; semgrep and gitleaks for security scanning
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        git curl ca-certificates \
+        git curl ca-certificates make \
     && rm -rf /var/lib/apt/lists/*
 
 # semgrep (pip is fastest install path in the image)
