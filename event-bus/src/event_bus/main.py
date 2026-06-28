@@ -29,6 +29,7 @@ from pydantic import ValidationError
 from rq import Queue
 
 import json as _json
+import os as _os
 from dataclasses import asdict
 
 from collections.abc import Callable
@@ -518,6 +519,79 @@ async def code_item(item_id: str):
     return {"status": "coding_started", "id": item_id}
 
 
+def _run_coding_agent_sandboxed_sync(
+    item_id: str,
+    title: str,
+    description: str,
+    story_prompt: str,
+    log_cb,
+) -> dict:
+    """Blocking: spawn an ephemeral Docker container for one coding agent run.
+    Returns the result dict from sandbox_runner (same shape as run_coding_agent).
+    """
+    import docker as _docker_sdk
+
+    client = _docker_sdk.from_env()
+
+    pass_through = [
+        "FORGEJO_API_TOKEN", "FORGEJO_BASE_URL", "FORGEJO_GIT_URL",
+        "OPENROUTER_API_KEY", "MODEL_CODER", "DEFAULT_REPO", "ANTHROPIC_API_KEY",
+    ]
+    env = {k: _os.environ[k] for k in pass_through if k in _os.environ}
+    env.update({
+        "STORY_ID": item_id,
+        "STORY_TITLE": title[:500],
+        "STORY_DESCRIPTION": (description or "")[:4000],
+        "STORY_PROMPT": (story_prompt or "")[:2000],
+    })
+
+    volumes: dict = {}
+    if settings.sandbox_opencode_bin:
+        volumes[settings.sandbox_opencode_bin] = {"bind": "/usr/local/bin/opencode", "mode": "ro"}
+    if settings.sandbox_opencode_config:
+        volumes[settings.sandbox_opencode_config] = {"bind": "/root/.config/opencode", "mode": "ro"}
+
+    container = client.containers.create(
+        image=settings.sandbox_image,
+        command=["python", "-m", "coding_agent.sandbox_runner"],
+        environment=env,
+        volumes=volumes or None,
+        network=settings.sandbox_network,
+        mem_limit=settings.sandbox_memory,
+        nano_cpus=int(float(settings.sandbox_cpus) * 1_000_000_000),
+        labels={"dev-agents.story-id": item_id, "dev-agents.sandbox": "true"},
+    )
+
+    try:
+        container.start()
+        result_json: dict | None = None
+
+        for raw in container.logs(stream=True, follow=True):
+            line = raw.decode("utf-8", errors="replace").rstrip()
+            if line.startswith("CODING_RESULT:"):
+                try:
+                    result_json = _json.loads(line[len("CODING_RESULT:"):])
+                except Exception:
+                    pass
+            elif log_cb and line.strip():
+                log_cb(line)
+
+        exit_info = container.wait()
+        exit_code = exit_info.get("StatusCode", -1)
+
+        if result_json is not None:
+            return result_json
+        if exit_code != 0:
+            return {"status": "error", "item_id": item_id,
+                    "error": f"sandbox exited with code {exit_code}"}
+        return {"status": "no_changes", "item_id": item_id, "error": "no result sentinel"}
+    finally:
+        try:
+            container.remove(force=True)
+        except Exception:
+            pass
+
+
 async def _run_coding_agent(item_id: str, title: str, description: str, story_prompt: str = "") -> None:
     """Run the Coding Agent in a thread; update state and PR URL on completion."""
     # Enforce concurrency cap — leave story queued in ready if full
@@ -532,14 +606,21 @@ async def _run_coding_agent(item_id: str, title: str, description: str, story_pr
         description = f"repo: {repo}\n{description}"
     log_cb = _make_log_cb(item_id)
     try:
-        from coding_agent.main import run_coding_agent
-        result = await asyncio.to_thread(run_coding_agent, item_id, title, description,
-                                         story_prompt=story_prompt, log_line=log_cb)
-    except ImportError:
-        log.error("coding_agent_not_installed")
-        update_state(item_id, "ready")
-        _coder_slot_release_and_dispatch()
-        return
+        if settings.sandbox_mode == "docker":
+            result = await asyncio.to_thread(
+                _run_coding_agent_sandboxed_sync,
+                item_id, title, description, story_prompt, log_cb,
+            )
+        else:
+            try:
+                from coding_agent.main import run_coding_agent
+            except ImportError:
+                log.error("coding_agent_not_installed")
+                update_state(item_id, "ready")
+                _coder_slot_release_and_dispatch()
+                return
+            result = await asyncio.to_thread(run_coding_agent, item_id, title, description,
+                                             story_prompt=story_prompt, log_line=log_cb)
     except Exception as exc:
         log.error("coding_agent_failed", id=item_id, error=str(exc))
         update_state(item_id, "ready")  # unclaim so it can be retried

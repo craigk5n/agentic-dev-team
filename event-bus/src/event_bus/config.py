@@ -38,6 +38,17 @@ class Settings(BaseSettings):
     # Max coding agents running in parallel; extras queue in ready state
     max_coding_agents: int = 2
 
+    # Sandbox mode: "process" (default) runs coding agent in-process;
+    # "docker" spawns an ephemeral container per coding run (requires socket mount)
+    sandbox_mode: str = "process"
+    sandbox_image: str = "dev-agents/event-bus:latest"
+    sandbox_memory: str = "512m"
+    sandbox_cpus: float = 1.0
+    # HOST paths to bind into sandbox containers (must be host paths, not container paths)
+    sandbox_opencode_bin: str = ""
+    sandbox_opencode_config: str = ""
+    sandbox_network: str = "forgejo_default"
+
     log_level: str = "INFO"
     port: int = 8080
 

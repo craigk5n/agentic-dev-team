@@ -18,6 +18,10 @@ x-event-bus-env: &event-bus-env
   SANDBOX_IMAGE: ${SANDBOX_IMAGE:-dev-agents/event-bus:latest}
   SANDBOX_MEMORY: ${SANDBOX_MEMORY:-512m}
   SANDBOX_CPUS: ${SANDBOX_CPUS:-1.0}
+  # Host paths for bind mounts into sandbox containers (must match the actual host paths)
+  SANDBOX_OPENCODE_BIN: /home/cknudsen/.opencode/bin/opencode
+  SANDBOX_OPENCODE_CONFIG: /home/cknudsen/.config/opencode
+  SANDBOX_NETWORK: forgejo_default
   # Coding Agent (Phase 3)
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
   ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-6}
@@ -83,6 +87,8 @@ services:
       # opencode binary + config (coding agent uses opencode, no Anthropic key needed)
       - /home/cknudsen/.opencode/bin/opencode:/usr/local/bin/opencode:ro
       - /home/cknudsen/.config/opencode:/root/.config/opencode:ro
+      # Docker socket — needed when SANDBOX_MODE=docker to spawn ephemeral containers
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       - event-bus-redis
     deploy:
