@@ -16,7 +16,8 @@ from unittest.mock import MagicMock, AsyncMock, patch
 import fakeredis
 import pytest
 
-from tests.conftest import sign_forgejo, sign_plane, FORGEJO_PR_OPENED
+from event_bus.config import settings
+from tests.conftest import sign_forgejo, FORGEJO_PR_OPENED
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -252,31 +253,6 @@ class TestPromptsApi:
         resp = client.delete("/api/prompts/coder.story")
         assert resp.status_code == 200
         assert resp.json()["reset"] is True
-
-
-# ── /webhook/plane extra paths ────────────────────────────────────────────────
-
-class TestPlaneWebhookExtra:
-    def test_invalid_json_returns_400(self, client):
-        payload = b"not json"
-        sig = sign_plane(payload)
-        resp = client.post(
-            "/webhook/plane",
-            content=payload,
-            headers={"Content-Type": "application/json", "X-Plane-Signature": sig},
-        )
-        assert resp.status_code == 400
-
-    def test_invalid_payload_returns_400(self, client):
-        # valid JSON but missing required PlaneEvent fields (event, action)
-        payload = json.dumps({"unexpected": "keys"}).encode()
-        sig = sign_plane(payload)
-        resp = client.post(
-            "/webhook/plane",
-            content=payload,
-            headers={"Content-Type": "application/json", "X-Plane-Signature": sig},
-        )
-        assert resp.status_code == 400
 
 
 # ── /webhook/forgejo extra paths ──────────────────────────────────────────────
@@ -525,24 +501,6 @@ class TestHealthExtra:
         assert resp.json()["redis"] is False
 
 
-# ── /api/items/migrate-from-plane ─────────────────────────────────────────────
-
-class TestMigrateFromPlane:
-    def test_no_project_id_returns_422(self, client, monkeypatch):
-        r = fakeredis.FakeRedis()
-        monkeypatch.setattr("event_bus.main._redis_conn", r)
-        # Ensure both config and settings have no project_id
-        from event_bus.config_store import RuntimeConfig
-        with patch("event_bus.main.get_config", return_value=RuntimeConfig()), \
-             patch("event_bus.main.settings") as mock_settings:
-            mock_settings.plane_project_id = ""
-            mock_settings.plane_base_url = "http://plane"
-            mock_settings.plane_workspace_slug = "dev-agents"
-            mock_settings.plane_api_token = ""
-            resp = client.post("/api/items/migrate-from-plane")
-        assert resp.status_code == 422
-
-
 # ── prompt_store.py direct tests ──────────────────────────────────────────────
 
 class TestPromptStoreDirect:
@@ -597,32 +555,6 @@ class TestPromptStoreDirect:
 # ── jobs/handlers.py missing paths ───────────────────────────────────────────
 
 class TestHandlersMissingPaths:
-    def test_handle_idea_approved_rate_limited(self):
-        from event_bus.limits import check_rate
-        from event_bus.config_store import RuntimeConfig, LimitsConfig
-        from event_bus.jobs.handlers import handle_idea_approved
-
-        r = fakeredis.FakeRedis()
-        check_rate(r, "planner", 1)  # exhaust 1-call limit
-
-        with patch("event_bus.jobs.handlers._get_runtime_config",
-                   return_value=(RuntimeConfig(limits=LimitsConfig(max_rpm_planner=1)), r)):
-            result = handle_idea_approved("idea-1", "ws", "proj-1")
-        assert result["status"] == "rate_limited"
-        assert result["role"] == "planner"
-
-    def test_handle_story_ready_import_error(self):
-        from event_bus.config_store import RuntimeConfig
-        from event_bus.jobs.handlers import handle_story_ready
-
-        r = fakeredis.FakeRedis()
-        with patch("event_bus.jobs.handlers._get_runtime_config",
-                   return_value=(RuntimeConfig(), r)), \
-             patch.dict("sys.modules", {"coding_agent": None, "coding_agent.main": None}):
-            result = handle_story_ready("issue-1", "ws", "proj-1")
-        assert result["status"] == "error"
-        assert "coding_agent" in result["reason"]
-
     def test_handle_pr_event_all_roles_rate_limited(self):
         from event_bus.limits import check_rate
         from event_bus.config_store import patch_config
@@ -806,3 +738,38 @@ class TestHelperFunctions:
         with patch("event_bus.main.list_items", return_value=[]):
             from event_bus.main import _coder_slot_release_and_dispatch
             _coder_slot_release_and_dispatch()  # covers lines 76-81 (decr, expire, empty ready list)
+
+
+
+# ── approve_pr_merge: Temporal signal branch (gate.pr_merge_approval) ──────────
+
+class TestApprovePrTemporal:
+    def _inject_temporalio(self, monkeypatch, connect):
+        import sys, types
+        mod = types.ModuleType("temporalio.client")
+        FakeClient = MagicMock()
+        FakeClient.connect = connect
+        mod.Client = FakeClient
+        monkeypatch.setitem(sys.modules, "temporalio", types.ModuleType("temporalio"))
+        monkeypatch.setitem(sys.modules, "temporalio.client", mod)
+
+    def test_temporal_signal_success(self, client, monkeypatch):
+        monkeypatch.setattr(settings, "temporal_address", "temporal:7233")
+        fake_handle = MagicMock()
+        fake_handle.signal = AsyncMock()
+        fake_client = MagicMock()
+        fake_client.get_workflow_handle.return_value = fake_handle
+        self._inject_temporalio(monkeypatch, AsyncMock(return_value=fake_client))
+
+        resp = client.post("/api/prs/owner/repo/5/approve", json={"approver": "alice"})
+        assert resp.status_code == 202
+        assert resp.json()["via"] == "temporal_signal"
+        fake_handle.signal.assert_awaited_once()
+
+    def test_temporal_signal_failure_returns_502(self, client, monkeypatch):
+        monkeypatch.setattr(settings, "temporal_address", "temporal:7233")
+        self._inject_temporalio(monkeypatch, AsyncMock(side_effect=RuntimeError("boom")))
+
+        resp = client.post("/api/prs/owner/repo/5/approve", json={})
+        assert resp.status_code == 502
+        assert "Temporal signal failed" in resp.json()["detail"]

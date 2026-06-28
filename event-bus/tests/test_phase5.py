@@ -1,32 +1,6 @@
-"""Tests for Phase 5: Idea handler, Planner Agent wiring, /api/ideas endpoint."""
+"""Tests for Phase 5: Planner Agent wiring, /api/ideas endpoint."""
 
-import json
-from unittest.mock import MagicMock, patch
-
-import pytest
-
-from tests.conftest import sign_plane
-
-
-# ── handle_idea_approved ──────────────────────────────────────────────────────
-
-class TestHandleIdeaApproved:
-    def test_delegates_to_planner(self):
-        import fakeredis
-        from event_bus.jobs.handlers import handle_idea_approved
-        r = fakeredis.FakeRedis()
-        with patch("planner_agent.main.run_planner", return_value={"status": "planned"}) as mock, \
-             patch("redis.from_url", return_value=r):
-            result = handle_idea_approved("idea-1", "ws", "proj-1")
-        mock.assert_called_once_with(issue_id="idea-1", workspace_slug="ws", project_id="proj-1", model_override="")
-        assert result["status"] == "planned"
-
-    def test_missing_package_returns_error(self):
-        from event_bus.jobs.handlers import handle_idea_approved
-        with patch.dict("sys.modules", {"planner_agent": None, "planner_agent.main": None}):
-            result = handle_idea_approved("idea-1", "ws", "proj-1")
-        assert result["status"] == "error"
-        assert "planner_agent" in result["reason"]
+from unittest.mock import patch
 
 
 # ── /api/ideas endpoint ───────────────────────────────────────────────────────
@@ -73,24 +47,3 @@ class TestIdeasEndpoint:
         with patch("idea_agent.main.expand_idea", side_effect=RuntimeError("LLM error")):
             resp = client.post("/api/ideas", json={"prompt": "test"})
         assert resp.status_code == 500
-
-
-# ── end-to-end: Plane webhook triggers handle_idea_approved ──────────────────
-
-class TestWebhookToPlanner:
-    def test_approved_idea_webhook_enqueues_planner(self, client, mock_queue, monkeypatch):
-        from tests.conftest import PLANE_IDEA_APPROVED
-        payload = json.dumps(PLANE_IDEA_APPROVED).encode()
-        sig = sign_plane(payload)
-        resp = client.post(
-            "/webhook/plane",
-            content=payload,
-            headers={"Content-Type": "application/json", "X-Plane-Signature": sig},
-        )
-        assert resp.status_code == 202
-        assert mock_queue.enqueue.called
-        # The enqueued function should be handle_idea_approved
-        from event_bus.jobs.handlers import handle_idea_approved
-        enqueue_call = mock_queue.enqueue.call_args
-        assert enqueue_call[0][0] is handle_idea_approved
-        assert enqueue_call[1]["issue_id"] == "idea-xyz"

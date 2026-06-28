@@ -12,7 +12,7 @@ An autonomous multi-agent coding team system. A human operator describes what to
 
 | Component | Tool |
 |---|---|
-| Work board | Plane Community Edition (self-hosted Docker) — REST API + webhooks + MCP server |
+| Work board | Embedded SQLite work store inside the event bus — REST API + internal events |
 | Git forge | Forgejo (self-hosted Go binary) — PRs, branch protection, webhooks |
 | CI (tester) | Forgejo Actions or Woodpecker CI |
 | High-reasoning agents | Claude Agent SDK (Python or TS) — requires direct Anthropic API key, NOT subscription |
@@ -25,8 +25,8 @@ An autonomous multi-agent coding team system. A human operator describes what to
 
 ## Agent Roles
 
-1. **Idea Agent** (Claude SDK) — generates proposals, writes to Plane Intake with status `pending-approval`
-2. **Planner/PM Agent** (Claude SDK) — triggered on Intake approval; decomposes into Module (epic) + Work Items (stories), sets status `ready`
+1. **Idea Agent** (Claude SDK) — generates proposals, writes them to the event-bus work store with status `pending-approval`
+2. **Planner/PM Agent** (Claude SDK) — triggered on idea approval; decomposes into Module (epic) + Work Items (stories), sets status `ready`
 3. **Coding Agent(s)** (Claude SDK or opencode) — claims `ready` story, creates branch, implements, opens PR, sets story `in-review`
 4. **Code Reviewer** (Claude SDK) — triggered by Forgejo `pull_request` webhook; posts review verdict
 5. **Tester** (opencode + CI) — triggered by PR event; runs test suite, reports pass/fail + coverage
@@ -46,7 +46,7 @@ story:   backlog -> ready -> in-progress -> in-review -> approved -> merged -> d
 
 | Gate | Default |
 |---|---|
-| `gate.idea_approval` | ON — always required, operator approves Intake items |
+| `gate.idea_approval` | ON — always required, operator approves intake items |
 | `gate.pr_merge_approval` | OFF (toggleable) |
 | `gate.security_signoff` | ON (recommended) — hold merge if security verdict is not green |
 
@@ -55,14 +55,13 @@ Gates are implemented as Temporal "wait for signal" steps (or board status polls
 ## Coordination Model
 
 - **Claiming:** Agents atomically transition `ready` → `in-progress` (with their own ID) before working — prevents double-pickup.
-- **Triggers:** Plane webhooks and Forgejo webhooks fire the relevant agent (see §6 of PRD.md for full event→agent mapping).
-- **Reporting:** Results posted as PR review comments and Plane item comments. Status transitions are machine-readable; comments are the audit trail.
+- **Triggers:** Work-store status changes and Forgejo webhooks fire the relevant agent (see §6 of PRD.md for full event→agent mapping).
+- **Reporting:** Results posted as PR review comments and work-item comments. Status transitions are machine-readable; comments are the audit trail.
 
 ## Required Environment Variables
 
 ```
 ANTHROPIC_API_KEY
-PLANE_API_TOKEN, PLANE_WEBHOOK_SECRET, PLANE_BASE_URL
 FORGEJO_API_TOKEN, FORGEJO_WEBHOOK_SECRET, FORGEJO_BASE_URL
 TEMPORAL_ADDRESS
 ```
@@ -74,13 +73,15 @@ Plus: model routing config per role, gate flags, per-agent rate limits and concu
 ```
 infra/
 ├── .env.example              # All env vars; copy to .env and fill in secrets
-├── setup.sh                  # Start services, init DBs, register runner
-├── verify.sh                 # Smoke-test Plane + Forgejo APIs; run after setup
-├── plane/
-│   └── docker-compose.yml    # Plane CE (API, worker, beat, web, space, proxy, postgres, redis, minio)
-└── forgejo/
-    ├── docker-compose.yml    # Forgejo + postgres + Actions runner
-    └── runner-config.yml     # Actions runner capacity/label config
+├── setup.sh                  # Start services, register runner
+├── verify.sh                 # Smoke-test Forgejo + event-bus APIs; run after setup
+├── forgejo/
+│   ├── docker-compose.yml    # Forgejo + postgres + Actions runner
+│   └── runner-config.yml     # Actions runner capacity/label config
+├── event-bus/
+│   └── docker-compose.yml    # Webhook receiver + RQ worker + SQLite work store + redis
+└── temporal/
+    └── docker-compose.yml    # Temporal server + Web UI + worker (Phase 6, optional)
 ```
 
 Quick start:
@@ -91,12 +92,12 @@ cp .env.example .env          # then edit secrets (setup.sh auto-fills <CHANGE_M
 ./verify.sh                   # confirm APIs are reachable
 ```
 
-Plane runs on `PLANE_HTTP_PORT` (default 80); Forgejo on `FORGEJO_HTTP_PORT` (default 3000) and SSH on `FORGEJO_SSH_PORT` (default 2222).
+Forgejo runs on `FORGEJO_HTTP_PORT` (default 3000) and SSH on `FORGEJO_SSH_PORT` (default 2222); the event bus on `EVENT_BUS_PORT` (default 8090).
 
 ## Build Order (from PRD)
 
-1. Stand up Plane + Forgejo + CI runner; verify APIs and webhooks
-2. Webhook receiver → job queue → worker dispatch; define status model
+1. Stand up Forgejo + CI runner + event bus; verify APIs and webhooks
+2. Webhook receiver → job queue → worker dispatch; define status model (work store)
 3. Coding Agent end-to-end (claim → branch → PR) with manual trigger
 4. Reviewer + Tester + Security agents triggered by PR webhook; verdict aggregation
 5. Idea Agent + Planner Agent; wire `gate.idea_approval`

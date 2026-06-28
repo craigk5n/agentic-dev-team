@@ -1,17 +1,15 @@
 """
 Event bus — webhook receiver + work item store.
 
-POST /webhook/plane   — receives Plane CE webhooks (legacy)
 POST /webhook/forgejo — receives Forgejo webhooks
 GET  /health          — liveness probe
 
-Work items (replaces Plane):
+Work items (SQLite-backed):
 POST /api/ideas                    — submit idea, LLM expands, saves to SQLite
 GET  /api/items                    — list all items grouped by state
 GET  /api/items/{id}               — get single item with full description
 POST /api/items/{id}/approve       — approve pending idea → triggers Planner Agent
 POST /api/items/{id}/reject        — reject pending idea
-POST /api/items/migrate-from-plane — import existing Plane issues
 """
 
 from __future__ import annotations
@@ -37,15 +35,14 @@ from collections.abc import Callable
 from event_bus.config import settings
 from event_bus.config_store import get_config, patch_config
 from event_bus.prompt_store import get_prompt, set_prompt, delete_prompt, list_prompts
-from event_bus.dispatch import dispatch_forgejo_event, dispatch_plane_event
+from event_bus.dispatch import dispatch_forgejo_event
 from event_bus.work_store import (
     create_item, get_item, grouped_items, list_items, update_state, set_pr_url, set_repo,
     unlock_next_story, find_item_by_pr_url, get_repo_for_story, STATE_COLORS, get_db
 )
 from event_bus.telemetry import get_telemetry_summary, render_prometheus
 from event_bus.events.forgejo import ForgejoPREvent, ForgejoReviewEvent
-from event_bus.events.plane import PlaneEvent
-from event_bus.signatures import verify_forgejo, verify_plane
+from event_bus.signatures import verify_forgejo
 
 structlog.configure(
     wrapper_class=structlog.make_filtering_bound_logger(
@@ -96,8 +93,6 @@ async def lifespan(app: FastAPI):
     global _redis_conn, _queue
     # Warn loudly if secrets are absent — fail-closed means webhooks will be
     # rejected with 403 until secrets are configured.
-    if not settings.plane_webhook_secret:
-        log.warning("plane_webhook_secret_not_set — all Plane webhooks will be rejected")
     if not settings.forgejo_webhook_secret:
         log.warning("forgejo_webhook_secret_not_set — all Forgejo webhooks will be rejected")
     _redis_conn = redis.from_url(settings.redis_url, decode_responses=False)
@@ -155,34 +150,6 @@ def _make_log_cb(item_id: str) -> Callable[[str], None]:
 def _expire_log(item_id: str) -> None:
     if _redis_conn:
         _redis_conn.expire(f"agent_log:{item_id}", _LOG_TTL)
-
-
-# ── Plane webhook ──────────────────────────────────────────────────────────────
-
-@app.post("/webhook/plane", status_code=status.HTTP_202_ACCEPTED)
-async def plane_webhook(
-    request: Request,
-    x_plane_signature: str | None = Header(default=None),
-):
-    body = await request.body()
-
-    # Always validate — verify_plane returns False when secret is empty (fail-closed)
-    if not verify_plane(body, x_plane_signature or "", settings.plane_webhook_secret):
-        log.warning("plane_signature_invalid")
-        raise HTTPException(status_code=403, detail="invalid signature")
-
-    try:
-        payload = _json.loads(body)
-        event = PlaneEvent.model_validate(payload)
-    except _json.JSONDecodeError as exc:
-        raise HTTPException(status_code=400, detail="invalid JSON") from exc
-    except ValidationError as exc:
-        log.warning("plane_parse_error", error=str(exc))
-        raise HTTPException(status_code=400, detail="payload validation failed") from exc
-
-    outcome = dispatch_plane_event(event, _queue_or_503(), settings.plane_workspace_slug)
-    log.info("plane_webhook", result=outcome.result, reason=outcome.reason, job=outcome.job_id)
-    return {"result": outcome.result, "job_id": outcome.job_id}
 
 
 # ── Forgejo webhook ────────────────────────────────────────────────────────────
@@ -851,62 +818,6 @@ async def mark_merged(item_id: str):
     return {"merged": updated, "unlocked": unlocked}
 
 
-@app.post("/api/items/migrate-from-plane", status_code=status.HTTP_200_OK)
-async def migrate_from_plane():
-    """
-    Pull existing issues from Plane and import them into the SQLite work store.
-    Safe to run multiple times — skips items whose ID already exists.
-    """
-    import httpx
-    from event_bus.work_store import get_db as _get_db
-    plane_state_map = {
-        "78caf460-11bd-4e63-8e4d-9a3e1dc28d95": "pending-approval",
-        "afa9c777-c63e-44f8-b526-a5fc9330e910": "approved",
-        "88435ad2-c302-4270-b60e-32c4f2e52858": "rejected",
-        "87f5d6b7-6352-4ec4-b4f8-1d047b697fe6": "ready",
-        "a65f2df2-7cc6-4846-9bd2-8a9d6b718765": "in-progress",
-        "9d27a8e7-7d58-4244-9b23-0b8ee9d9b850": "in-review",
-        "9e7d182c-59dd-48c3-9b95-c635ba1fbec3": "changes-requested",
-        "bbc570d1-a7c9-406b-8102-a3f38e6684d5": "merged",
-        "889d04d3-4db8-41db-8072-6a5c793a96d9": "done",
-    }
-    cfg = get_config(_redis_or_503())
-    project_id = cfg.project.plane_project_id or settings.plane_project_id
-    if not project_id:
-        raise HTTPException(status_code=422, detail="No project_id configured")
-
-    url = f"{settings.plane_base_url}/api/v1/workspaces/{settings.plane_workspace_slug}/projects/{project_id}/issues/?per_page=100"
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.get(url, headers={"X-API-Key": settings.plane_api_token})
-    if resp.status_code != 200:
-        raise HTTPException(status_code=502, detail=f"Plane returned {resp.status_code}")
-
-    imported, skipped = 0, 0
-    for issue in resp.json().get("results", []):
-        existing = get_item(issue["id"])
-        if existing:
-            skipped += 1
-            continue
-        state = plane_state_map.get(issue.get("state", ""), "pending-approval")
-        import re
-        description = re.sub(r"<[^>]+>", "", issue.get("description_html") or "").strip()
-        create_item(
-            item_type="idea",
-            title=issue["name"],
-            description=description,
-            state=state,
-            item_id=issue["id"],
-            created_at=issue.get("created_at"),
-        )
-        imported += 1
-
-    log.info("plane_migration_done", imported=imported, skipped=skipped)
-    return {"imported": imported, "skipped": skipped}
-
-
-# ── Board / issue browser (Plane) — removed; replaced by /api/items ───────────
-
-
 # ── Runtime config API (Phase 6) ──────────────────────────────────────────────
 
 @app.get("/api/config")
@@ -915,7 +826,7 @@ async def get_runtime_config():
     Return the current runtime configuration: gate flags and per-role model overrides.
 
     Gates:
-      idea_approval    — always true (read-only); ideas require human approval in Plane
+      idea_approval    — always true (read-only); ideas require human approval before planning
       pr_merge_approval — when true, PRs must be manually approved via POST /api/prs/.../approve
       security_signoff  — when true, PRs are blocked from merge if the security scan fails
 

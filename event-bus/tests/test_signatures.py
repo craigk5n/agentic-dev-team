@@ -1,8 +1,7 @@
 import hashlib
 import hmac
-import pytest
 
-from event_bus.signatures import verify_forgejo, verify_plane
+from event_bus.signatures import verify_forgejo
 
 
 def _make_sig(payload: bytes, secret: str) -> str:
@@ -38,19 +37,3 @@ class TestVerifyForgejo:
         secret = "mysecret"
         sig = _make_sig(payload, secret)
         assert verify_forgejo(payload, f" {sig} ", secret) is True
-
-
-class TestVerifyPlane:
-    def test_valid_signature(self):
-        payload = b'{"event":"issue","action":"updated"}'
-        secret = "planesecret"
-        sig = _make_sig(payload, secret)
-        assert verify_plane(payload, sig, secret) is True
-
-    def test_wrong_secret(self):
-        payload = b'{"event":"issue"}'
-        sig = _make_sig(payload, "correct")
-        assert verify_plane(payload, sig, "wrong") is False
-
-    def test_empty_secret_always_false(self):
-        assert verify_plane(b"data", "", "") is False

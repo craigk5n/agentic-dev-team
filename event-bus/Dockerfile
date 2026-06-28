@@ -32,7 +32,7 @@ COPY agents/reviewer/pyproject.toml /agents/reviewer/
 COPY agents/reviewer/src/ /agents/reviewer/src/
 RUN pip install --no-cache-dir /agents/reviewer
 
-# Idea agent (Phase 5: generate proposals → Plane)
+# Idea agent (Phase 5: generate proposals → SQLite work store)
 COPY agents/idea/pyproject.toml /agents/idea/
 COPY agents/idea/src/ /agents/idea/src/
 RUN pip install --no-cache-dir /agents/idea

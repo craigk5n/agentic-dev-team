@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Phase 1 setup: stand up Plane CE + Forgejo + Forgejo Actions runner
+# Phase 1 setup: stand up Forgejo + Forgejo Actions runner + event bus
 # Usage:
 #   ./setup.sh          — first-time setup (generates secrets, starts all services)
-#   ./setup.sh plane    — start/restart only Plane
 #   ./setup.sh forgejo  — start/restart only Forgejo
 #   ./setup.sh runner   — register and start the Actions runner (run after obtaining token)
+#   ./setup.sh eventbus — build and start the event bus
 
 set -euo pipefail
 
@@ -69,39 +69,12 @@ bootstrap_env() {
 }
 
 # ── docker compose wrappers ───────────────────────────────────────────────────
-dc_plane() {
-  $DC -f plane/docker-compose.yml --env-file .env "$@"
-}
-
 dc_forgejo() {
   $DC -f forgejo/docker-compose.yml --env-file .env "$@"
 }
 
 dc_eventbus() {
   $DC -f event-bus/docker-compose.yml --env-file .env "$@"
-}
-
-# ── MinIO bucket initialisation ───────────────────────────────────────────────
-init_minio() {
-  local bucket
-  bucket="$(grep ^MINIO_BUCKET= .env | cut -d= -f2)"
-  bucket="${bucket:-uploads}"
-  local user password
-  user="$(grep ^MINIO_ROOT_USER= .env | cut -d= -f2)"
-  password="$(grep ^MINIO_ROOT_PASSWORD= .env | cut -d= -f2)"
-
-  bold "Initialising MinIO bucket '${bucket}'..."
-  dc_plane exec plane-minio sh -c "
-    mc alias set local http://localhost:9000 '${user}' '${password}' &&
-    mc mb --ignore-existing local/${bucket} &&
-    mc anonymous set download local/${bucket}
-  " || yellow "  MinIO init skipped (may already be initialised)"
-}
-
-# ── Plane DB migrations ───────────────────────────────────────────────────────
-init_plane_db() {
-  bold "Running Plane database migrations..."
-  dc_plane exec plane-api python manage.py migrate --noinput
 }
 
 # ── Forgejo runner registration ───────────────────────────────────────────────
@@ -157,15 +130,6 @@ main() {
   local target="${1:-all}"
 
   case "$target" in
-    plane)
-      bold "Starting Plane CE..."
-      dc_plane up -d
-      wait_for_url "http://localhost:$(grep ^PLANE_HTTP_PORT= .env | cut -d= -f2 || echo 8181)/api/instances/" "Plane API"
-      init_minio
-      init_plane_db
-      green "Plane is ready."
-      ;;
-
     forgejo)
       bold "Starting Forgejo..."
       dc_forgejo up -d forgejo-db forgejo
@@ -191,35 +155,23 @@ main() {
 
 
     all)
-      bold "=== Phase 1: Standing up Plane CE + Forgejo ==="
+      bold "=== Phase 1: Standing up Forgejo + runner + event bus ==="
       echo ""
 
-      bold "── Step 1/4: Plane CE ──"
-      dc_plane up -d
-      local plane_port; plane_port="$(grep ^PLANE_HTTP_PORT= .env | cut -d= -f2 || echo 80)"
-      wait_for_url "http://localhost:${plane_port}/api/instances/" "Plane API" 90
-      init_minio
-      init_plane_db
-      green "Plane ready at http://localhost:${plane_port}"
-      echo ""
-
-      bold "── Step 2/4: Forgejo ──"
+      bold "── Step 1/3: Forgejo ──"
       dc_forgejo up -d forgejo-db forgejo
       local fg_port; fg_port="$(grep ^FORGEJO_HTTP_PORT= .env | cut -d= -f2 || echo 3000)"
       wait_for_url "http://localhost:${fg_port}/api/healthz" "Forgejo" 60
       green "Forgejo ready at http://localhost:${fg_port}"
       echo ""
 
-      bold "── Step 3/4: Manual steps needed ──"
-      echo "  a) Plane:   http://localhost:${plane_port}  → create your workspace & first user"
-      echo "     Then:    Profile → API Tokens → create token → add to PLANE_API_TOKEN in .env"
-      echo ""
-      echo "  b) Forgejo: http://localhost:${fg_port} → register the admin account"
-      echo "     Then:    set FORGEJO_DISABLE_REGISTRATION=true in .env"
-      echo "     Then:    Profile → Settings → Applications → create token → add to FORGEJO_API_TOKEN in .env"
+      bold "── Step 2/3: Manual steps needed ──"
+      echo "  Forgejo: http://localhost:${fg_port} → register the admin account"
+      echo "    Then:  set FORGEJO_DISABLE_REGISTRATION=true in .env"
+      echo "    Then:  Profile → Settings → Applications → create token → add to FORGEJO_API_TOKEN in .env"
       echo ""
 
-      bold "── Step 4/4: Event bus ──"
+      bold "── Step 3/3: Event bus ──"
       dc_eventbus build
       dc_eventbus up -d
       local eb_port; eb_port="$(grep ^EVENT_BUS_PORT= .env | cut -d= -f2 || echo 8080)"
@@ -229,14 +181,13 @@ main() {
       echo "  Next steps:"
       echo "  a) Register Forgejo Actions runner: ./setup.sh runner"
       echo "     (obtain token from Forgejo → Site Admin → Actions → Runners)"
-      echo "  b) Configure webhooks in Plane and Forgejo:"
-      echo "     Plane:   workspace Settings → Webhooks → http://event-bus:${eb_port}/webhook/plane"
-      echo "     Forgejo: repo Settings → Webhooks    → http://event-bus:${eb_port}/webhook/forgejo"
+      echo "  b) Configure the Forgejo webhook:"
+      echo "     Forgejo: repo Settings → Webhooks → http://event-bus:${eb_port}/webhook/forgejo"
       echo "  c) Run: ./verify.sh"
       ;;
 
     *)
-      echo "Usage: $0 [all|plane|forgejo|runner|eventbus]"
+      echo "Usage: $0 [all|forgejo|runner|eventbus]"
       exit 1
       ;;
   esac

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Phase 1+2 verification: confirm Plane, Forgejo, and event-bus are healthy
+# Phase 1+2 verification: confirm Forgejo and event-bus are healthy
 # Usage: ./verify.sh
 # All checks are read-only; nothing is modified.
 
@@ -24,10 +24,8 @@ fi
 # shellcheck disable=SC2046
 export $(grep -v '^#' .env | grep -v '^$' | xargs)
 
-PLANE_PORT="${PLANE_HTTP_PORT:-80}"
 FORGEJO_PORT="${FORGEJO_HTTP_PORT:-3000}"
 EVENT_BUS_PORT="${EVENT_BUS_PORT:-8080}"
-PLANE_BASE="http://localhost:${PLANE_PORT}"
 FORGEJO_BASE="http://localhost:${FORGEJO_PORT}"
 EVENT_BUS_BASE="http://localhost:${EVENT_BUS_PORT}"
 
@@ -58,39 +56,6 @@ check_json_field() {
   fi
 }
 
-# ── Plane checks ──────────────────────────────────────────────────────────────
-bold "── Plane CE (${PLANE_BASE}) ──"
-
-check_http "${PLANE_BASE}/api/instances/" "Health endpoint"
-
-if [[ -n "${PLANE_API_TOKEN:-}" ]]; then
-  check_json_field \
-    "${PLANE_BASE}/api/v1/users/me/" \
-    "API token auth — /users/me" \
-    "id" \
-    "x-api-key: ${PLANE_API_TOKEN}"
-
-  # List projects in dev-agents workspace — confirms workspace API access
-  check_json_field \
-    "${PLANE_BASE}/api/v1/workspaces/dev-agents/projects/" \
-    "API — workspace projects accessible" \
-    "total_count" \
-    "x-api-key: ${PLANE_API_TOKEN}"
-
-  # Confirm webhook API endpoint reachable
-  code="$(curl -s -o /dev/null -w "%{http_code}" \
-    -H "x-api-key: ${PLANE_API_TOKEN}" \
-    "${PLANE_BASE}/api/v1/workspaces/dev-agents/projects/")"
-  if [[ "$code" == "200" ]]; then
-    green "Webhook API endpoint reachable (auth verified)"
-  else
-    red "Webhook API endpoint check failed (HTTP ${code})"
-  fi
-else
-  yellow "PLANE_API_TOKEN not set — skipping authenticated checks"
-  yellow "  Set it in .env after creating a token in Plane's profile settings"
-fi
-
 # ── Forgejo checks ────────────────────────────────────────────────────────────
 bold "── Forgejo (${FORGEJO_BASE}) ──"
 
@@ -113,8 +78,7 @@ if [[ -n "${FORGEJO_API_TOKEN:-}" ]]; then
     "data" \
     "Authorization: token ${FORGEJO_API_TOKEN}"
 
-  # Verify webhooks can reach Plane (simulate a delivery URL check)
-  # This just confirms the Forgejo webhook API endpoint responds, not a full delivery test
+  # Confirm the Forgejo webhook API endpoint responds (not a full delivery test)
   http_code="$(curl -s -o /dev/null -w "%{http_code}" \
     -H "Authorization: token ${FORGEJO_API_TOKEN}" \
     "${FORGEJO_BASE}/api/v1/repos/search?limit=1")"
@@ -159,10 +123,10 @@ fi
 # Validate signature check: posting with wrong sig must be rejected
 if [[ "$eb_code" == "200" ]]; then
   reject_code="$(curl -s -o /dev/null -w "%{http_code}" \
-    -X POST "${EVENT_BUS_BASE}/webhook/plane" \
+    -X POST "${EVENT_BUS_BASE}/webhook/forgejo" \
     -H "Content-Type: application/json" \
-    -H "X-Plane-Signature: bad" \
-    -d '{"event":"issue","action":"updated","payload":{}}' 2>/dev/null || echo 000)"
+    -H "X-Gitea-Signature: bad" \
+    -d '{"action":"opened","pull_request":{}}' 2>/dev/null || echo 000)"
   if [[ "$reject_code" == "403" ]]; then
     green "Signature validation — bad signature rejected (403)"
   else
@@ -176,10 +140,9 @@ if [[ $FAILURES -eq 0 ]]; then
   echo -e "\033[32mAll checks passed.\033[0m"
   echo ""
   echo "Phase 1+2 complete. Next steps:"
-  echo "  1. Configure webhooks in Plane and Forgejo:"
-  echo "       Plane:   workspace Settings → Webhooks → http://event-bus:${EVENT_BUS_PORT}/webhook/plane"
+  echo "  1. Configure the Forgejo webhook:"
   echo "       Forgejo: repo Settings → Webhooks → http://event-bus:${EVENT_BUS_PORT}/webhook/forgejo"
-  echo "  2. Create a project in Plane and a repository in Forgejo."
+  echo "  2. Create a repository in Forgejo."
   echo "  3. Set branch protection on 'main' in Forgejo:"
   echo "       repo → Settings → Branches → require 1 review, status checks, no force-push"
   echo "  4. Move to Phase 3: Coding Agent (ready → branch → PR)."

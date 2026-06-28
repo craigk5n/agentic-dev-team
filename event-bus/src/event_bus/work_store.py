@@ -1,5 +1,5 @@
 """
-Work item store — SQLite-backed, replaces Plane as the coordination backbone.
+Work item store — SQLite-backed; the coordination backbone for ideas and stories.
 
 Schema
 ------

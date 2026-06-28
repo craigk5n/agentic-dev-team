@@ -803,16 +803,10 @@ button.code-btn:hover { background: rgba(59,130,246,.25); }
         <label for="prompt">Prompt</label>
         <textarea id="prompt" name="prompt" placeholder="Describe the feature you want the agent team to build…" required></textarea>
       </div>
-      <div class="row">
-        <div class="field">
-          <label for="project_id">Plane Project ID <span style="color:var(--muted)">(uses Config default if blank)</span></label>
-          <input id="project_id" name="project_id" placeholder="UUID — or set a default in Config → Project">
-        </div>
-        <div class="field">
-          <label for="model_override">Model Override <span style="color:var(--muted)">(optional)</span></label>
-          <input id="model_override" name="model_override" list="model-list"
-                 placeholder="uses runtime config / env default">
-        </div>
+      <div class="field">
+        <label for="model_override">Model Override <span style="color:var(--muted)">(optional)</span></label>
+        <input id="model_override" name="model_override" list="model-list"
+               placeholder="uses runtime config / env default">
       </div>
       <button type="submit" id="idea-btn">Submit Idea →</button>
     </form>
@@ -824,26 +818,13 @@ button.code-btn:hover { background: rgba(59,130,246,.25); }
 <section id="config" class="tab-panel">
   <h2>Runtime Config</h2>
 
-  <!-- Project settings -->
-  <div class="card">
-    <div class="section-title">Project</div>
-    <div class="field" style="max-width:420px">
-      <label for="cfg-project-id">Plane Project ID</label>
-      <input id="cfg-project-id" placeholder="UUID from Plane project URL — required to submit ideas">
-    </div>
-    <p style="color:var(--muted);font-size:12px;margin-top:6px">
-      Find this in the Plane URL: <code>/projects/<strong>&lt;uuid&gt;</strong>/issues/</code>.
-      Overrides the <code>PLANE_PROJECT_ID</code> env var at runtime.
-    </p>
-  </div>
-
   <!-- Gates -->
   <div class="card">
     <div class="section-title">Approval Gates</div>
     <div class="toggle-row">
       <div class="toggle-info">
         <div class="name">Idea Approval</div>
-        <div class="desc">Always ON — ideas require human approval in Plane before the planner runs.</div>
+        <div class="desc">Always ON — ideas require human approval before the planner runs.</div>
       </div>
       <label class="toggle">
         <input type="checkbox" checked disabled>
@@ -1157,7 +1138,7 @@ document.getElementById('idea-form').addEventListener('submit', async e => {
        Status: <span class="badge ${data.status === 'error' ? 'red' : 'green'}">${data.status || 'pending_approval'}</span><br>
        ${link}
        <pre>${JSON.stringify(data, null, 2)}</pre>`, 'success');
-    toast('Idea submitted — check Plane for approval');
+    toast('Idea submitted — awaiting approval on the board');
     e.target.reset();
   } catch (err) {
     showResult('idea-result', `Error: ${err.message}`, 'error');
@@ -1314,7 +1295,6 @@ async function loadConfig() {
   try {
     const data = await api('/api/config');
     buildConfigForms();
-    document.getElementById('cfg-project-id').value = data.project?.plane_project_id || '';
     document.getElementById('gate-pr-merge').checked = data.gates.pr_merge_approval;
     document.getElementById('gate-security').checked = data.gates.security_signoff;
     document.getElementById('gate-free-models').checked = data.gates.free_models_only || false;
@@ -1333,9 +1313,6 @@ document.getElementById('save-config-btn').addEventListener('click', async () =>
   btn.disabled = true;
   btn.textContent = 'Saving…';
 
-  const project = {
-    plane_project_id: document.getElementById('cfg-project-id').value.trim(),
-  };
   const gates = {
     pr_merge_approval: document.getElementById('gate-pr-merge').checked,
     security_signoff: document.getElementById('gate-security').checked,
@@ -1349,7 +1326,7 @@ document.getElementById('save-config-btn').addEventListener('click', async () =>
   }
 
   try {
-    await api('/api/config', { method: 'PATCH', body: JSON.stringify({ project, gates, models, limits }) });
+    await api('/api/config', { method: 'PATCH', body: JSON.stringify({ gates, models, limits }) });
     toast('Config saved');
   } catch (err) {
     toast('Save failed: ' + err.message, 'error');

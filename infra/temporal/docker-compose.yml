@@ -62,7 +62,9 @@ services:
     restart: unless-stopped
 
   # Temporal worker — runs the PR review workflow
-  # Shares plane_network so it can reach Redis and Forgejo
+  # Joins the event-bus and Forgejo networks (see networks: below) to reach Redis and Forgejo.
+  # Bring it up combined with the event-bus compose so those external networks exist:
+  #   docker compose -f temporal/docker-compose.yml -f event-bus/docker-compose.yml --env-file .env up -d temporal-worker
   temporal-worker:
     build:
       context: ../..
@@ -78,12 +80,13 @@ services:
       FORGEJO_API_TOKEN: ${FORGEJO_API_TOKEN}
       FORGEJO_BASE_URL: http://forgejo:3000
       FORGEJO_GIT_URL: http://forgejo:3000
-      REDIS_URL: redis://plane-redis:6379/1
+      REDIS_URL: redis://event-bus-redis:6379/0
       MODEL_REVIEWER: ${MODEL_REVIEWER:-openrouter/anthropic/claude-sonnet-4-6}
       MODEL_TESTER: ${MODEL_TESTER:-openrouter/anthropic/claude-haiku-4-5}
       MODEL_SECURITY: ${MODEL_SECURITY:-openrouter/anthropic/claude-haiku-4-5}
     networks:
-      - plane_network
+      - event_bus_network
+      - forgejo_network
       - temporal_network
     restart: unless-stopped
     deploy:
@@ -95,8 +98,11 @@ volumes:
   temporal_pg_data:
 
 networks:
-  plane_network:
+  event_bus_network:
     external: true
-    name: plane_default
+    name: event-bus_event-bus-net
+  forgejo_network:
+    external: true
+    name: forgejo_default
   temporal_network:
     driver: bridge

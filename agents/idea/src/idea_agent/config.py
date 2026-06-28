@@ -8,12 +8,6 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     model_idea: str = "openrouter/nvidia/nemotron-3-super-120b-a12b:free"
 
-    plane_api_token: str = ""
-    plane_base_url: str = "http://localhost:8181"
-    plane_workspace_slug: str = "dev-agents"
-    # Project where ideas (and later stories) are created
-    plane_project_id: str = ""
-
     log_level: str = "INFO"
 
     @property

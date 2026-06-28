@@ -47,18 +47,15 @@ _ROLE_ENV: dict[str, list[str]] = {
     ],
     "coding_agent": [
         "ANTHROPIC_API_KEY", "FORGEJO_API_TOKEN", "FORGEJO_BASE_URL", "FORGEJO_GIT_URL",
-        "PLANE_API_TOKEN", "PLANE_BASE_URL", "PLANE_WORKSPACE_SLUG",
         "DEFAULT_REPO", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
         "REDIS_URL",
     ],
     "idea_agent": [
         "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY",
-        "PLANE_API_TOKEN", "PLANE_BASE_URL", "PLANE_WORKSPACE_SLUG",
         "MODEL_IDEA", "REDIS_URL",
     ],
     "planner_agent": [
         "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY",
-        "PLANE_API_TOKEN", "PLANE_BASE_URL", "PLANE_WORKSPACE_SLUG",
         "MODEL_PLANNER", "REDIS_URL",
     ],
 }
@@ -121,7 +118,7 @@ class Sandbox:
                 environment=env,
                 mem_limit=self.memory,
                 nano_cpus=int(self.cpus * 1_000_000_000),
-                network_mode="host",  # needs Redis + Forgejo + Plane reachable
+                network_mode="host",  # needs Redis + Forgejo reachable
                 remove=True,
                 stdout=True,
                 stderr=False,

@@ -4,26 +4,16 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore")
 
-    # Webhook HMAC secrets — must match what's configured in Plane/Forgejo
-    plane_webhook_secret: str = ""
+    # Webhook HMAC secret — must match what's configured in Forgejo
     forgejo_webhook_secret: str = ""
 
-    # API tokens for outbound calls to Plane/Forgejo
-    plane_api_token: str = ""
+    # API token for outbound calls to Forgejo
     forgejo_api_token: str = ""
 
-    # Base URLs (internal Docker names when running in containers)
-    plane_base_url: str = "http://localhost:8181"
+    # Base URL (internal Docker name when running in containers)
     forgejo_base_url: str = "http://localhost:13000"
-    plane_workspace_slug: str = "dev-agents"
 
-    # Public-facing Plane URL used to build links in the UI (browser-accessible)
-    plane_public_url: str = ""
-
-    # Project where ideas and stories are created (Phase 5)
-    plane_project_id: str = ""
-
-    # Redis — use db=1 to avoid colliding with Plane's db=0
+    # Redis — db=1
     redis_url: str = "redis://localhost:6379/1"
 
     # Temporal server (Phase 6) — set to enable signal-based PR approval

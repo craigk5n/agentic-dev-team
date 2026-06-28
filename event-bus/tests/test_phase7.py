@@ -216,24 +216,26 @@ class TestSandboxDockerMode:
         with patch.dict(os.environ, {
             "FORGEJO_API_TOKEN": "tok123",
             "ANTHROPIC_API_KEY": "ant456",
-            "PLANE_API_TOKEN": "should-not-appear",
+            "DEFAULT_REPO": "should-not-appear",
         }):
             env = _scoped_env("reviewer.code_review")
         assert "FORGEJO_API_TOKEN" in env
         assert "ANTHROPIC_API_KEY" in env
-        # PLANE_API_TOKEN is not in the reviewer env group
-        assert "PLANE_API_TOKEN" not in env
+        # DEFAULT_REPO belongs to the coding-agent group, not reviewer
+        assert "DEFAULT_REPO" not in env
 
-    def test_scoped_env_coding_agent_includes_plane(self):
+    def test_scoped_env_coding_agent_includes_forgejo(self):
         from event_bus.sandbox import _scoped_env
         import os
         with patch.dict(os.environ, {
-            "PLANE_API_TOKEN": "plane-tok",
+            "FORGEJO_API_TOKEN": "fg-tok",
+            "DEFAULT_REPO": "devadmin/sandbox",
             "ANTHROPIC_API_KEY": "ant456",
             "MODEL_REVIEWER": "should-not-appear",
         }):
             env = _scoped_env("coding_agent.main")
-        assert "PLANE_API_TOKEN" in env
+        assert "FORGEJO_API_TOKEN" in env
+        assert "DEFAULT_REPO" in env
         assert "MODEL_REVIEWER" not in env
 
 
@@ -491,21 +493,6 @@ class TestPrJobsConcurrency:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestHandlersRateLimit:
-    def test_handle_story_ready_rate_limited_returns_status(self):
-        r = fakeredis.FakeRedis()
-        # Exhaust the 1 call/minute limit
-        check_rate(r, "coder", 1)
-
-        with (
-            patch("event_bus.jobs.handlers._get_runtime_config",
-                  return_value=(RuntimeConfig(limits=LimitsConfig(max_rpm_coder=1)), r)),
-        ):
-            from event_bus.jobs.handlers import handle_story_ready
-            result = handle_story_ready("issue-1", "ws", "proj-1")
-
-        assert result["status"] == "rate_limited"
-        assert result["role"] == "coder"
-
     def test_handle_pr_event_skips_rate_limited_roles(self):
         r = fakeredis.FakeRedis()
         # Pre-populate config: reviewer limited to 1 RPM, others unlimited

@@ -1,90 +1,13 @@
-"""Tests for Plane and Forgejo API clients (httpx mocked with respx)."""
+"""Tests for the Forgejo API client (httpx mocked with respx)."""
 
 import pytest
 import respx
 import httpx
 
-from coding_agent.plane_client import PlaneClient
 from coding_agent.forgejo_client import ForgejoClient
 
 
-BASE_PLANE = "http://plane.test"
 BASE_FORGEJO = "http://forgejo.test"
-
-
-# ── PlaneClient ────────────────────────────────────────────────────────────────
-
-def test_plane_get_issue():
-    with respx.mock:
-        respx.get(f"{BASE_PLANE}/api/v1/workspaces/ws/projects/proj/issues/issue1/").mock(
-            return_value=httpx.Response(200, json={"id": "issue1", "name": "Story A"})
-        )
-        with PlaneClient(BASE_PLANE, "token", "ws") as client:
-            issue = client.get_issue("proj", "issue1")
-    assert issue["name"] == "Story A"
-
-
-def test_plane_get_states():
-    with respx.mock:
-        respx.get(f"{BASE_PLANE}/api/v1/workspaces/ws/projects/proj/states/").mock(
-            return_value=httpx.Response(200, json={"results": [{"id": "s1", "name": "Ready"}]})
-        )
-        with PlaneClient(BASE_PLANE, "token", "ws") as client:
-            states = client.get_states("proj")
-    assert states[0]["name"] == "Ready"
-
-
-def test_plane_find_state_id_match():
-    with respx.mock:
-        respx.get(f"{BASE_PLANE}/api/v1/workspaces/ws/projects/proj/states/").mock(
-            return_value=httpx.Response(200, json={"results": [
-                {"id": "s1", "name": "Ready"},
-                {"id": "s2", "name": "In Progress"},
-            ]})
-        )
-        with PlaneClient(BASE_PLANE, "token", "ws") as client:
-            sid = client.find_state_id("proj", "in progress")
-    assert sid == "s2"
-
-
-def test_plane_find_state_id_no_match():
-    with respx.mock:
-        respx.get(f"{BASE_PLANE}/api/v1/workspaces/ws/projects/proj/states/").mock(
-            return_value=httpx.Response(200, json={"results": [{"id": "s1", "name": "Done"}]})
-        )
-        with PlaneClient(BASE_PLANE, "token", "ws") as client:
-            sid = client.find_state_id("proj", "Missing")
-    assert sid is None
-
-
-def test_plane_transition_issue():
-    with respx.mock:
-        respx.patch(f"{BASE_PLANE}/api/v1/workspaces/ws/projects/proj/issues/i1/").mock(
-            return_value=httpx.Response(200, json={"id": "i1", "state": "s2"})
-        )
-        with PlaneClient(BASE_PLANE, "token", "ws") as client:
-            result = client.transition_issue("proj", "i1", "s2")
-    assert result["state"] == "s2"
-
-
-def test_plane_add_comment():
-    with respx.mock:
-        respx.post(f"{BASE_PLANE}/api/v1/workspaces/ws/projects/proj/issues/i1/comments/").mock(
-            return_value=httpx.Response(201, json={"id": "c1"})
-        )
-        with PlaneClient(BASE_PLANE, "token", "ws") as client:
-            result = client.add_comment("proj", "i1", "All done!")
-    assert result["id"] == "c1"
-
-
-def test_plane_http_error_raises():
-    with respx.mock:
-        respx.get(f"{BASE_PLANE}/api/v1/workspaces/ws/projects/proj/issues/bad/").mock(
-            return_value=httpx.Response(404)
-        )
-        with PlaneClient(BASE_PLANE, "token", "ws") as client:
-            with pytest.raises(httpx.HTTPStatusError):
-                client.get_issue("proj", "bad")
 
 
 # ── ForgejoClient ─────────────────────────────────────────────────────────────

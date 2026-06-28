@@ -48,7 +48,7 @@ services:
       FORGEJO__security__INTERNAL_TOKEN: ${FORGEJO_INTERNAL_TOKEN}
       # Registration — disable after initial admin creation
       FORGEJO__service__DISABLE_REGISTRATION: "${FORGEJO_DISABLE_REGISTRATION:-false}"
-      # Webhooks: allow delivery to local addresses (e.g., Plane running on same host)
+      # Webhooks: allow delivery to local addresses (e.g., the event bus on the same host)
       FORGEJO__webhook__ALLOWED_HOST_LIST: "*"
       FORGEJO__webhook__SKIP_TLS_VERIFY: "${FORGEJO_WEBHOOK_SKIP_TLS:-true}"
       # Mailer (optional — set SMTP vars in .env to enable)
@@ -83,10 +83,16 @@ services:
   #   Site Administration → Actions → Runners → Create runner
   # Then set FORGEJO_RUNNER_TOKEN in .env and restart this service.
   forgejo-runner:
-    image: code.forgejo.org/forgejo/runner:3
+    image: data.forgejo.org/forgejo/runner:12.12.0
     restart: unless-stopped
-    environment:
-      CONFIG_FILE: /runner/config.yml
+    # v12 runner needs an explicit daemon command; CONFIG_FILE env is no longer read.
+    command: ["/bin/forgejo-runner", "daemon", "--config", "/runner/config.yml"]
+    working_dir: /data
+    # Join the host docker group so the runner can reach /var/run/docker.sock
+    # (it runs as uid/gid 1000; socket is root:docker). Override DOCKER_GID in
+    # .env if `stat -c %g /var/run/docker.sock` differs from 999 on your host.
+    group_add:
+      - "${DOCKER_GID:-999}"
     volumes:
       - forgejo-runner-data:/data
       - ./runner-config.yml:/runner/config.yml:ro

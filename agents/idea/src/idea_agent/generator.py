@@ -66,7 +66,7 @@ def _parse(raw: str, fallback_prompt: str) -> dict:
 
 
 def description_to_html(markdown: str) -> str:
-    """Minimal markdown → Plane HTML conversion (headings + lists)."""
+    """Minimal markdown → HTML conversion (headings + lists)."""
     lines = []
     for line in markdown.splitlines():
         if line.startswith("## "):
