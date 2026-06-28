@@ -275,6 +275,8 @@ class TestReviewerTelemetry:
         mock_resp = MagicMock()
         mock_resp.usage.prompt_tokens = 200
         mock_resp.usage.completion_tokens = 100
+        # Set cost=0 so record_usage falls through to litellm.completion_cost
+        mock_resp.usage.cost = 0
 
         with patch("litellm.completion_cost", return_value=0.002):
             record_usage(r, "test_run", "openrouter/haiku", mock_resp)

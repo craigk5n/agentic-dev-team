@@ -69,11 +69,16 @@ class TestExecuteTool:
 
 class TestRunAgent:
     def test_rejects_invalid_api_key(self, tmp_path):
-        with pytest.raises(RuntimeError, match="sk-ant-"):
-            run_agent("title", "desc", str(tmp_path), api_key="not-real")
+        """Invalid API key causes the Anthropic client to raise an authentication error."""
+        with patch("coding_agent.claude_agent.anthropic.Anthropic") as mock_cls:
+            mock_client = MagicMock()
+            mock_cls.return_value = mock_client
+            mock_client.messages.create.side_effect = RuntimeError("authentication_error: invalid key")
+            with pytest.raises(RuntimeError, match="authentication_error"):
+                run_agent("title", "desc", str(tmp_path), api_key="not-real")
 
     def test_rejects_empty_api_key(self, tmp_path):
-        with pytest.raises(RuntimeError, match="sk-ant-"):
+        with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
             run_agent("title", "desc", str(tmp_path), api_key="")
 
     def test_done_tool_exits_loop(self, tmp_path):

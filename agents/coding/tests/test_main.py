@@ -1,158 +1,164 @@
-"""Integration tests for the Coding Agent orchestrator (all I/O mocked)."""
+"""Tests for the Coding Agent orchestrator (all I/O mocked)."""
 
 import pytest
 from unittest.mock import MagicMock, patch
 
-from coding_agent.main import _branch_name, _extract_repo, run_coding_agent
+from coding_agent.main import run_coding_agent, fix_pr_review
+
+_UUID = "abc12345-def0-0000-0000-000000000000"
 
 
-def _make_plane(
-    issue: dict | None = None,
-    in_progress_id: str = "state-ip",
-    in_review_id: str = "state-ir",
-) -> MagicMock:
-    plane = MagicMock()
-    plane.__enter__ = lambda s: s
-    plane.__exit__ = MagicMock(return_value=False)
-    plane.get_issue.return_value = issue or {
-        "id": "issue-1",
-        "name": "Add login page",
-        "sequence_id": 1,
-        "description_stripped": "Implement a login form.",
-    }
-    plane.find_state_id.side_effect = lambda proj, name: (
-        in_progress_id if "progress" in name.lower() else in_review_id
-    )
-    plane.transition_issue.return_value = {}
-    plane.add_comment.return_value = {}
-    return plane
-
-
-def _make_forgejo(pr_url: str = "http://git/pulls/1") -> MagicMock:
+def _make_forgejo(pr_url="http://git/org/repo/pulls/1"):
     forgejo = MagicMock()
     forgejo.__enter__ = lambda s: s
     forgejo.__exit__ = MagicMock(return_value=False)
     forgejo.create_pr.return_value = {"number": 1, "html_url": pr_url}
+    forgejo.post_pr_comment.return_value = {}
     return forgejo
 
 
 class TestRunCodingAgent:
     def test_success_flow(self, tmp_path):
-        plane = _make_plane()
         forgejo = _make_forgejo()
-
         with (
-            patch("coding_agent.main.PlaneClient", return_value=plane),
             patch("coding_agent.main.ForgejoClient", return_value=forgejo),
-            patch("coding_agent.main.git_ops.clone", return_value=str(tmp_path)),
+            patch("coding_agent.main.git_ops.clone"),
             patch("coding_agent.main.git_ops.configure_identity"),
             patch("coding_agent.main.git_ops.create_branch"),
             patch("coding_agent.main.git_ops.commit_all", return_value="a" * 40),
             patch("coding_agent.main.git_ops.push"),
-            patch("coding_agent.main.run_agent", return_value="Implemented login form"),
+            patch("coding_agent.main.run_opencode_agent", return_value="Implemented feature"),
             patch("coding_agent.main.tempfile.TemporaryDirectory") as mock_td,
         ):
-            mock_td.return_value.__enter__ = lambda s: str(tmp_path)
-            mock_td.return_value.__exit__ = MagicMock(return_value=False)
-
-            result = run_coding_agent("issue-1", "ws", "proj-1")
-
+            mock_td.return_value.__enter__.return_value = str(tmp_path)
+            mock_td.return_value.__exit__.return_value = False
+            result = run_coding_agent(_UUID, "Add login page", "Implement login form.")
         assert result["status"] == "success"
-        assert "pr_url" in result
-        plane.transition_issue.assert_called()
+        assert result["pr_url"] == "http://git/org/repo/pulls/1"
+        assert result["sha"] == "a" * 40
         forgejo.create_pr.assert_called_once()
-        plane.add_comment.assert_called()
 
-    def test_no_changes_returns_no_changes(self, tmp_path):
-        plane = _make_plane()
+    def test_no_changes_skips_pr(self, tmp_path):
         forgejo = _make_forgejo()
-
         with (
-            patch("coding_agent.main.PlaneClient", return_value=plane),
             patch("coding_agent.main.ForgejoClient", return_value=forgejo),
-            patch("coding_agent.main.git_ops.clone", return_value=str(tmp_path)),
+            patch("coding_agent.main.git_ops.clone"),
             patch("coding_agent.main.git_ops.configure_identity"),
             patch("coding_agent.main.git_ops.create_branch"),
-            patch("coding_agent.main.git_ops.commit_all", return_value=""),  # no changes
-            patch("coding_agent.main.git_ops.push"),
-            patch("coding_agent.main.run_agent", return_value="done"),
+            patch("coding_agent.main.git_ops.commit_all", return_value=""),
+            patch("coding_agent.main.run_opencode_agent", return_value="done"),
             patch("coding_agent.main.tempfile.TemporaryDirectory") as mock_td,
         ):
-            mock_td.return_value.__enter__ = lambda s: str(tmp_path)
-            mock_td.return_value.__exit__ = MagicMock(return_value=False)
-
-            result = run_coding_agent("issue-1", "ws", "proj-1")
-
+            mock_td.return_value.__enter__.return_value = str(tmp_path)
+            mock_td.return_value.__exit__.return_value = False
+            result = run_coding_agent(_UUID, "Add login page", "Implement login form.")
         assert result["status"] == "no_changes"
         forgejo.create_pr.assert_not_called()
 
-    def test_clone_failure_comments_and_raises(self, tmp_path):
-        plane = _make_plane()
+    def test_clone_failure_raises(self, tmp_path):
         forgejo = _make_forgejo()
-
         with (
-            patch("coding_agent.main.PlaneClient", return_value=plane),
             patch("coding_agent.main.ForgejoClient", return_value=forgejo),
-            patch("coding_agent.main.git_ops.clone", side_effect=RuntimeError("clone failed")),
+            patch("coding_agent.main.git_ops.clone", side_effect=RuntimeError("connection refused")),
             patch("coding_agent.main.tempfile.TemporaryDirectory") as mock_td,
         ):
-            mock_td.return_value.__enter__ = lambda s: str(tmp_path)
-            mock_td.return_value.__exit__ = MagicMock(return_value=False)
+            mock_td.return_value.__enter__.return_value = str(tmp_path)
+            mock_td.return_value.__exit__.return_value = False
+            with pytest.raises(RuntimeError, match="Clone failed"):
+                run_coding_agent(_UUID, "Add login page", "desc")
 
-            with pytest.raises(RuntimeError, match="clone failed"):
-                run_coding_agent("issue-1", "ws", "proj-1")
-
-        plane.add_comment.assert_called_once()
-        assert "Clone failed" in plane.add_comment.call_args[0][2]
-
-    def test_agent_failure_comments_and_raises(self, tmp_path):
-        plane = _make_plane()
+    def test_agent_failure_raises(self, tmp_path):
         forgejo = _make_forgejo()
-
         with (
-            patch("coding_agent.main.PlaneClient", return_value=plane),
             patch("coding_agent.main.ForgejoClient", return_value=forgejo),
-            patch("coding_agent.main.git_ops.clone", return_value=str(tmp_path)),
+            patch("coding_agent.main.git_ops.clone"),
             patch("coding_agent.main.git_ops.configure_identity"),
             patch("coding_agent.main.git_ops.create_branch"),
-            patch("coding_agent.main.run_agent", side_effect=RuntimeError("bad key")),
+            patch("coding_agent.main.run_opencode_agent", side_effect=RuntimeError("LLM error")),
             patch("coding_agent.main.tempfile.TemporaryDirectory") as mock_td,
         ):
-            mock_td.return_value.__enter__ = lambda s: str(tmp_path)
-            mock_td.return_value.__exit__ = MagicMock(return_value=False)
-
-            with pytest.raises(RuntimeError, match="bad key"):
-                run_coding_agent("issue-1", "ws", "proj-1")
-
-        plane.add_comment.assert_called()
-        assert "Agent failed" in plane.add_comment.call_args[0][2]
+            mock_td.return_value.__enter__.return_value = str(tmp_path)
+            mock_td.return_value.__exit__.return_value = False
+            with pytest.raises(RuntimeError, match="LLM error"):
+                run_coding_agent(_UUID, "Add login page", "desc")
 
     def test_uses_repo_from_description(self, tmp_path):
-        plane = _make_plane(issue={
-            "id": "issue-1",
-            "name": "Thing",
-            "sequence_id": 2,
-            "description_stripped": "repo: alice/backend\nDo the thing.",
-        })
         forgejo = _make_forgejo()
-
         with (
-            patch("coding_agent.main.PlaneClient", return_value=plane),
             patch("coding_agent.main.ForgejoClient", return_value=forgejo),
-            patch("coding_agent.main.git_ops.clone", return_value=str(tmp_path)) as mock_clone,
+            patch("coding_agent.main.git_ops.clone"),
             patch("coding_agent.main.git_ops.configure_identity"),
             patch("coding_agent.main.git_ops.create_branch"),
             patch("coding_agent.main.git_ops.commit_all", return_value="a" * 40),
             patch("coding_agent.main.git_ops.push"),
-            patch("coding_agent.main.run_agent", return_value="done"),
+            patch("coding_agent.main.run_opencode_agent", return_value="done"),
             patch("coding_agent.main.tempfile.TemporaryDirectory") as mock_td,
         ):
-            mock_td.return_value.__enter__ = lambda s: str(tmp_path)
-            mock_td.return_value.__exit__ = MagicMock(return_value=False)
+            mock_td.return_value.__enter__.return_value = str(tmp_path)
+            mock_td.return_value.__exit__.return_value = False
+            run_coding_agent(_UUID, "Thing", "repo: alice/backend\nDo the thing.")
+        forgejo.create_pr.assert_called_once()
+        assert forgejo.create_pr.call_args.kwargs["owner"] == "alice"
+        assert forgejo.create_pr.call_args.kwargs["repo"] == "backend"
 
-            run_coding_agent("issue-1", "ws", "proj-1")
+    def test_model_override_used(self, tmp_path):
+        forgejo = _make_forgejo()
+        with (
+            patch("coding_agent.main.ForgejoClient", return_value=forgejo),
+            patch("coding_agent.main.git_ops.clone"),
+            patch("coding_agent.main.git_ops.configure_identity"),
+            patch("coding_agent.main.git_ops.create_branch"),
+            patch("coding_agent.main.git_ops.commit_all", return_value="a" * 40),
+            patch("coding_agent.main.git_ops.push"),
+            patch("coding_agent.main.run_opencode_agent", return_value="done") as mock_agent,
+            patch("coding_agent.main.tempfile.TemporaryDirectory") as mock_td,
+        ):
+            mock_td.return_value.__enter__.return_value = str(tmp_path)
+            mock_td.return_value.__exit__.return_value = False
+            run_coding_agent(_UUID, "title", "desc", model_override="my-model")
+        assert mock_agent.call_args.kwargs["model"] == "my-model"
 
-        # clone should be called with alice + backend
-        call_kwargs = mock_clone.call_args
-        assert call_kwargs[1]["owner"] == "alice"
-        assert call_kwargs[1]["repo"] == "backend"
+
+class TestFixPrReview:
+    def test_success_flow(self, tmp_path):
+        forgejo = _make_forgejo()
+        sha = "b" * 40
+        with (
+            patch("coding_agent.main.ForgejoClient", return_value=forgejo),
+            patch("coding_agent.main.git_ops.clone"),
+            patch("coding_agent.main.git_ops.configure_identity"),
+            patch("coding_agent.main.git_ops.checkout_branch"),
+            patch("coding_agent.main.git_ops.commit_all", return_value=sha),
+            patch("coding_agent.main.git_ops.push"),
+            patch("coding_agent.main.run_opencode_agent", return_value="Fixed issues"),
+            patch("coding_agent.main.tempfile.TemporaryDirectory") as mock_td,
+        ):
+            mock_td.return_value.__enter__.return_value = str(tmp_path)
+            mock_td.return_value.__exit__.return_value = False
+            result = fix_pr_review(
+                _UUID, "Add login page", "desc",
+                "story-abc12345/add-login-page", "alice/backend",
+                [{"path": "main.py", "body": "Fix this"}],
+            )
+        assert result["status"] == "success"
+        assert result["sha"] == sha
+        assert result["item_id"] == _UUID
+
+    def test_no_changes_returns_no_changes(self, tmp_path):
+        forgejo = _make_forgejo()
+        with (
+            patch("coding_agent.main.ForgejoClient", return_value=forgejo),
+            patch("coding_agent.main.git_ops.clone"),
+            patch("coding_agent.main.git_ops.configure_identity"),
+            patch("coding_agent.main.git_ops.checkout_branch"),
+            patch("coding_agent.main.git_ops.commit_all", return_value=""),
+            patch("coding_agent.main.run_opencode_agent", return_value="nothing to fix"),
+            patch("coding_agent.main.tempfile.TemporaryDirectory") as mock_td,
+        ):
+            mock_td.return_value.__enter__.return_value = str(tmp_path)
+            mock_td.return_value.__exit__.return_value = False
+            result = fix_pr_review(
+                _UUID, "title", "desc", "branch", "alice/backend", []
+            )
+        assert result["status"] == "no_changes"
+        assert result["item_id"] == _UUID

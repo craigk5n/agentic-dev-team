@@ -82,7 +82,7 @@ def test_checkout_calls_git(tmp_path):
         mock_run.return_value = MagicMock(returncode=0)
         checkout(str(tmp_path), "abc123")
     calls = [c[0][0] for c in mock_run.call_args_list]
-    assert any("fetch" in c for c in calls)
+    # checkout() does a direct detached-HEAD checkout; SHA must already be in the clone.
     assert any("checkout" in c for c in calls)
 
 

@@ -95,21 +95,21 @@ def apply_gate(
     Apply merge gate logic after all 3 review verdicts are in.
     Posts a follow-up PR comment/review and returns the gate outcome.
     """
-    from reviewer.verdicts import aggregate_status
-
     owner, repo = repo_full_name.split("/", 1)
     gates = _read_gates(r)
 
-    overall = aggregate_status(all_verdicts)
     security_status = all_verdicts.get("security", {}).get("status", "warn")
 
-    # Gate 0: any check failed — post a comment and directly call the event-bus
-    # recode endpoint. Forgejo's pull_request_review_rejected webhook doesn't fire
-    # reliably for API-submitted reviews, so we bypass the webhook chain entirely.
-    if overall == "fail":
-        failing = [
-            role for role, v in all_verdicts.items() if v.get("status") == "fail"
-        ]
+    # Gate 0: non-security checks failed — post a comment and directly call the
+    # event-bus recode endpoint.  Security failures are handled by Gate 1 below
+    # (security_signoff) so that a human can review them rather than auto-recoding.
+    # Forgejo's pull_request_review_rejected webhook doesn't fire reliably for
+    # API-submitted reviews, so we bypass the webhook chain entirely.
+    failing = [
+        role for role, v in all_verdicts.items()
+        if role != "security" and v.get("status") == "fail"
+    ]
+    if failing:
         body = (
             "❌ **Changes required** — the following checks failed: "
             + ", ".join(failing)

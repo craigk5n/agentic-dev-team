@@ -125,6 +125,29 @@ class TestApplyGate:
         assert result["gate_status"] == "merge_error"
         assert "409" in result["error"]
 
+    def test_code_review_fail_triggers_recode(self):
+        # Gate 0: non-security check failed → changes_requested + recode triggered
+        r = _make_redis({"security_signoff": True, "pr_merge_approval": False})
+        verdicts = {
+            "code_review": {"status": "fail", "summary": "style errors"},
+            "test_run": {"status": "pass", "summary": "ok"},
+            "security": {"status": "pass", "summary": "clean"},
+        }
+        with patch("reviewer.gate.ForgejoClient") as mock_fj:
+            ctx = MagicMock()
+            ctx.get_pr.return_value = {
+                "head": {"ref": "feature/foo"},
+                "html_url": "http://forgejo.test/pr/1",
+            }
+            mock_fj.return_value.__enter__.return_value = ctx
+            with patch("reviewer.gate._trigger_recode") as mock_recode:
+                from reviewer.gate import apply_gate
+                result = apply_gate(r, "owner/repo", 1, verdicts)
+        assert result["gate_status"] == "changes_requested"
+        assert result["failing"] == ["code_review"]
+        ctx.post_pr_comment.assert_called_once()
+        mock_recode.assert_called_once()
+
     def test_missing_security_verdict_treated_as_warn(self):
         # If security verdict is absent (only code_review + test_run arrived), status defaults to 'warn'
         r = _make_redis({"security_signoff": True, "pr_merge_approval": False})

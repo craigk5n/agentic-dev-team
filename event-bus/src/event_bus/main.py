@@ -222,7 +222,7 @@ async def forgejo_webhook(
             return {"result": "skipped", "reason": "review payload parse failed"}
 
         log.info("forgejo_review_event",
-                 event=x_gitea_event,
+                 gitea_event=x_gitea_event,
                  review_type=review_event.review.type,
                  review_body=review_event.review.body[:100],
                  pr=review_event.pr_number)

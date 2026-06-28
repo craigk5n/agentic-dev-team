@@ -38,7 +38,8 @@ class TestPrJobWrappers:
             result = run_code_reviewer(**self._kwargs, model_override="")
         mock.assert_called_once_with(
             repo_full_name="alice/backend", pr_number=7,
-            head_sha="a" * 40, base_ref="main", model_override="",
+            head_sha="a" * 40, base_ref="main", head_ref="", model_override="",
+            system_prompt="", task_prompt="",
         )
         assert result["status"] == "pass"
 
@@ -52,7 +53,7 @@ class TestPrJobWrappers:
             result = run_tester(**self._kwargs, model_override="")
         mock.assert_called_once_with(
             repo_full_name="alice/backend", pr_number=7,
-            head_sha="a" * 40, base_ref="main", model_override="",
+            head_sha="a" * 40, base_ref="main", head_ref="", model_override="",
         )
         assert result["status"] == "pass"
 
@@ -66,7 +67,7 @@ class TestPrJobWrappers:
             result = run_security_scanner(**self._kwargs, model_override="")
         mock.assert_called_once_with(
             repo_full_name="alice/backend", pr_number=7,
-            head_sha="a" * 40, base_ref="main", model_override="",
+            head_sha="a" * 40, base_ref="main", head_ref="", model_override="",
         )
         assert result["status"] == "pass"
 

@@ -3,84 +3,44 @@
 import pytest
 from unittest.mock import MagicMock, patch
 
-
-def _make_plane(state_id="s1", label_id="l1"):
-    plane = MagicMock()
-    plane.__enter__ = lambda s: s
-    plane.__exit__ = MagicMock(return_value=False)
-    plane.find_state_id.return_value = state_id
-    plane.find_or_create_label.return_value = label_id
-    plane.create_issue.return_value = {"id": "issue-1", "name": "JWT Auth"}
-    return plane
+from idea_agent.main import expand_idea, submit_idea
 
 
 class TestSubmitIdea:
-    def test_success(self):
+    def test_returns_pending_approval_status(self):
         proposal = {"title": "JWT Auth", "description": "## Overview\n\nBuild auth."}
-        plane = _make_plane()
-
-        with (
-            patch("idea_agent.main.expand_prompt", return_value=proposal),
-            patch("idea_agent.main.description_to_html", return_value="<h2>Overview</h2>"),
-            patch("idea_agent.main.PlaneClient", return_value=plane),
-        ):
-            from idea_agent.main import submit_idea
-            result = submit_idea("Add JWT auth", project_id="proj-1", workspace_slug="ws")
-
+        with patch("idea_agent.main.expand_prompt", return_value=proposal):
+            result = submit_idea("Add JWT auth")
         assert result["status"] == "pending_approval"
-        assert result["issue_id"] == "issue-1"
         assert result["title"] == "JWT Auth"
-        assert "url" in result
+        assert result["proposal"] == proposal
 
-    def test_raises_without_project_id(self):
-        with patch("idea_agent.main.settings") as mock_settings:
-            mock_settings.plane_project_id = ""
-            mock_settings.plane_workspace_slug = "ws"
-            from idea_agent.main import submit_idea
-            with pytest.raises(ValueError, match="PLANE_PROJECT_ID"):
-                submit_idea("prompt")
-
-    def test_raises_when_no_pending_approval_state(self):
+    def test_model_override_passed_to_expand_prompt(self):
         proposal = {"title": "T", "description": "D"}
-        plane = _make_plane(state_id=None)
+        with patch("idea_agent.main.expand_prompt", return_value=proposal) as mock:
+            expand_idea("my prompt", model_override="gpt-4o")
+        assert mock.call_args.kwargs["model"] == "gpt-4o"
 
-        with (
-            patch("idea_agent.main.expand_prompt", return_value=proposal),
-            patch("idea_agent.main.description_to_html", return_value="<p>D</p>"),
-            patch("idea_agent.main.PlaneClient", return_value=plane),
-        ):
-            from idea_agent.main import submit_idea
-            with pytest.raises(RuntimeError, match="Pending Approval"):
-                submit_idea("prompt", project_id="proj-1")
-
-    def test_creates_idea_label(self):
+    def test_default_model_from_settings(self):
         proposal = {"title": "T", "description": "D"}
-        plane = _make_plane()
+        with patch("idea_agent.main.expand_prompt", return_value=proposal) as mock, \
+             patch("idea_agent.main.settings") as mock_settings:
+            mock_settings.model_idea = "default-model"
+            mock_settings.effective_api_key = "key"
+            expand_idea("my prompt")
+        assert mock.call_args.kwargs["model"] == "default-model"
 
-        with (
-            patch("idea_agent.main.expand_prompt", return_value=proposal),
-            patch("idea_agent.main.description_to_html", return_value=""),
-            patch("idea_agent.main.PlaneClient", return_value=plane),
-        ):
-            from idea_agent.main import submit_idea
-            submit_idea("prompt", project_id="proj-1")
-
-        plane.find_or_create_label.assert_called_once_with("proj-1", "idea")
-
-    def test_plane_client_receives_label(self):
+    def test_project_id_and_workspace_accepted_but_ignored(self):
         proposal = {"title": "T", "description": "D"}
-        plane = _make_plane(label_id="label-99")
+        with patch("idea_agent.main.expand_prompt", return_value=proposal):
+            result = submit_idea("prompt", project_id="proj-1", workspace_slug="ws")
+        assert result["status"] == "pending_approval"
 
-        with (
-            patch("idea_agent.main.expand_prompt", return_value=proposal),
-            patch("idea_agent.main.description_to_html", return_value=""),
-            patch("idea_agent.main.PlaneClient", return_value=plane),
-        ):
-            from idea_agent.main import submit_idea
-            submit_idea("prompt", project_id="proj-1")
-
-        call_kwargs = plane.create_issue.call_args[1]
-        assert "label-99" in call_kwargs["label_ids"]
+    def test_submit_idea_passes_model_override(self):
+        proposal = {"title": "T", "description": "D"}
+        with patch("idea_agent.main.expand_prompt", return_value=proposal) as mock:
+            submit_idea("prompt", model_override="gpt-4o")
+        assert mock.call_args.kwargs["model"] == "gpt-4o"
 
 
 class TestPlaneClient:

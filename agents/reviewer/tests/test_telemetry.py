@@ -105,6 +105,7 @@ class TestReadAll:
         resp = MagicMock()
         resp.usage.prompt_tokens = 300
         resp.usage.completion_tokens = 100
+        resp.usage.cost = None  # ensure litellm.completion_cost path is taken
 
         with patch("litellm.completion_cost", return_value=0.005):
             record_usage(r, "reviewer", "openrouter/claude", resp)

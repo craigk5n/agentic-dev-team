@@ -5,98 +5,50 @@ import respx
 import httpx
 from unittest.mock import MagicMock, patch
 
-
-def _make_plane(ready_state_id="s-ready", module_id="mod-1"):
-    plane = MagicMock()
-    plane.__enter__ = lambda s: s
-    plane.__exit__ = MagicMock(return_value=False)
-    plane.get_issue.return_value = {
-        "id": "idea-1",
-        "name": "Auth System",
-        "description_stripped": "Build auth.",
-    }
-    plane.find_state_id.return_value = ready_state_id
-    plane.create_module.return_value = {"id": module_id, "name": "Auth Module"}
-    plane.create_issue.side_effect = [
-        {"id": "story-1", "name": "Hash passwords"},
-        {"id": "story-2", "name": "Issue JWTs"},
-    ]
-    plane.add_to_module.return_value = {}
-    plane.add_comment.return_value = {}
-    return plane
+from planner_agent.main import run_planner
 
 
 _PLAN = {
     "module_name": "Auth Module",
     "module_description": "All auth work",
     "stories": [
-        {"title": "Hash passwords", "description": "repo: dev/app\nHash them.", "priority": "high"},
-        {"title": "Issue JWTs", "description": "repo: dev/app\nIssue tokens.", "priority": "medium"},
+        {"title": "Hash passwords", "description": "Hash them.", "priority": "high"},
+        {"title": "Issue JWTs", "description": "Issue tokens.", "priority": "medium"},
     ],
 }
 
 
 class TestRunPlanner:
-    def test_creates_module_and_stories(self):
-        plane = _make_plane()
-        with (
-            patch("planner_agent.main.PlaneClient", return_value=plane),
-            patch("planner_agent.main.decompose_idea", return_value=_PLAN),
-        ):
-            from planner_agent.main import run_planner
-            result = run_planner("idea-1", "ws", "proj-1")
+    def test_returns_plan_from_decomposer(self):
+        with patch("planner_agent.main.decompose_idea", return_value=_PLAN):
+            result = run_planner("idea-1", "Auth System", "Build auth.")
+        assert result == _PLAN
 
-        assert result["status"] == "planned"
-        assert result["module_id"] == "mod-1"
-        assert result["story_count"] == 2
-        assert len(result["story_ids"]) == 2
+    def test_passes_title_and_description_to_decomposer(self):
+        with patch("planner_agent.main.decompose_idea", return_value=_PLAN) as mock:
+            run_planner("idea-1", "Auth System", "Build the auth system.")
+        args = mock.call_args.args
+        assert args[0] == "Auth System"
+        assert args[1] == "Build the auth system."
 
-    def test_all_stories_added_to_module(self):
-        plane = _make_plane()
-        with (
-            patch("planner_agent.main.PlaneClient", return_value=plane),
-            patch("planner_agent.main.decompose_idea", return_value=_PLAN),
-        ):
-            from planner_agent.main import run_planner
-            run_planner("idea-1", "ws", "proj-1")
+    def test_model_override_passed_to_decomposer(self):
+        with patch("planner_agent.main.decompose_idea", return_value=_PLAN) as mock:
+            run_planner("idea-1", "T", "D", model_override="gpt-4o")
+        assert mock.call_args.kwargs["model"] == "gpt-4o"
 
-        assert plane.add_to_module.call_count == 2
+    def test_uses_settings_model_when_no_override(self):
+        with patch("planner_agent.main.decompose_idea", return_value=_PLAN) as mock, \
+             patch("planner_agent.main.settings") as mock_settings:
+            mock_settings.model_planner = "settings-model"
+            mock_settings.effective_api_key = "key"
+            mock_settings.default_repo = "dev/sandbox"
+            run_planner("idea-1", "T", "D")
+        assert mock.call_args.kwargs["model"] == "settings-model"
 
-    def test_comment_posted_on_idea(self):
-        plane = _make_plane()
-        with (
-            patch("planner_agent.main.PlaneClient", return_value=plane),
-            patch("planner_agent.main.decompose_idea", return_value=_PLAN),
-        ):
-            from planner_agent.main import run_planner
-            run_planner("idea-1", "ws", "proj-1")
-
-        plane.add_comment.assert_called_once()
-        comment_body = plane.add_comment.call_args[0][2]
-        assert "Planning complete" in comment_body
-        assert "2" in comment_body  # story count
-
-    def test_raises_when_no_ready_state(self):
-        plane = _make_plane(ready_state_id=None)
-        with (
-            patch("planner_agent.main.PlaneClient", return_value=plane),
-            patch("planner_agent.main.decompose_idea", return_value=_PLAN),
-        ):
-            from planner_agent.main import run_planner
-            with pytest.raises(RuntimeError, match="Ready"):
-                run_planner("idea-1", "ws", "proj-1")
-
-    def test_stories_set_to_ready_state(self):
-        plane = _make_plane(ready_state_id="s-ready-42")
-        with (
-            patch("planner_agent.main.PlaneClient", return_value=plane),
-            patch("planner_agent.main.decompose_idea", return_value=_PLAN),
-        ):
-            from planner_agent.main import run_planner
-            run_planner("idea-1", "ws", "proj-1")
-
-        for call in plane.create_issue.call_args_list:
-            assert call[1]["state_id"] == "s-ready-42"
+    def test_repo_full_name_passed_as_default_repo(self):
+        with patch("planner_agent.main.decompose_idea", return_value=_PLAN) as mock:
+            run_planner("idea-1", "T", "D", repo_full_name="alice/backend")
+        assert mock.call_args.kwargs["default_repo"] == "alice/backend"
 
 
 class TestPlaneClient:

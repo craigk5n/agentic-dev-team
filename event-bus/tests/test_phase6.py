@@ -189,33 +189,32 @@ class TestModelOverrideInPREvent:
 # ── /api/ideas model_override support ────────────────────────────────────────
 
 class TestIdeasModelOverride:
+    _fake_item = {"id": "i-1", "title": "T", "state": "pending-approval", "type": "idea"}
+
     def test_model_override_from_request_body(self, client, monkeypatch):
         r = fakeredis.FakeRedis()
         monkeypatch.setattr("event_bus.main._redis_conn", r)
-        monkeypatch.setattr("event_bus.main.settings.plane_project_id", "proj-1")
-        idea_result = {"status": "pending_approval", "issue_id": "i-1", "title": "T", "url": "u"}
-        with patch("idea_agent.main.submit_idea", return_value=idea_result) as mock:
+        with patch("idea_agent.main.expand_idea", return_value={"title": "T", "description": "D"}) as mock, \
+             patch("event_bus.main.create_item", return_value=self._fake_item):
             client.post("/api/ideas", json={"prompt": "test", "model_override": "ollama/mistral"})
-        assert mock.call_args[1]["model_override"] == "ollama/mistral"
+        assert mock.call_args.kwargs["model_override"] == "ollama/mistral"
 
     def test_model_override_from_runtime_config(self, client, monkeypatch):
         r = fakeredis.FakeRedis()
         import json as _json
         r.set("runtime_config", _json.dumps({"models": {"idea": "gpt-4o"}}))
         monkeypatch.setattr("event_bus.main._redis_conn", r)
-        monkeypatch.setattr("event_bus.main.settings.plane_project_id", "proj-1")
-        idea_result = {"status": "pending_approval", "issue_id": "i-1", "title": "T", "url": "u"}
-        with patch("idea_agent.main.submit_idea", return_value=idea_result) as mock:
+        with patch("idea_agent.main.expand_idea", return_value={"title": "T", "description": "D"}) as mock, \
+             patch("event_bus.main.create_item", return_value=self._fake_item):
             client.post("/api/ideas", json={"prompt": "test"})
-        assert mock.call_args[1]["model_override"] == "gpt-4o"
+        assert mock.call_args.kwargs["model_override"] == "gpt-4o"
 
     def test_request_body_override_wins_over_config(self, client, monkeypatch):
         r = fakeredis.FakeRedis()
         import json as _json
         r.set("runtime_config", _json.dumps({"models": {"idea": "config-model"}}))
         monkeypatch.setattr("event_bus.main._redis_conn", r)
-        monkeypatch.setattr("event_bus.main.settings.plane_project_id", "proj-1")
-        idea_result = {"status": "pending_approval", "issue_id": "i-1", "title": "T", "url": "u"}
-        with patch("idea_agent.main.submit_idea", return_value=idea_result) as mock:
+        with patch("idea_agent.main.expand_idea", return_value={"title": "T", "description": "D"}) as mock, \
+             patch("event_bus.main.create_item", return_value=self._fake_item):
             client.post("/api/ideas", json={"prompt": "test", "model_override": "request-model"})
-        assert mock.call_args[1]["model_override"] == "request-model"
+        assert mock.call_args.kwargs["model_override"] == "request-model"

@@ -1,6 +1,10 @@
 """Shared fixtures for the event-bus test suite."""
 
 from __future__ import annotations
+import sys
+import os as _os
+sys.path.insert(0, _os.path.abspath(_os.path.join(_os.path.dirname(__file__), '../../agents/reviewer/src')))
+
 import hashlib
 import hmac
 import json

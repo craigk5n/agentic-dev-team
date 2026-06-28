@@ -33,12 +33,13 @@ class TestHandleIdeaApproved:
 
 class TestIdeasEndpoint:
     def test_submit_idea_success(self, client, monkeypatch):
-        idea_result = {"status": "pending_approval", "issue_id": "i-1", "title": "Auth System", "url": "http://plane/..."}
-        monkeypatch.setattr("event_bus.main.settings.plane_project_id", "proj-1")
-        with patch("idea_agent.main.submit_idea", return_value=idea_result):
+        fake_item = {"id": "i-1", "title": "Auth System", "state": "pending-approval", "type": "idea"}
+        with patch("idea_agent.main.expand_idea", return_value={"title": "Auth System", "description": "desc"}), \
+             patch("event_bus.main.create_item", return_value=fake_item):
             resp = client.post("/api/ideas", json={"prompt": "Add JWT auth"})
         assert resp.status_code == 202
-        assert resp.json()["issue_id"] == "i-1"
+        assert resp.json()["title"] == "Auth System"
+        assert resp.json()["state"] == "pending-approval"
 
     def test_missing_prompt_returns_400(self, client):
         resp = client.post("/api/ideas", json={"other": "field"})
@@ -53,22 +54,23 @@ class TestIdeasEndpoint:
         resp = client.post("/api/ideas", content=b"not json", headers={"Content-Type": "application/json"})
         assert resp.status_code == 400
 
-    def test_project_id_from_request_body(self, client, monkeypatch):
-        monkeypatch.setattr("event_bus.main.settings.plane_project_id", "")
-        idea_result = {"status": "pending_approval", "issue_id": "i-2", "title": "T", "url": "u"}
-        with patch("idea_agent.main.submit_idea", return_value=idea_result) as mock:
-            resp = client.post("/api/ideas", json={"prompt": "idea", "project_id": "proj-99"})
+    def test_model_override_in_body(self, client, monkeypatch):
+        fake_item = {"id": "i-2", "title": "T", "state": "pending-approval", "type": "idea"}
+        with patch("idea_agent.main.expand_idea", return_value={"title": "T", "description": "D"}) as mock, \
+             patch("event_bus.main.create_item", return_value=fake_item):
+            resp = client.post("/api/ideas", json={"prompt": "idea", "model_override": "gpt-4"})
         assert resp.status_code == 202
-        assert mock.call_args[1]["project_id"] == "proj-99"
+        assert mock.call_args.kwargs["model_override"] == "gpt-4"
 
-    def test_missing_project_id_returns_422(self, client, monkeypatch):
-        monkeypatch.setattr("event_bus.main.settings.plane_project_id", "")
-        resp = client.post("/api/ideas", json={"prompt": "build something"})
-        assert resp.status_code == 422
+    def test_model_override_from_settings(self, client, monkeypatch):
+        fake_item = {"id": "i-3", "title": "T", "state": "pending-approval", "type": "idea"}
+        with patch("idea_agent.main.expand_idea", return_value={"title": "T", "description": "D"}), \
+             patch("event_bus.main.create_item", return_value=fake_item):
+            resp = client.post("/api/ideas", json={"prompt": "idea"})
+        assert resp.status_code == 202
 
     def test_agent_exception_returns_500(self, client, monkeypatch):
-        monkeypatch.setattr("event_bus.main.settings.plane_project_id", "proj-1")
-        with patch("idea_agent.main.submit_idea", side_effect=RuntimeError("Plane error")):
+        with patch("idea_agent.main.expand_idea", side_effect=RuntimeError("LLM error")):
             resp = client.post("/api/ideas", json={"prompt": "test"})
         assert resp.status_code == 500
 

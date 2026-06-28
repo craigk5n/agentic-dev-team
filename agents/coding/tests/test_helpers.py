@@ -5,25 +5,29 @@ from coding_agent.main import _branch_name, _extract_repo
 from coding_agent.claude_agent import _safe_path
 
 
+_UUID = "abc12345-def0-0000-0000-000000000000"
+
+
 class TestBranchName:
     def test_normal_title(self):
-        name = _branch_name(3, "Add login page")
-        assert name == "story-3/add-login-page"
+        name = _branch_name(_UUID, "Add login page")
+        assert name == "story-abc12345/add-login-page"
 
     def test_special_chars_stripped(self):
-        name = _branch_name(7, "Fix: user's email (validation)")
+        name = _branch_name(_UUID, "Fix: user's email (validation)")
         assert "//" not in name
-        assert name.startswith("story-7/")
+        assert name.startswith("story-abc12345/")
 
     def test_long_title_truncated(self):
         title = "A" * 100
-        name = _branch_name(1, title)
+        name = _branch_name(_UUID, title)
         slug = name.split("/", 1)[1]
         assert len(slug) <= 40
 
-    def test_no_sequence_id(self):
-        name = _branch_name(None, "Quick fix")
-        assert name.startswith("story/")
+    def test_short_item_id(self):
+        # UUIDs always have at least 8 chars; short IDs still work
+        name = _branch_name("abc", "Quick fix")
+        assert name == "story-abc/quick-fix"
 
 
 class TestExtractRepo:
