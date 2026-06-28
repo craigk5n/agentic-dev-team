@@ -383,6 +383,18 @@ button.secondary:hover { border-color: var(--accent); color: var(--accent); }
 .badge.red { background: rgba(239,68,68,.15); color: var(--red); }
 .badge.yellow { background: rgba(245,158,11,.15); color: var(--yellow); }
 
+.verdict-row { display: flex; gap: 5px; margin-top: 5px; }
+.verdict-pip {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; border-radius: 4px;
+  font-size: 10px; font-weight: 700; letter-spacing: 0;
+  opacity: .85;
+}
+.verdict-pip.pass { background: rgba(34,197,94,.15); color: var(--green); }
+.verdict-pip.warn { background: rgba(245,158,11,.15); color: var(--yellow); }
+.verdict-pip.fail { background: rgba(239,68,68,.18); color: var(--red); }
+.verdict-pip.pending { background: rgba(100,116,139,.12); color: var(--muted); }
+
 .divider { border: none; border-top: 1px solid var(--border); margin: 20px 0; }
 
 .refresh-row {
@@ -1553,6 +1565,12 @@ function fmtDate(iso) {
   return new Date(iso).toLocaleDateString(undefined, {month:'short', day:'numeric', year:'numeric'});
 }
 
+function verdictPip(label, status) {
+  const cls = status === 'pass' ? 'pass' : status === 'warn' ? 'warn' : status === 'fail' ? 'fail' : 'pending';
+  const title = status ? `${label === 'R' ? 'Reviewer' : label === 'T' ? 'Tester' : 'Security'}: ${status}` : '';
+  return `<span class="verdict-pip ${cls}" title="${title}">${label}</span>`;
+}
+
 async function loadBoard() {
   const container = document.getElementById('board-items');
   container.innerHTML = '<div class="board-empty">Loading…</div>';
@@ -1602,10 +1620,16 @@ async function loadBoard() {
       const seqBadge = item.sequence ? `<span class="seq-badge">${item.sequence}</span>` : '';
       const date = fmtDate(item.created_at);
       const backlogClass = item.state === 'backlog' ? ' backlog' : '';
+      const v = item.verdicts || {};
+      const verdictRow = (v.reviewer || v.tester || v.security) ? `
+        <div class="verdict-row">
+          ${verdictPip('R', v.reviewer)}${verdictPip('T', v.tester)}${verdictPip('S', v.security)}
+        </div>` : '';
       html += `<div class="board-item${backlogClass}" data-id="${item.id}">
         ${seqBadge}
         <div class="board-item-title" data-id="${item.id}">${escHtml(item.title)}</div>
         <div class="board-item-meta">${item.type}${date ? ' · ' + date : ''}</div>
+        ${verdictRow}
         ${actions}
       </div>`;
     }

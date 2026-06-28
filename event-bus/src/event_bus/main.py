@@ -284,11 +284,43 @@ async def submit_idea(request: Request):
 
 # ── Work items API ────────────────────────────────────────────────────────────
 
+def _fetch_verdicts(pr_url: str) -> dict:
+    """Look up the three reviewer/tester/security verdicts for a PR from Redis."""
+    if not _redis_conn or not pr_url:
+        return {}
+    try:
+        from urllib.parse import urlparse
+        parts = urlparse(pr_url).path.strip("/").split("/")
+        # path: owner/repo/pulls/number
+        if len(parts) < 4 or parts[-2] != "pulls":
+            return {}
+        owner, repo, pr_number = parts[0], parts[1], parts[3]
+        base = f"pr_verdict:{owner}:{repo}:{pr_number}"
+        role_map = [
+            ("reviewer", f"{base}:code_review"),
+            ("tester",   f"{base}:test_run"),
+            ("security", f"{base}:security"),
+        ]
+        verdicts = {}
+        for role, key in role_map:
+            raw = _redis_conn.get(key)
+            if raw:
+                verdicts[role] = _json.loads(raw).get("status")  # "pass"|"warn"|"fail"
+        return verdicts
+    except Exception:
+        return {}
+
+
 @app.get("/api/items")
 async def list_work_items(response: Response):
     """Return all work items grouped by state with state metadata."""
     response.headers["Cache-Control"] = "no-store"
     groups = grouped_items()
+    # Enrich items that have a PR URL with live verdict data from Redis
+    for items in groups.values():
+        for item in items:
+            if item.get("pr_url"):
+                item["verdicts"] = _fetch_verdicts(item["pr_url"])
     return {
         "groups": [
             {
