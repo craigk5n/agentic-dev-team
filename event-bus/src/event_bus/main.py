@@ -219,6 +219,13 @@ async def forgejo_webhook(
             log.info("pr_merged_auto_advance",
                      item_id=item["id"], pr=event.pr_number,
                      next=unlocked["id"] if unlocked else None)
+            if unlocked:
+                update_state(unlocked["id"], "in-progress")
+                story_prompt = get_prompt(_redis_or_503(), "coder.story")
+                asyncio.create_task(_run_coding_agent(
+                    unlocked["id"], unlocked["title"], unlocked.get("description") or "", story_prompt,
+                ))
+                log.info("coding_agent_auto_triggered", story_id=unlocked["id"])
             return {"result": "merged", "item_id": item["id"],
                     "unlocked": unlocked["id"] if unlocked else None}
         log.info("pr_merged_no_story", pr_url=pr_url)
@@ -269,7 +276,7 @@ async def submit_idea(request: Request):
         prompt=prompt,
         description=proposal.get("description", ""),
         state="pending-approval",
-        model_used=model_override or settings.model_idea,
+        model_used=model_override or "",
     )
     log.info("idea_submitted", id=item["id"], title=item["title"])
     return item
@@ -393,6 +400,7 @@ async def _run_planner(item_id: str, title: str, description: str) -> None:
         return
 
     stories = plan.get("stories", [])
+    first_story: dict = {}
     for i, story in enumerate(stories):
         # Only the first story starts ready; the rest are backlog until their predecessor merges
         state = "ready" if i == 0 else "backlog"
@@ -408,6 +416,8 @@ async def _run_planner(item_id: str, title: str, description: str) -> None:
         )
         log.info("story_created", id=story_item["id"], seq=i + 1, state=state,
                  title=story_item["title"], repo=repo_full)
+        if i == 0:
+            first_story = story_item
 
     log.info(
         "planner_complete",
@@ -416,6 +426,14 @@ async def _run_planner(item_id: str, title: str, description: str) -> None:
         story_count=len(plan.get("stories", [])),
         repo=repo_full,
     )
+
+    if stories:
+        update_state(first_story["id"], "in-progress")
+        story_prompt = get_prompt(_redis_conn, "coder.story")
+        asyncio.create_task(_run_coding_agent(
+            first_story["id"], first_story["title"], first_story["description"] or "", story_prompt,
+        ))
+        log.info("coding_agent_auto_triggered", story_id=first_story["id"])
 
 
 @app.post("/api/items/{item_id}/code", status_code=status.HTTP_202_ACCEPTED)
