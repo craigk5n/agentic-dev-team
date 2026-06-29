@@ -10,6 +10,9 @@ x-event-bus-env: &event-bus-env
   FORGEJO_BASE_URL: http://forgejo:3000
   FORGEJO_GIT_URL: http://forgejo:3000
   REDIS_URL: redis://event-bus-redis:6379/0
+  # Board HTTP Basic Auth — blank password leaves the board fully open
+  BOARD_AUTH_USER: ${BOARD_AUTH_USER:-admin}
+  BOARD_AUTH_PASSWORD: ${BOARD_AUTH_PASSWORD:-}
   LOG_LEVEL: ${EVENT_BUS_LOG_LEVEL:-INFO}
   # Phase 6: Temporal address — leave blank to use RQ fallback for PR approval
   TEMPORAL_ADDRESS: ${TEMPORAL_ADDRESS:-}

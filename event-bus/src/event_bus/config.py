@@ -17,6 +17,11 @@ class Settings(BaseSettings):
     # Base URL (internal Docker name when running in containers)
     forgejo_base_url: str = "http://localhost:13000"
 
+    # Board HTTP Basic Auth — single shared operator credential for the UI/API.
+    # Leave board_auth_password blank to disable (the board is then fully open).
+    board_auth_user: str = "admin"
+    board_auth_password: str = ""
+
     # Redis — db=1
     redis_url: str = "redis://localhost:6379/1"
 

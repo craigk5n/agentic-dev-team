@@ -149,6 +149,21 @@ else
   yellow "Event bus not running (HTTP ${eb_code}) — run: cd infra && ./setup.sh eventbus"
 fi
 
+# Board auth: a configured password must block the API to anonymous callers
+if [[ "$eb_code" == "200" ]]; then
+  if [[ -n "${BOARD_AUTH_PASSWORD:-}" ]]; then
+    anon="$(curl -s -o /dev/null -w "%{http_code}" "${EVENT_BUS_BASE}/api/config" 2>/dev/null || echo 000)"
+    authed="$(curl -s -o /dev/null -w "%{http_code}" -u "${BOARD_AUTH_USER:-admin}:${BOARD_AUTH_PASSWORD}" "${EVENT_BUS_BASE}/api/config" 2>/dev/null || echo 000)"
+    if [[ "$anon" == "401" && "$authed" == "200" ]]; then
+      green "Board auth — anonymous blocked (401), credentials accepted (200)"
+    else
+      red "Board auth — expected anon=401/authed=200, got anon=${anon}/authed=${authed}"
+    fi
+  else
+    red "Board auth DISABLED — board UI/API is OPEN. Set BOARD_AUTH_PASSWORD in .env and rebuild (anyone reaching the URL can drive LLM cost)"
+  fi
+fi
+
 # Validate signature check: posting with wrong sig must be rejected
 if [[ "$eb_code" == "200" ]]; then
   reject_code="$(curl -s -o /dev/null -w "%{http_code}" \

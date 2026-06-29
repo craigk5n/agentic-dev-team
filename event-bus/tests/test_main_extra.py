@@ -703,7 +703,8 @@ class TestHelperFunctions:
     def test_coder_slot_acquire_with_redis_enforces_cap(self, monkeypatch):
         r = fakeredis.FakeRedis()
         monkeypatch.setattr("event_bus.main._redis_conn", r)
-        monkeypatch.setattr("event_bus.main.settings", MagicMock(max_coding_agents=2))
+        monkeypatch.setattr("event_bus.main.settings",
+                            MagicMock(max_coding_agents=2, board_auth_password=""))
         from event_bus.main import _coder_slot_acquire, _CODER_SLOT_KEY
         r.delete(_CODER_SLOT_KEY)
         assert _coder_slot_acquire() is True   # n=1 ≤ 2
@@ -728,7 +729,8 @@ class TestHelperFunctions:
               json.dumps({"repo_full_name": "owner/repo", "pr_number": 1}))
         monkeypatch.setattr("event_bus.main._redis_conn", r)
         monkeypatch.setattr("event_bus.main._queue", None)
-        monkeypatch.setattr("event_bus.main.settings", MagicMock(temporal_address=""))
+        monkeypatch.setattr("event_bus.main.settings",
+                            MagicMock(temporal_address="", board_auth_password=""))
         resp = client.post("/api/prs/owner/repo/1/approve")
         assert resp.status_code == 503
 
@@ -840,3 +842,47 @@ class TestProvisionProjectRepo:
         result = m._provision_project_repo("idea-3", "Resilient Repo")
         assert result == "devadmin/resilient-repo"
         fj.create_webhook.assert_called_once()
+
+
+# ── board HTTP Basic Auth middleware ──────────────────────────────────────────
+
+class TestBoardBasicAuth:
+    @staticmethod
+    def _basic(user, password):
+        import base64
+        return "Basic " + base64.b64encode(f"{user}:{password}".encode()).decode()
+
+    def test_api_blocked_without_credentials(self, client, monkeypatch):
+        monkeypatch.setattr(settings, "board_auth_user", "admin")
+        monkeypatch.setattr(settings, "board_auth_password", "s3cret")
+        resp = client.get("/api/config")
+        assert resp.status_code == 401
+        assert resp.headers.get("www-authenticate", "").lower().startswith("basic")
+
+    def test_api_allowed_with_correct_credentials(self, client, monkeypatch):
+        monkeypatch.setattr(settings, "board_auth_user", "admin")
+        monkeypatch.setattr(settings, "board_auth_password", "s3cret")
+        resp = client.get("/api/config", headers={"Authorization": self._basic("admin", "s3cret")})
+        assert resp.status_code == 200
+
+    def test_api_rejected_with_wrong_credentials(self, client, monkeypatch):
+        monkeypatch.setattr(settings, "board_auth_user", "admin")
+        monkeypatch.setattr(settings, "board_auth_password", "s3cret")
+        resp = client.get("/api/config", headers={"Authorization": self._basic("admin", "wrong")})
+        assert resp.status_code == 401
+
+    def test_health_is_exempt(self, client, monkeypatch):
+        monkeypatch.setattr(settings, "board_auth_password", "s3cret")
+        assert client.get("/health").status_code == 200
+
+    def test_webhook_is_exempt_from_basic_auth(self, client, monkeypatch):
+        # No basic-auth creds + bad signature must reach the handler → 403 (not 401)
+        monkeypatch.setattr(settings, "board_auth_password", "s3cret")
+        resp = client.post("/webhook/forgejo",
+                           headers={"X-Gitea-Signature": "bad"},
+                           json={"action": "opened"})
+        assert resp.status_code == 403
+
+    def test_auth_disabled_when_password_blank(self, client, monkeypatch):
+        monkeypatch.setattr(settings, "board_auth_password", "")
+        assert client.get("/api/config").status_code == 200

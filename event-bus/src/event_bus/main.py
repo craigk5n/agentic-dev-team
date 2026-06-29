@@ -33,6 +33,7 @@ from dataclasses import asdict
 from collections.abc import Callable
 
 from event_bus.config import settings
+from event_bus.auth import check_basic_auth, is_exempt as auth_is_exempt
 from event_bus.ci_workflow import CI_WORKFLOW_PATH, CI_WORKFLOW_YAML
 from event_bus.config_store import get_config, patch_config
 from event_bus.prompt_store import get_prompt, set_prompt, delete_prompt, list_prompts
@@ -96,6 +97,9 @@ async def lifespan(app: FastAPI):
     # rejected with 403 until secrets are configured.
     if not settings.forgejo_webhook_secret:
         log.warning("forgejo_webhook_secret_not_set — all Forgejo webhooks will be rejected")
+    if not settings.board_auth_password:
+        log.warning("board_auth_disabled — board UI/API is OPEN; set BOARD_AUTH_PASSWORD "
+                    "to require login (anyone reaching the URL can drive LLM cost)")
     _redis_conn = redis.from_url(settings.redis_url, decode_responses=False)
     _queue = Queue("agent-jobs", connection=_redis_conn)
     get_db()  # initialise SQLite schema
@@ -106,6 +110,25 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="dev-agents event bus", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def board_basic_auth(request: Request, call_next):
+    """Require HTTP Basic Auth for the board UI/API when a password is configured.
+    Webhook (HMAC), /internal (service-to-service), and /health are exempt."""
+    if settings.board_auth_password and not auth_is_exempt(request.url.path):
+        if not check_basic_auth(
+            request.headers.get("authorization", ""),
+            settings.board_auth_user,
+            settings.board_auth_password,
+        ):
+            return Response(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                content="Authentication required",
+                headers={"WWW-Authenticate": 'Basic realm="Agentic Dev Team board"'},
+            )
+    return await call_next(request)
+
 
 # Serve the control-panel UI from /ui/
 _static_dir = Path(__file__).parent / "static"
