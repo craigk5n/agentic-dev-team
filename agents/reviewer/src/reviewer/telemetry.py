@@ -29,10 +29,14 @@ def record_usage(
     role: str,
     model: str,
     response,
+    stack: str = "",
 ) -> None:
     """
     Record token usage and estimated USD cost from a litellm completion response.
     Safe to call with any response object — silently skips if data is missing.
+
+    When `stack` is given, the same metrics are also accumulated in a per-stack
+    hash (telemetry:stack:{date}) so spend can be attributed per tech stack.
     """
     try:
         usage = getattr(response, "usage", None)
@@ -48,6 +52,9 @@ def record_usage(
             except Exception:
                 cost = 0.0
 
+        in_tok = int(getattr(usage, "prompt_tokens", 0) or 0)
+        out_tok = int(getattr(usage, "completion_tokens", 0) or 0)
+
         # UTC to match read_all() (time.gmtime); otherwise the write/read keys
         # diverge once local time crosses the UTC day boundary.
         date = time.strftime("%Y-%m-%d", time.gmtime())
@@ -56,15 +63,55 @@ def record_usage(
 
         pipe = r.pipeline()
         pipe.hincrbyfloat(key, f"{prefix}:cost_usd", cost)
-        pipe.hincrby(key, f"{prefix}:input_tokens", int(getattr(usage, "prompt_tokens", 0) or 0))
-        pipe.hincrby(key, f"{prefix}:output_tokens", int(getattr(usage, "completion_tokens", 0) or 0))
+        pipe.hincrby(key, f"{prefix}:input_tokens", in_tok)
+        pipe.hincrby(key, f"{prefix}:output_tokens", out_tok)
         pipe.hincrby(key, f"{prefix}:calls", 1)
         pipe.expire(key, _TTL_SECONDS)
+
+        if stack:
+            skey = f"telemetry:stack:{date}"
+            pipe.hincrbyfloat(skey, f"{stack}:cost_usd", cost)
+            pipe.hincrby(skey, f"{stack}:input_tokens", in_tok)
+            pipe.hincrby(skey, f"{stack}:output_tokens", out_tok)
+            pipe.hincrby(skey, f"{stack}:calls", 1)
+            pipe.expire(skey, _TTL_SECONDS)
+
         pipe.execute()
 
-        log.debug("telemetry_recorded", role=role, model=model, cost_usd=round(cost, 6))
+        log.debug("telemetry_recorded", role=role, model=model, stack=stack,
+                  cost_usd=round(cost, 6))
     except Exception as exc:
         log.warning("telemetry_write_failed", role=role, model=model, error=str(exc))
+
+
+def read_stack_usage(r: "redis.Redis", days: int = 30) -> list[dict]:
+    """
+    Return per-stack cost/usage totals summed over the last `days` days.
+    Each entry: {stack, cost_usd, input_tokens, output_tokens, calls}
+    """
+    totals: dict[str, dict] = {}
+    today = time.time()
+    for offset in range(days):
+        date = time.strftime("%Y-%m-%d", time.gmtime(today - offset * 86_400))
+        try:
+            raw = r.hgetall(f"telemetry:stack:{date}")
+        except Exception:
+            continue
+        for k, v in (raw or {}).items():
+            field = k.decode() if isinstance(k, bytes) else k
+            val = v.decode() if isinstance(v, bytes) else v
+            parts = field.rsplit(":", 1)
+            if len(parts) != 2:
+                continue
+            stack, metric = parts
+            entry = totals.setdefault(stack, {
+                "stack": stack, "cost_usd": 0.0,
+                "input_tokens": 0, "output_tokens": 0, "calls": 0})
+            if metric == "cost_usd":
+                entry["cost_usd"] += float(val)
+            elif metric in ("input_tokens", "output_tokens", "calls"):
+                entry[metric] += int(val)
+    return sorted(totals.values(), key=lambda x: x["cost_usd"], reverse=True)
 
 
 def read_all(r: "redis.Redis", days: int = 30) -> list[dict]:

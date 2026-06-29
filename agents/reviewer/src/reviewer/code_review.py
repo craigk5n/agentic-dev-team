@@ -43,6 +43,7 @@ def run_code_review(
     model_override: str = "",
     system_prompt: str = "",
     task_prompt: str = "",
+    stack: str = "",
 ) -> dict:
     owner, repo = repo_full_name.split("/", 1)
     model = model_override or settings.model_reviewer
@@ -61,6 +62,7 @@ def run_code_review(
             api_key=settings.effective_api_key,
             system_prompt=system_prompt,
             task_prompt=task_prompt,
+            stack=stack,
         )
 
     verdict["role"] = "code_review"

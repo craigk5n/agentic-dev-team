@@ -68,6 +68,7 @@ def decompose_idea(
     default_repo: str = "devadmin/sandbox",
     sdlc_directive: str = "",
     best_practices: str = "",
+    stack: str = "",
     redis_conn=None,
 ) -> dict:
     kwargs: dict = {
@@ -93,7 +94,7 @@ def decompose_idea(
     if redis_conn is not None:
         try:
             from reviewer.telemetry import record_usage
-            record_usage(redis_conn, "planner", model, resp)
+            record_usage(redis_conn, "planner", model, resp, stack=stack)
         except Exception:
             pass
     raw = resp.choices[0].message.content or ""

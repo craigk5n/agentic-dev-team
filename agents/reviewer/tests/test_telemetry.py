@@ -178,3 +178,37 @@ class TestReadAll:
         # Should not raise — just returns empty
         records = read_all(r, days=3)
         assert isinstance(records, list)
+
+
+# ── EPIC 6.2: per-stack attribution ───────────────────────────────────────────
+
+class TestStackUsage:
+    def test_record_with_stack_writes_stack_hash(self):
+        import time as _t
+        from reviewer.telemetry import record_usage, read_stack_usage
+        r = fakeredis.FakeRedis()
+        resp = MagicMock()
+        resp.usage.prompt_tokens = 100
+        resp.usage.completion_tokens = 40
+        resp.usage.cost = 0.0  # force the completion_cost fallback path
+        with patch("litellm.completion_cost", return_value=0.002):
+            record_usage(r, "reviewer", "m", resp, stack="python")
+            record_usage(r, "tester", "m", resp, stack="python")
+            record_usage(r, "reviewer", "m", resp, stack="go")
+        date = _t.strftime("%Y-%m-%d", _t.gmtime())
+        assert r.hgetall(f"telemetry:stack:{date}")  # per-stack hash written
+        totals = {t["stack"]: t for t in read_stack_usage(r, days=1)}
+        assert totals["python"]["calls"] == 2
+        assert totals["go"]["calls"] == 1
+        assert round(totals["python"]["cost_usd"], 4) == 0.004
+
+    def test_no_stack_writes_no_stack_hash(self):
+        import time as _t
+        from reviewer.telemetry import record_usage, read_stack_usage
+        r = fakeredis.FakeRedis()
+        resp = MagicMock()
+        resp.usage.prompt_tokens = 1
+        resp.usage.completion_tokens = 1
+        with patch("litellm.completion_cost", return_value=0.0):
+            record_usage(r, "idea", "m", resp)  # no stack (pre-stack)
+        assert read_stack_usage(r, days=1) == []

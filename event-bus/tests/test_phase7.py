@@ -529,3 +529,24 @@ class TestHandlersRateLimit:
         assert "reviewer" in result["rate_limited"]
         # Only 2 jobs enqueued (tester + security), not reviewer
         assert mock_q.enqueue.call_count == 2
+
+
+# ── EPIC 6.2: per-stack telemetry in the summary ──────────────────────────────
+
+class TestTelemetryByStack:
+    def test_summary_includes_by_stack(self):
+        from event_bus.telemetry import get_telemetry_summary
+        from reviewer.telemetry import record_usage
+        r = fakeredis.FakeRedis()
+        resp = MagicMock()
+        resp.usage.prompt_tokens = 50
+        resp.usage.completion_tokens = 20
+        resp.usage.cost = 0.0
+        with patch("litellm.completion_cost", return_value=0.001):
+            record_usage(r, "reviewer", "m", resp, stack="python")
+            record_usage(r, "planner", "m", resp, stack="python")
+            record_usage(r, "reviewer", "m", resp, stack="go")
+        summary = get_telemetry_summary(r, days=1)
+        assert "by_stack" in summary
+        assert summary["by_stack"]["python"]["calls"] == 2
+        assert summary["by_stack"]["go"]["calls"] == 1

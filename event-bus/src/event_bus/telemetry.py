@@ -25,10 +25,12 @@ def get_telemetry_summary(r: "redis.Redis", days: int = 7) -> dict:
     Return aggregated telemetry: costs, tokens, rejections, and current concurrency.
     """
     try:
-        from reviewer.telemetry import read_all
+        from reviewer.telemetry import read_all, read_stack_usage
         llm_records = read_all(r, days=days)
+        stack_records = read_stack_usage(r, days=days)
     except ImportError:
         llm_records = []
+        stack_records = []
 
     from event_bus.limits import get_concurrency, get_rejected, get_rate_window_count
 
@@ -70,6 +72,15 @@ def get_telemetry_summary(r: "redis.Redis", days: int = 7) -> dict:
                 "rate_current_minute": rate_current.get(role, 0),
             }
             for role in _ALL_ROLES
+        },
+        "by_stack": {
+            rec["stack"]: {
+                "cost_usd": round(rec["cost_usd"], 6),
+                "input_tokens": rec["input_tokens"],
+                "output_tokens": rec["output_tokens"],
+                "calls": rec["calls"],
+            }
+            for rec in stack_records
         },
         "daily": llm_records,
     }
@@ -140,6 +151,17 @@ def render_prometheus(r: "redis.Redis") -> str:
                 lines.append(
                     f'agent_llm_tokens_today{{role="{role}",model="{model}",direction="output"}} '
                     f'{vals["output_tokens"]}'
+                )
+        # Per-stack cost attribution (6.2)
+        from reviewer.telemetry import read_stack_usage
+        stack_recs = read_stack_usage(r, days=1)
+        if stack_recs:
+            _metric("agent_llm_cost_usd_today_by_stack",
+                    "LLM cost in USD today attributed per tech stack", "gauge")
+            for rec in stack_recs:
+                lines.append(
+                    f'agent_llm_cost_usd_today_by_stack{{stack="{rec["stack"]}"}} '
+                    f'{round(rec["cost_usd"], 8)}'
                 )
     except ImportError:
         pass  # reviewer package not installed

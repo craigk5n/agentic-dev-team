@@ -51,20 +51,22 @@ def handle_pr_event(
     reviewer_system_prompt = get_prompt(r, "reviewer.system")
     reviewer_task_prompt = get_prompt(r, "reviewer.task")
 
-    # Make the reviewer stack-aware: append the repo's stack best-practices so the
-    # code review checks language-appropriate conventions (5.4).
+    # Resolve the repo's stack once: used to (a) make the reviewer stack-aware (5.4)
+    # and (b) attribute LLM spend to the stack in telemetry (6.2).
+    stack_id = ""
     try:
         from event_bus.main import _stack_id_for_repo
         from event_bus.catalog import get_catalog
         owner, repo = repo_full_name.split("/", 1)
         stack = get_catalog().get_stack(_stack_id_for_repo(owner, repo))
+        stack_id = stack.id
         if stack.best_practices_prompt.strip():
             reviewer_task_prompt += (
                 "\n\nStack conventions to check (this is a "
                 f"{stack.display_name} project):\n" + stack.best_practices_prompt.strip()
             )
     except Exception as exc:
-        log.warning("reviewer_stack_prompt_skipped", error=str(exc))
+        log.warning("reviewer_stack_resolve_skipped", error=str(exc))
 
     lim = config.limits
     rejected_roles = []
@@ -98,10 +100,12 @@ def handle_pr_event(
         jobs.append(q.enqueue(run_code_reviewer, **base_kwargs,
                               model_override=config.models.reviewer,
                               system_prompt=reviewer_system_prompt,
-                              task_prompt=reviewer_task_prompt))
+                              task_prompt=reviewer_task_prompt,
+                              stack=stack_id))
     if tester_ok:
         jobs.append(q.enqueue(run_tester, **base_kwargs,
-                              model_override=config.models.tester))
+                              model_override=config.models.tester,
+                              stack=stack_id))
     if security_ok:
         jobs.append(q.enqueue(run_security_scanner, **base_kwargs,
                               model_override=config.models.security))

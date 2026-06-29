@@ -557,6 +557,7 @@ async def _run_planner(item_id: str, title: str, description: str) -> None:
             repo_full_name=repo_full,
             sdlc_directive=sdlc.planner_directive,
             best_practices=stack.best_practices_prompt,
+            stack=stack.id,
             redis_conn=_redis_conn,
         )
     except ImportError:

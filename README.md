@@ -16,13 +16,18 @@ A self-hosted autonomous coding team. You describe what to build and approve ide
 
 ```
 You submit an idea
-  → Idea Agent expands it into a structured proposal
-  → You approve it
-    → Planner Agent decomposes it into stories
-      → Coding Agent implements each story and opens a PR
+  → Idea Agent expands it into a structured proposal (+ proposes a tech stack & SDLC style)
+  → You approve it (confirm or override the stack & style)
+    → Planner Agent decomposes it into stories (per the SDLC style — e.g. TDD = tests first)
+      → Coding Agent implements each story and opens a PR (in the stack's image, with its conventions)
         → Reviewer + Tester + Security agents evaluate the PR in parallel
           → All verdicts green → PR merges → next story picks up
 ```
+
+**Stack-aware:** each project is tailored to a tech stack (Python, Node+TS, Go, …) and an
+SDLC style (standard, TDD, spec-first) chosen at approval — driving the CI workflow,
+scaffold, prompts, and per-stack cost telemetry. The catalog is config-driven; adding a
+stack needs no code change. See **[docs/STACKS.md](docs/STACKS.md)**.
 
 ## Agents
 

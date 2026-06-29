@@ -34,6 +34,18 @@ An autonomous multi-agent coding team system. A human operator describes what to
 
 A PR advances only when all three verdicts (reviewer, tester, security) are green plus any enabled human gate.
 
+## Stack & SDLC catalog (stack-aware planning)
+
+Each project is tailored to a **tech stack** + **SDLC style** chosen at idea approval. The
+catalog is config-driven (no core-code change to add one):
+`event-bus/src/event_bus/catalog/defaults/{stacks,sdlc}/*.yaml`, overridable via a mounted
+`CATALOG_DIR`. The choice drives provisioning (per-stack CI workflow + scaffold + a
+`.devagents/stack` marker), planning (SDLC `planner_directive` — TDD = tests-first), the
+coder/reviewer prompts (`best_practices_prompt`), the coder sandbox image
+(`stack.coder_image`, falls back to the default when unbuilt), and per-stack cost telemetry
+(`GET /api/telemetry` → `by_stack`). Full guide: **docs/STACKS.md**. Per-stack coder image
+Dockerfiles (build-on-demand): `infra/coder-images/`.
+
 ## Work Item Status Flow
 
 ```

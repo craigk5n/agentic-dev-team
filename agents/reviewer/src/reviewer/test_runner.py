@@ -101,6 +101,7 @@ def run_tests(
     base_ref: str = "main",
     head_ref: str = "",
     model_override: str = "",
+    stack: str = "",
 ) -> dict:
     owner, repo = repo_full_name.split("/", 1)
     model = model_override or settings.model_tester
@@ -126,6 +127,7 @@ def run_tests(
                 combined,
                 model=model,
                 api_key=settings.effective_api_key,
+                stack=stack,
             )
             status = llm_result.get("status", "fail")
             failures = llm_result.get("failures", [])
