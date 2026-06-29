@@ -1059,3 +1059,83 @@ class TestPlannerSdlcWiring:
         assert [c["sequence"] for c in created] == [1, 2]
         assert all(c["stack"] == "go" and c["sdlc"] == "tdd" for c in created)
         assert created[0]["title"] == "write failing tests"
+
+
+# ── EPIC 5: stack-aware coder + reviewer ──────────────────────────────────────
+
+class TestCoderStackContext:
+    def test_augment_prepends_practices_and_directive(self):
+        from event_bus.main import _augment_coder_prompt
+        from event_bus.catalog import get_catalog
+        c = get_catalog()
+        out = _augment_coder_prompt("base prompt", c.get_stack("python"), c.get_sdlc("tdd"))
+        assert "base prompt" in out
+        assert "Stack conventions" in out and "PEP 8" in out
+        assert "Development style" in out and "red" in out.lower()
+
+    def test_augment_noop_for_generic_standard(self):
+        from event_bus.main import _augment_coder_prompt
+        from event_bus.catalog import get_catalog
+        c = get_catalog()
+        out = _augment_coder_prompt("base", c.get_stack("generic"), c.get_sdlc("standard"))
+        assert out == "base"
+
+    def test_coder_context_resolves(self, monkeypatch):
+        from event_bus import main as m
+        monkeypatch.setattr(m, "get_stack_sdlc_for_story", lambda _id: ("go", "tdd"))
+        stack, sdlc = m._coder_context("s1")
+        assert stack.id == "go" and sdlc.id == "tdd"
+
+    def test_sandbox_falls_back_when_image_missing(self, monkeypatch):
+        import sys, types
+        fake_docker = types.ModuleType("docker")
+        fake_errors = types.ModuleType("docker.errors")
+
+        class ImageNotFound(Exception):
+            pass
+        fake_errors.ImageNotFound = ImageNotFound
+        fake_docker.errors = fake_errors
+
+        created = {"count": 0, "last": None}
+
+        class FakeContainers:
+            def create(self, image, **kw):
+                created["count"] += 1
+                created["last"] = image
+                if image == "dev-agents/coder-go:latest":
+                    raise ImageNotFound("nope")
+                c = MagicMock()
+                c.logs.return_value = [b"CODING_RESULT:" + json.dumps({"status": "ok"}).encode()]
+                c.wait.return_value = {"StatusCode": 0}
+                return c
+        fake_client = MagicMock(); fake_client.containers = FakeContainers()
+        fake_docker.from_env = lambda: fake_client
+        monkeypatch.setitem(sys.modules, "docker", fake_docker)
+        monkeypatch.setitem(sys.modules, "docker.errors", fake_errors)
+
+        from event_bus import main as m
+        monkeypatch.setattr(m.settings, "sandbox_image", "dev-agents/event-bus:latest")
+        res = m._run_coding_agent_sandboxed_sync("s1", "T", "D", "p", None,
+                                                 coder_image="dev-agents/coder-go:latest")
+        assert res == {"status": "ok"}
+        assert created["count"] == 2
+        assert created["last"] == "dev-agents/event-bus:latest"
+
+
+class TestReviewerStackPrompt:
+    def test_reviewer_task_prompt_gets_stack_practices(self, monkeypatch):
+        from event_bus.jobs.handlers import handle_pr_event
+        r = fakeredis.FakeRedis()
+        captured = {}
+        class FakeQ:
+            def __init__(self, *a, **k): pass
+            def enqueue(self, func, *a, **k):
+                if getattr(func, "__name__", "") == "run_code_reviewer":
+                    captured.update(k)
+                job = MagicMock(); job.id = "j"; return job
+        with patch("redis.from_url", return_value=r), \
+             patch("rq.Queue", FakeQ), \
+             patch("event_bus.main._stack_id_for_repo", return_value="python"), \
+             patch("event_bus.prompt_store.get_prompt", return_value="base task"):
+            handle_pr_event("devadmin/repo", 1, "sha", "opened")
+        assert "PEP 8" in captured.get("task_prompt", "")

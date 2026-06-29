@@ -51,6 +51,21 @@ def handle_pr_event(
     reviewer_system_prompt = get_prompt(r, "reviewer.system")
     reviewer_task_prompt = get_prompt(r, "reviewer.task")
 
+    # Make the reviewer stack-aware: append the repo's stack best-practices so the
+    # code review checks language-appropriate conventions (5.4).
+    try:
+        from event_bus.main import _stack_id_for_repo
+        from event_bus.catalog import get_catalog
+        owner, repo = repo_full_name.split("/", 1)
+        stack = get_catalog().get_stack(_stack_id_for_repo(owner, repo))
+        if stack.best_practices_prompt.strip():
+            reviewer_task_prompt += (
+                "\n\nStack conventions to check (this is a "
+                f"{stack.display_name} project):\n" + stack.best_practices_prompt.strip()
+            )
+    except Exception as exc:
+        log.warning("reviewer_stack_prompt_skipped", error=str(exc))
+
     lim = config.limits
     rejected_roles = []
 

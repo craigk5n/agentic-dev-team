@@ -630,12 +630,32 @@ _CODER_SANDBOX_ENV = [
 ]
 
 
+def _coder_context(item_id: str):
+    """Resolve the (stack, sdlc) catalog entries for a story (with inheritance)."""
+    stack_id, sdlc_id = get_stack_sdlc_for_story(item_id)
+    cat = get_catalog()
+    return cat.get_stack(stack_id), cat.get_sdlc(sdlc_id)
+
+
+def _augment_coder_prompt(story_prompt: str, stack, sdlc) -> str:
+    """Prepend stack conventions + SDLC coder directive to the coder's prompt."""
+    extra = []
+    if stack.best_practices_prompt.strip():
+        extra.append("Stack conventions:\n" + stack.best_practices_prompt.strip())
+    if sdlc.coder_directive.strip():
+        extra.append("Development style:\n" + sdlc.coder_directive.strip())
+    if not extra:
+        return story_prompt
+    return (story_prompt or "").rstrip() + "\n\n" + "\n\n".join(extra)
+
+
 def _run_coding_agent_sandboxed_sync(
     item_id: str,
     title: str,
     description: str,
     story_prompt: str,
     log_cb,
+    coder_image: str = "",
 ) -> dict:
     """Blocking: spawn an ephemeral Docker container for one coding agent run.
     Returns the result dict from sandbox_runner (same shape as run_coding_agent).
@@ -649,7 +669,7 @@ def _run_coding_agent_sandboxed_sync(
         "STORY_ID": item_id,
         "STORY_TITLE": title[:500],
         "STORY_DESCRIPTION": (description or "")[:4000],
-        "STORY_PROMPT": (story_prompt or "")[:2000],
+        "STORY_PROMPT": (story_prompt or "")[:4000],
     })
 
     volumes: dict = {}
@@ -658,8 +678,7 @@ def _run_coding_agent_sandboxed_sync(
     if settings.sandbox_opencode_config:
         volumes[settings.sandbox_opencode_config] = {"bind": "/root/.config/opencode", "mode": "ro"}
 
-    container = client.containers.create(
-        image=settings.sandbox_image,
+    create_kwargs = dict(
         command=["python", "-m", "coding_agent.sandbox_runner"],
         environment=env,
         volumes=volumes or None,
@@ -668,6 +687,14 @@ def _run_coding_agent_sandboxed_sync(
         nano_cpus=int(float(settings.sandbox_cpus) * 1_000_000_000),
         labels={"dev-agents.story-id": item_id, "dev-agents.sandbox": "true"},
     )
+    image = coder_image or settings.sandbox_image
+    try:
+        container = client.containers.create(image=image, **create_kwargs)
+    except _docker_sdk.errors.ImageNotFound:
+        # Per-stack image not built yet — fall back to the default coder image.
+        log.warning("coder_image_unavailable_fallback", requested=image,
+                    fallback=settings.sandbox_image)
+        container = client.containers.create(image=settings.sandbox_image, **create_kwargs)
 
     try:
         container.start()
@@ -717,13 +744,17 @@ async def _run_coding_agent(item_id: str, title: str, description: str, story_pr
     repo = get_repo_for_story(item_id, default=settings.default_repo)
     if repo and f"repo: {repo}" not in (description or ""):
         description = f"repo: {repo}\n{description}"
+    # Resolve the story's stack/SDLC → augment the prompt (5.3) + pick the image (5.2)
+    stack, sdlc = _coder_context(item_id)
+    story_prompt = _augment_coder_prompt(story_prompt, stack, sdlc)
     log_cb = _make_log_cb(item_id)
-    log.info("coding_agent_dispatch", id=item_id, mode=settings.sandbox_mode)
+    log.info("coding_agent_dispatch", id=item_id, mode=settings.sandbox_mode,
+             stack=stack.id, coder_image=stack.coder_image)
     try:
         if settings.sandbox_mode == "docker":
             result = await asyncio.to_thread(
                 _run_coding_agent_sandboxed_sync,
-                item_id, title, description, story_prompt, log_cb,
+                item_id, title, description, story_prompt, log_cb, stack.coder_image,
             )
         else:
             try:
