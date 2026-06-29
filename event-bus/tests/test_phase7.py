@@ -255,7 +255,7 @@ class TestReviewerTelemetry:
         with patch("litellm.completion_cost", return_value=0.001):
             record_usage(r, "code_review", "anthropic/claude-sonnet-4-6", mock_response)
 
-        date = time.strftime("%Y-%m-%d")
+        date = time.strftime("%Y-%m-%d", time.gmtime())
         raw = r.hgetall(f"telemetry:llm:{date}")
         keys = {k.decode() for k in raw}
         assert any("code_review" in k and "cost_usd" in k for k in keys)

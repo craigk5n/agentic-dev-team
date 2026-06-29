@@ -48,7 +48,9 @@ def record_usage(
             except Exception:
                 cost = 0.0
 
-        date = time.strftime("%Y-%m-%d")
+        # UTC to match read_all() (time.gmtime); otherwise the write/read keys
+        # diverge once local time crosses the UTC day boundary.
+        date = time.strftime("%Y-%m-%d", time.gmtime())
         key = f"telemetry:llm:{date}"
         prefix = f"{role}:{model}"
 

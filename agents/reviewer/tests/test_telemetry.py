@@ -20,7 +20,7 @@ class TestRecordUsage:
         with patch("litellm.completion_cost", return_value=0.003):
             record_usage(r, "code_review", "anthropic/claude-sonnet", resp)
 
-        date = time.strftime("%Y-%m-%d")
+        date = time.strftime("%Y-%m-%d", time.gmtime())
         raw = r.hgetall(f"telemetry:llm:{date}")
         keys = {k.decode() for k in raw.keys()}
 
@@ -39,7 +39,7 @@ class TestRecordUsage:
             record_usage(r, "test_run", "haiku", resp)
             record_usage(r, "test_run", "haiku", resp)
 
-        date = time.strftime("%Y-%m-%d")
+        date = time.strftime("%Y-%m-%d", time.gmtime())
         raw = r.hgetall(f"telemetry:llm:{date}")
         decoded = {k.decode(): v.decode() for k, v in raw.items()}
         assert int(decoded["test_run:haiku:calls"]) == 2
@@ -51,7 +51,7 @@ class TestRecordUsage:
         resp.usage = None
         # Should not raise
         record_usage(r, "code_review", "some-model", resp)
-        date = time.strftime("%Y-%m-%d")
+        date = time.strftime("%Y-%m-%d", time.gmtime())
         assert r.hgetall(f"telemetry:llm:{date}") == {}
 
     def test_tolerates_litellm_cost_failure(self):
@@ -64,7 +64,7 @@ class TestRecordUsage:
             # Should not raise — cost defaults to 0.0
             record_usage(r, "security", "unknown-model", resp)
 
-        date = time.strftime("%Y-%m-%d")
+        date = time.strftime("%Y-%m-%d", time.gmtime())
         raw = r.hgetall(f"telemetry:llm:{date}")
         assert len(raw) > 0  # tokens still recorded
 
@@ -77,7 +77,7 @@ class TestRecordUsage:
         with patch("litellm.completion_cost", return_value=0.0):
             record_usage(r, "code_review", "model", resp)
 
-        date = time.strftime("%Y-%m-%d")
+        date = time.strftime("%Y-%m-%d", time.gmtime())
         ttl = r.ttl(f"telemetry:llm:{date}")
         assert ttl > 0
 
