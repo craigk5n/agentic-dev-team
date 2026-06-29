@@ -19,6 +19,12 @@ class TestForgejoPREvent:
         evt = ForgejoPREvent.model_validate(raw)
         assert evt.is_review_trigger() is True
 
+    def test_is_review_trigger_for_forgejo_synchronized(self):
+        # Forgejo/Gitea spell it "synchronized" (past tense)
+        raw = {**FORGEJO_PR_OPENED, "action": "synchronized"}
+        evt = ForgejoPREvent.model_validate(raw)
+        assert evt.is_review_trigger() is True
+
     def test_not_review_trigger_for_closed(self):
         raw = {**FORGEJO_PR_OPENED, "action": "closed"}
         evt = ForgejoPREvent.model_validate(raw)

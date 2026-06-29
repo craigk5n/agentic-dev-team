@@ -61,8 +61,12 @@ class ForgejoPREvent(BaseModel):
         return self.pull_request.base.ref
 
     def is_review_trigger(self) -> bool:
-        """Return True when the PR should trigger review fan-out (Phase 4)."""
-        return self.action in ("opened", "synchronize", "reopened")
+        """Return True when the PR should trigger review fan-out (Phase 4).
+
+        Forgejo/Gitea emit "synchronized" for a new push to the PR branch;
+        GitHub uses "synchronize". Accept both so updates re-trigger review.
+        """
+        return self.action in ("opened", "synchronize", "synchronized", "reopened")
 
 
 class ForgejoReview(BaseModel):

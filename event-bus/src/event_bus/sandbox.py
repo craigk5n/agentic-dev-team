@@ -25,6 +25,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import socket
 from typing import Callable, Any
 
 import structlog
@@ -111,6 +112,11 @@ class Sandbox:
                  memory=self.memory, cpus=self.cpus)
 
         client = docker.from_env()
+        # Share the worker's network namespace so the sandbox resolves the same
+        # docker-network hostnames the worker uses (forgejo:3000, event-bus-redis:6379).
+        # Host networking can't resolve these; a single bridge network can't reach
+        # both forgejo_default and the event-bus net at once.
+        netns = f"container:{socket.gethostname()}"
         try:
             raw: bytes = client.containers.run(
                 self.image,
@@ -118,12 +124,17 @@ class Sandbox:
                 environment=env,
                 mem_limit=self.memory,
                 nano_cpus=int(self.cpus * 1_000_000_000),
-                network_mode="host",  # needs Redis + Forgejo reachable
+                network_mode=netns,
                 remove=True,
                 stdout=True,
                 stderr=False,
             )
-            return json.loads(raw.decode().strip())
+            # sandbox_runner prints the JSON result as the final stdout line; agent
+            # logs may precede it, so parse the last non-empty line (not the whole blob).
+            lines = [ln for ln in raw.decode().splitlines() if ln.strip()]
+            if not lines:
+                return {"status": "error", "reason": "empty sandbox output"}
+            return json.loads(lines[-1])
         except docker.errors.ContainerError as exc:
             log.error("sandbox_container_failed", func=func_path, exit_code=exc.exit_status,
                       stderr=exc.stderr.decode() if exc.stderr else "")

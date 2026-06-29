@@ -257,7 +257,7 @@ async def forgejo_webhook(
         return {"result": "skipped", "reason": "no matching story for PR"}
 
     # A new commit on the PR resets the recode retry counter
-    if event.action == "synchronize":
+    if event.action in ("synchronize", "synchronized"):
         retry_key = f"recode_retries:{event.repo_full_name}:{event.pr_number}"
         _redis_or_503().delete(retry_key)
 
