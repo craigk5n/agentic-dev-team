@@ -34,6 +34,7 @@ from collections.abc import Callable
 
 from event_bus.config import settings
 from event_bus.auth import check_basic_auth, is_exempt as auth_is_exempt
+from event_bus.cost_guard import over_budget
 from event_bus.ci_workflow import CI_WORKFLOW_PATH, CI_WORKFLOW_YAML
 from event_bus.config_store import get_config, patch_config
 from event_bus.prompt_store import get_prompt, set_prompt, delete_prompt, list_prompts
@@ -284,6 +285,12 @@ async def submit_idea(request: Request):
         raise HTTPException(status_code=400, detail="'prompt' field required")
 
     cfg = get_config(_redis_or_503())
+    if over_budget(_redis_or_503(), cfg.limits.max_cost_usd_daily):
+        raise HTTPException(
+            status_code=429,
+            detail=f"daily LLM cost cap reached (${cfg.limits.max_cost_usd_daily}); "
+                   "new ideas are paused. Raise max_cost_usd_daily or wait for the next day.",
+        )
     model_override = (body.get("model_override") or "").strip() or cfg.models.idea
 
     try:
@@ -464,6 +471,9 @@ def _provision_project_repo(idea_id: str, title: str) -> str:
 async def _run_planner(item_id: str, title: str, description: str) -> None:
     """Run the Planner Agent in a thread and save resulting stories to SQLite."""
     cfg = get_config(_redis_or_503())
+    if over_budget(_redis_conn, cfg.limits.max_cost_usd_daily):
+        log.warning("planner_skipped_cost_cap", id=item_id)
+        return
     model = cfg.models.planner
 
     # Create a dedicated Forgejo repo for this project before decomposing
@@ -612,6 +622,12 @@ def _run_coding_agent_sandboxed_sync(
 
 async def _run_coding_agent(item_id: str, title: str, description: str, story_prompt: str = "") -> None:
     """Run the Coding Agent in a thread; update state and PR URL on completion."""
+    # Cost backstop — leave the story in ready so it resumes when budget frees up
+    cfg = get_config(_redis_or_503())
+    if over_budget(_redis_conn, cfg.limits.max_cost_usd_daily):
+        log.warning("coder_skipped_cost_cap", id=item_id)
+        update_state(item_id, "ready")
+        return
     # Enforce concurrency cap — leave story queued in ready if full
     if not _coder_slot_acquire():
         log.info("coder_cap_hit", id=item_id, cap=settings.max_coding_agents)

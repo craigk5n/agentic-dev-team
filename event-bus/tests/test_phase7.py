@@ -49,6 +49,14 @@ class TestLimitsConfig:
         result = patch_config(r, {"limits": {"max_concurrent_dragons": 99}})
         assert not hasattr(result.limits, "max_concurrent_dragons")
 
+    def test_cost_cap_coerced_to_float_counters_stay_int(self):
+        r = fakeredis.FakeRedis()
+        result = patch_config(r, {"limits": {"max_cost_usd_daily": 2.5, "max_rpm_coder": 7}})
+        assert result.limits.max_cost_usd_daily == 2.5
+        assert isinstance(result.limits.max_cost_usd_daily, float)
+        assert result.limits.max_rpm_coder == 7
+        assert isinstance(result.limits.max_rpm_coder, int)
+
     def test_limits_persist_across_reads(self):
         r = fakeredis.FakeRedis()
         patch_config(r, {"limits": {"max_rpm_reviewer": 42}})

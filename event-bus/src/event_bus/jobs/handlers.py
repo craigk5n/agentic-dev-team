@@ -41,6 +41,13 @@ def handle_pr_event(
 
     r = redis.from_url(settings.redis_url, decode_responses=False)
     config = get_config(r)
+
+    # Cost backstop — don't fan out 3 LLM reviews if today's spend cap is reached
+    from event_bus.cost_guard import over_budget
+    if over_budget(r, config.limits.max_cost_usd_daily):
+        log.warning("pr_event_cost_capped", repo=repo_full_name, pr=pr_number)
+        return {"status": "cost_capped", "reason": "daily cost cap reached"}
+
     reviewer_system_prompt = get_prompt(r, "reviewer.system")
     reviewer_task_prompt = get_prompt(r, "reviewer.task")
 

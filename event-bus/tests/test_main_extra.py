@@ -886,3 +886,31 @@ class TestBoardBasicAuth:
     def test_auth_disabled_when_password_blank(self, client, monkeypatch):
         monkeypatch.setattr(settings, "board_auth_password", "")
         assert client.get("/api/config").status_code == 200
+
+
+# ── cost cap enforcement ──────────────────────────────────────────────────────
+
+class TestCostCap:
+    def test_submit_idea_blocked_when_over_budget(self, client, monkeypatch):
+        monkeypatch.setattr("event_bus.main.over_budget", lambda *a, **k: True)
+        resp = client.post("/api/ideas", json={"prompt": "build a thing"})
+        assert resp.status_code == 429
+        assert "cost cap" in resp.json()["detail"].lower()
+
+    def test_submit_idea_allowed_when_under_budget(self, client, monkeypatch):
+        monkeypatch.setattr("event_bus.main.over_budget", lambda *a, **k: False)
+        fake = {"id": "i-1", "title": "T", "state": "pending-approval", "type": "idea"}
+        with patch("idea_agent.main.expand_idea", return_value={"title": "T", "description": "D"}), \
+             patch("event_bus.main.create_item", return_value=fake):
+            resp = client.post("/api/ideas", json={"prompt": "build a thing"})
+        assert resp.status_code == 202
+
+    def test_handle_pr_event_cost_capped(self):
+        from event_bus.jobs.handlers import handle_pr_event
+        from event_bus.config_store import patch_config
+        r = fakeredis.FakeRedis()
+        patch_config(r, {"limits": {"max_cost_usd_daily": 0.01}})
+        with patch("event_bus.cost_guard.today_spend", return_value=0.5), \
+             patch("redis.from_url", return_value=r):
+            result = handle_pr_event("owner/repo", 1, "abc123", "opened")
+        assert result["status"] == "cost_capped"

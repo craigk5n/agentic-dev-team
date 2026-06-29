@@ -898,6 +898,23 @@ button.code-btn:hover { background: rgba(59,130,246,.25); }
     </div>
   </div>
 
+  <!-- Daily cost cap -->
+  <div class="card">
+    <div class="section-title">Daily Cost Cap</div>
+    <p style="color:var(--muted);font-size:12px;margin-bottom:12px">
+      Pause all new agent work once today's LLM spend reaches this. 0 = unlimited.
+      A bill backstop independent of who's authenticated.
+    </p>
+    <div class="field" style="max-width:320px">
+      <label for="cfg-cost-cap">Max USD / day</label>
+      <input id="cfg-cost-cap" type="number" min="0" step="0.01" placeholder="0.00">
+    </div>
+    <p style="font-size:12px;margin-top:8px">
+      Today's spend: <strong id="cfg-cost-spend">$0.00</strong>
+      <span id="cfg-cost-capped" style="color:var(--danger,#ef4444);font-weight:600;display:none"> — PAUSED (cap reached)</span>
+    </p>
+  </div>
+
   <button class="primary" id="save-config-btn">Save Config</button>
 
   <!-- Approve PR — only needed when PR Merge Approval gate is ON -->
@@ -1303,6 +1320,13 @@ async function loadConfig() {
       document.getElementById(`concurrent-${r}`).value = data.limits[`max_concurrent_${r}`] ?? 0;
       document.getElementById(`rpm-${r}`).value = data.limits[`max_rpm_${r}`] ?? 0;
     }
+    document.getElementById('cfg-cost-cap').value = data.limits.max_cost_usd_daily ?? 0;
+    // Today's spend + paused state from telemetry
+    try {
+      const tel = await api('/api/telemetry');
+      document.getElementById('cfg-cost-spend').textContent = '$' + (tel.daily_spend_usd ?? 0).toFixed(2);
+      document.getElementById('cfg-cost-capped').style.display = tel.cost_capped ? 'inline' : 'none';
+    } catch (e) { /* telemetry optional */ }
   } catch (err) {
     toast('Failed to load config: ' + err.message, 'error');
   }
@@ -1324,6 +1348,7 @@ document.getElementById('save-config-btn').addEventListener('click', async () =>
     limits[`max_concurrent_${r}`] = +document.getElementById(`concurrent-${r}`).value;
     limits[`max_rpm_${r}`] = +document.getElementById(`rpm-${r}`).value;
   }
+  limits.max_cost_usd_daily = +document.getElementById('cfg-cost-cap').value || 0;
 
   try {
     await api('/api/config', { method: 'PATCH', body: JSON.stringify({ gates, models, limits }) });

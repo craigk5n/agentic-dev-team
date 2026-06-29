@@ -70,6 +70,11 @@ class LimitsConfig:
     max_rpm_idea: int = 20
     max_rpm_planner: int = 10
 
+    # Daily LLM spend cap in USD across all roles. 0 = unlimited. When today's
+    # recorded cost reaches this, new agent work is paused (a cost backstop that
+    # protects the bill even from authorized overuse or a runaway loop).
+    max_cost_usd_daily: float = 0.0
+
 
 @dataclass
 class RuntimeConfig:
@@ -128,7 +133,8 @@ def patch_config(r: "redis.Redis", patch: dict) -> RuntimeConfig:
 
     for key, val in patch.get("limits", {}).items():
         if hasattr(config.limits, key):
-            setattr(config.limits, key, int(val))
+            # Coerce to the field's declared type (int counters, float for the cost cap)
+            setattr(config.limits, key, type(getattr(config.limits, key))(val))
 
     for key, val in patch.get("project", {}).items():
         if key in _PROJECT_FIELDS:

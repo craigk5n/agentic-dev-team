@@ -49,9 +49,18 @@ def get_telemetry_summary(r: "redis.Redis", days: int = 7) -> dict:
 
     total_cost = sum(v["cost_usd"] for v in by_role.values())
 
+    # Daily spend vs. the configured cap (the cost backstop)
+    from event_bus.config_store import get_config
+    from event_bus.cost_guard import today_spend
+    cap = get_config(r).limits.max_cost_usd_daily
+    spend = today_spend(r)
+
     return {
         "period_days": days,
         "total_cost_usd": round(total_cost, 6),
+        "daily_spend_usd": spend,
+        "max_cost_usd_daily": cap,
+        "cost_capped": bool(cap > 0 and spend >= cap),
         "by_role": {
             role: {
                 **by_role.get(role, {"cost_usd": 0.0, "input_tokens": 0,
