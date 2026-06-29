@@ -449,14 +449,15 @@ def _provision_project_repo(idea_id: str, title: str) -> str:
                     fj.set_branch_protection(owner, repo_name, "main")
                 except Exception as exc:
                     log.warning("branch_protection_failed", repo=repo_full, error=str(exc))
-                # Grant the reviewer-bot write access so the reviewer agent can
-                # comment/merge with its own least-privilege token (not the admin token).
-                reviewer_user = settings.forgejo_reviewer_user
-                if reviewer_user and reviewer_user != owner:
-                    try:
-                        fj.add_collaborator(owner, repo_name, reviewer_user, "write")
-                    except Exception as exc:
-                        log.warning("reviewer_collaborator_failed", repo=repo_full, error=str(exc))
+                # Grant the agent bots write access so they operate with their own
+                # least-privilege tokens (coder authors PRs, reviewer comments/merges)
+                # instead of the admin token.
+                for bot in (settings.forgejo_coder_user, settings.forgejo_reviewer_user):
+                    if bot and bot != owner:
+                        try:
+                            fj.add_collaborator(owner, repo_name, bot, "write")
+                        except Exception as exc:
+                            log.warning("bot_collaborator_failed", repo=repo_full, bot=bot, error=str(exc))
             # Register webhook (idempotent — Forgejo allows duplicates but we accept that)
             webhook_url = f"http://event-bus:8080/webhook/forgejo"
             fj.create_webhook(owner, repo_name, webhook_url, settings.forgejo_webhook_secret)
@@ -547,6 +548,14 @@ async def code_item(item_id: str):
     return {"status": "coding_started", "id": item_id}
 
 
+# Env passed into the ephemeral coding-agent sandbox container. FORGEJO_CODER_TOKEN
+# is required so the coder authenticates as the least-privilege coder-bot, not admin.
+_CODER_SANDBOX_ENV = [
+    "FORGEJO_API_TOKEN", "FORGEJO_CODER_TOKEN", "FORGEJO_BASE_URL", "FORGEJO_GIT_URL",
+    "OPENROUTER_API_KEY", "MODEL_CODER", "DEFAULT_REPO", "ANTHROPIC_API_KEY",
+]
+
+
 def _run_coding_agent_sandboxed_sync(
     item_id: str,
     title: str,
@@ -561,11 +570,7 @@ def _run_coding_agent_sandboxed_sync(
 
     client = _docker_sdk.from_env()
 
-    pass_through = [
-        "FORGEJO_API_TOKEN", "FORGEJO_BASE_URL", "FORGEJO_GIT_URL",
-        "OPENROUTER_API_KEY", "MODEL_CODER", "DEFAULT_REPO", "ANTHROPIC_API_KEY",
-    ]
-    env = {k: _os.environ[k] for k in pass_through if k in _os.environ}
+    env = {k: _os.environ[k] for k in _CODER_SANDBOX_ENV if k in _os.environ}
     env.update({
         "STORY_ID": item_id,
         "STORY_TITLE": title[:500],

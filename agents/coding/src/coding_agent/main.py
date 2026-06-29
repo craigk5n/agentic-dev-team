@@ -62,14 +62,15 @@ def run_coding_agent(
     branch = _branch_name(item_id, title)
     log.info("target_repo", repo=repo_full, branch=branch)
 
-    with ForgejoClient(settings.forgejo_base_url, settings.forgejo_api_token) as forgejo:
+    with ForgejoClient(settings.forgejo_base_url, settings.effective_forgejo_token) as forgejo:
         with tempfile.TemporaryDirectory(prefix="coding-agent-") as tmpdir:
             try:
                 git_ops.clone(
                     clone_base_url=settings.forgejo_clone_base,
                     owner=owner,
                     repo=repo_name,
-                    api_token=settings.forgejo_api_token,
+                    api_token=settings.effective_forgejo_token,
+                    user=settings.effective_forgejo_user,
                     target_dir=tmpdir,
                 )
             except RuntimeError as exc:
@@ -152,13 +153,14 @@ def fix_pr_review(
     log.info("recode_agent_start", item_id=item_id, branch=branch, comments=len(review_comments))
     owner, repo_name = repo_full_name.split("/", 1)
 
-    with ForgejoClient(settings.forgejo_base_url, settings.forgejo_api_token) as forgejo:
+    with ForgejoClient(settings.forgejo_base_url, settings.effective_forgejo_token) as forgejo:
         with tempfile.TemporaryDirectory(prefix="coding-agent-fix-") as tmpdir:
             git_ops.clone(
                 clone_base_url=settings.forgejo_clone_base,
                 owner=owner,
                 repo=repo_name,
-                api_token=settings.forgejo_api_token,
+                api_token=settings.effective_forgejo_token,
+                user=settings.effective_forgejo_user,
                 target_dir=tmpdir,
             )
             git_ops.configure_identity(tmpdir, settings.git_author_name, settings.git_author_email)

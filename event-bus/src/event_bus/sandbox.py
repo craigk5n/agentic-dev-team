@@ -47,7 +47,8 @@ _ROLE_ENV: dict[str, list[str]] = {
         "REDIS_URL",
     ],
     "coding_agent": [
-        "ANTHROPIC_API_KEY", "FORGEJO_API_TOKEN", "FORGEJO_BASE_URL", "FORGEJO_GIT_URL",
+        "ANTHROPIC_API_KEY", "FORGEJO_API_TOKEN", "FORGEJO_CODER_TOKEN",
+        "FORGEJO_BASE_URL", "FORGEJO_GIT_URL",
         "DEFAULT_REPO", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
         "REDIS_URL",
     ],

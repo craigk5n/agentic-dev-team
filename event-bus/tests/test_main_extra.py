@@ -812,10 +812,10 @@ class TestProvisionProjectRepo:
         fj.set_branch_protection.assert_called_once()
         bp_args, _ = fj.set_branch_protection.call_args
         assert "add-login-page" in bp_args and "main" in bp_args
-        # reviewer-bot granted write access for least-privilege review/merge
-        fj.add_collaborator.assert_called_once()
-        co_args, _ = fj.add_collaborator.call_args
-        assert "reviewer-bot" in co_args and "write" in co_args
+        # coder-bot + reviewer-bot granted write access for least-privilege ops
+        bots = {c.args[2] for c in fj.add_collaborator.call_args_list}
+        assert bots == {"coder-bot", "reviewer-bot"}
+        assert all(c.args[3] == "write" for c in fj.add_collaborator.call_args_list)
         fj.create_webhook.assert_called_once()
 
     def test_existing_repo_skips_workflow_commit(self, monkeypatch):
@@ -914,3 +914,14 @@ class TestCostCap:
              patch("redis.from_url", return_value=r):
             result = handle_pr_event("owner/repo", 1, "abc123", "opened")
         assert result["status"] == "cost_capped"
+
+
+# ── coding sandbox passes the coder-bot token ─────────────────────────────────
+
+class TestCoderSandboxEnv:
+    def test_coder_token_in_sandbox_env(self):
+        from event_bus.main import _CODER_SANDBOX_ENV
+        # The coding sandbox must forward FORGEJO_CODER_TOKEN so the coder runs as
+        # the least-privilege coder-bot, not the admin token.
+        assert "FORGEJO_CODER_TOKEN" in _CODER_SANDBOX_ENV
+        assert "FORGEJO_API_TOKEN" in _CODER_SANDBOX_ENV

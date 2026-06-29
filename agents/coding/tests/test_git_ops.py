@@ -1,10 +1,30 @@
 """Tests for git_ops using real temporary git repositories."""
 
 import subprocess
+from unittest.mock import patch
 import pytest
 from pathlib import Path
 
 from coding_agent import git_ops
+
+
+class TestCloneAuthUrl:
+    def test_embeds_user_and_token(self):
+        with patch("coding_agent.git_ops._run") as run:
+            git_ops.clone("http://forgejo:3000", "devadmin", "repo", "abc123",
+                          "/tmp/x", user="coder-bot")
+        cmd = run.call_args[0][0]
+        assert cmd[:2] == ["git", "clone"]
+        assert cmd[2] == "http://coder-bot:abc123@forgejo:3000/devadmin/repo.git"
+
+    def test_defaults_to_devadmin(self):
+        with patch("coding_agent.git_ops._run") as run:
+            git_ops.clone("http://forgejo:3000", "o", "r", "tok123", "/tmp/x")
+        assert "devadmin:tok123@" in run.call_args[0][0][2]
+
+    def test_rejects_bad_user(self):
+        with pytest.raises(ValueError):
+            git_ops.clone("http://f:3000", "o", "r", "tok", "/tmp/x", user="bad user!")
 
 
 def _init_bare(tmp_path: Path) -> str:

@@ -10,9 +10,10 @@ class Settings(BaseSettings):
     # API token for outbound calls to Forgejo
     forgejo_api_token: str = ""
 
-    # Reviewer-bot username — added as a write collaborator on provisioned repos so
-    # the reviewer agent can comment/merge with its own least-privilege token.
+    # Bot usernames — added as write collaborators on provisioned repos so the
+    # reviewer/coding agents can operate with their own least-privilege tokens.
     forgejo_reviewer_user: str = "reviewer-bot"
+    forgejo_coder_user: str = "coder-bot"
 
     # Base URL (internal Docker name when running in containers)
     forgejo_base_url: str = "http://localhost:13000"

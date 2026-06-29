@@ -29,19 +29,22 @@ def clone(
     repo: str,
     api_token: str,
     target_dir: str,
+    user: str = "devadmin",
 ) -> str:
     """
     Clone repo into target_dir and return the working tree path.
-    Embeds the API token in the URL for authentication.
+    Embeds the token in the URL for authentication; `user` must own the token.
     """
     # Sanitize token for embedding in URL — tokens are alphanum + underscores
     if not re.match(r'^[A-Za-z0-9_]+$', api_token):
         raise ValueError("API token contains unexpected characters")
+    if not re.match(r'^[A-Za-z0-9_-]+$', user):
+        raise ValueError("git user contains unexpected characters")
     clone_url = clone_base_url.rstrip("/")
     # Insert credentials: http://user:token@host/owner/repo.git
     if "://" in clone_url:
         scheme, rest = clone_url.split("://", 1)
-        auth_url = f"{scheme}://devadmin:{api_token}@{rest}/{owner}/{repo}.git"
+        auth_url = f"{scheme}://{user}:{api_token}@{rest}/{owner}/{repo}.git"
     else:
         raise ValueError(f"Unexpected clone URL format: {clone_url!r}")
 

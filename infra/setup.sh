@@ -186,6 +186,14 @@ provision_accounts() {
   ensure_token "$rev_user" FORGEJO_REVIEWER_TOKEN \
     "read:user,write:repository,write:issue"
 
+  # Coder-bot account — least-privilege identity for branch/commit/PR operations.
+  local coder_user coder_email
+  coder_user="$(env_get FORGEJO_CODER_USER)";   coder_user="${coder_user:-coder-bot}"
+  coder_email="$(env_get FORGEJO_CODER_EMAIL)"; coder_email="${coder_email:-${coder_user}@localhost}"
+  ensure_user  "$coder_user" "$coder_email" ""
+  ensure_token "$coder_user" FORGEJO_CODER_TOKEN \
+    "read:user,write:repository,write:issue"
+
   # Lock down self-registration now that the admin exists (effective on next forgejo restart).
   env_set FORGEJO_DISABLE_REGISTRATION true
 
