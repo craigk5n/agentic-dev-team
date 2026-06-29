@@ -64,6 +64,22 @@ scaffold:
   tests/test_smoke.py: |
     def test_smoke():
         assert True
+  .gitignore: |
+    __pycache__/
+    *.py[cod]
+    *.egg-info/
+    *.egg
+    build/
+    dist/
+    .venv/
+    venv/
+    .env
+    .coverage
+    .coverage.*
+    htmlcov/
+    .pytest_cache/
+    .ruff_cache/
+    .mypy_cache/
 
 test_command: "python3 -m pytest -q"
 
