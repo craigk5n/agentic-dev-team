@@ -32,16 +32,35 @@ ci_workflow: |
 
 scaffold:
   pyproject.toml: |
+    [build-system]
+    requires = ["setuptools>=61"]
+    build-backend = "setuptools.build_meta"
+
     [project]
     name = "project"
     version = "0.1.0"
     requires-python = ">=3.9"
 
+    [tool.setuptools.packages.find]
+    # Tolerate both flat (./pkg) and src (./src/pkg) layouts; never package tests.
+    where = ["src", "."]
+    exclude = ["tests*"]
+
     [tool.ruff]
     line-length = 100
 
+    [tool.ruff.lint.per-file-ignores]
+    # Tests may import a module just to assert it's importable (F401) or to set up
+    # fixtures; don't let lint rules meant for app code fail the test suite.
+    "tests/*" = ["F401", "F811"]
+    # Package __init__.py files routinely re-export symbols for the public API.
+    "__init__.py" = ["F401"]
+
     [tool.pytest.ini_options]
     testpaths = ["tests"]
+    # Make the package importable in tests without relying on an editable install
+    # (covers flat and src/ layouts regardless of what the coder created).
+    pythonpath = ["src", "."]
   tests/test_smoke.py: |
     def test_smoke():
         assert True
