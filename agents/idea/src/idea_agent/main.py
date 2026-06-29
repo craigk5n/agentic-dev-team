@@ -19,10 +19,13 @@ def expand_idea(
     prompt: str,
     model_override: str = "",
     redis_conn=None,
+    stack_options: list[dict] | None = None,
+    sdlc_options: list[dict] | None = None,
 ) -> dict:
     """
     Expand a prompt into a structured proposal dict.
-    Returns {title, description} — persistence is handled by the caller.
+    Returns {title, description, ...} — persistence is handled by the caller.
+    When stack_options/sdlc_options are given, also proposes a stack + SDLC.
     """
     log.info("idea_agent_start", prompt=prompt[:80])
     proposal = expand_prompt(
@@ -30,8 +33,11 @@ def expand_idea(
         model=model_override or settings.model_idea,
         api_key=settings.effective_api_key,
         redis_conn=redis_conn,
+        stack_options=stack_options,
+        sdlc_options=sdlc_options,
     )
-    log.info("idea_agent_done", title=proposal.get("title", ""))
+    log.info("idea_agent_done", title=proposal.get("title", ""),
+             stack=proposal.get("proposed_stack"))
     return proposal
 
 

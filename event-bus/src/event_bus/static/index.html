@@ -531,6 +531,13 @@ button.approve-btn {
   cursor: pointer;
 }
 button.approve-btn:hover { background: rgba(34,197,94,.25); }
+.stack-rationale { font-size: 11px; color: var(--muted); margin: 6px 0 4px; line-height: 1.4; }
+.stack-pickers { display: flex; gap: 6px; margin-bottom: 6px; }
+.stack-pickers select {
+  flex: 1; min-width: 0; font-size: 11px; padding: 2px 4px;
+  background: var(--bg, #1a1a1a); color: inherit;
+  border: 1px solid rgba(255,255,255,.15); border-radius: 4px;
+}
 button.reject-btn {
   background: rgba(107,114,128,.15);
   border: 1px solid rgba(107,114,128,.4);
@@ -1060,6 +1067,20 @@ button.code-btn:hover { background: rgba(59,130,246,.25); }
 
 <script>
 const ROLES = ['idea', 'planner', 'coder', 'reviewer', 'tester', 'security'];
+
+// Stack/SDLC catalog options (cached; loaded lazily for the approval UI).
+let STACK_OPTS = [], SDLC_OPTS = [];
+async function loadCatalogOptions() {
+  if (STACK_OPTS.length) return;
+  try {
+    const [st, sd] = await Promise.all([api('/api/stacks'), api('/api/sdlc')]);
+    STACK_OPTS = st.stacks || [];
+    SDLC_OPTS = sd.sdlc || [];
+  } catch (e) { /* approval UI degrades to plain approve */ }
+}
+function optionList(opts, selected) {
+  return opts.map(o => `<option value="${o.id}"${o.id === selected ? ' selected' : ''}>${escHtml(o.display_name)}</option>`).join('');
+}
 
 // ── Tab routing ───────────────────────────────────────────────────────────────
 
@@ -1596,6 +1617,7 @@ async function loadBoard() {
     return;
   }
   const d = await r.json();
+  await loadCatalogOptions();
   document.getElementById('board-ts').textContent = 'Updated ' + new Date().toLocaleTimeString();
 
   if (!d.total) {
@@ -1614,7 +1636,14 @@ async function loadBoard() {
     for (const item of group.items) {
       let actions = '';
       if (item.state === 'pending-approval') {
-        actions = `<div class="board-item-actions">
+        const rationale = item.stack_rationale
+          ? `<div class="stack-rationale">🧱 ${escHtml(item.stack_rationale)}</div>` : '';
+        const stackSel = STACK_OPTS.length ? `
+          <div class="stack-pickers">
+            <select class="apr-stack" data-id="${item.id}" title="Tech stack">${optionList(STACK_OPTS, item.stack)}</select>
+            <select class="apr-sdlc" data-id="${item.id}" title="SDLC style">${optionList(SDLC_OPTS, item.sdlc)}</select>
+          </div>` : '';
+        actions = `${rationale}${stackSel}<div class="board-item-actions">
           <button class="approve-btn" data-id="${item.id}">Approve</button>
           <button class="reject-btn" data-id="${item.id}">Reject</button>
         </div>`;
@@ -1657,7 +1686,16 @@ async function loadBoard() {
       e.stopPropagation();
       const id = btn.dataset.id;
       btn.disabled = true;
-      const r = await fetch(`/api/items/${id}/approve`, {method:'POST'});
+      const stackSel = container.querySelector(`.apr-stack[data-id="${id}"]`);
+      const sdlcSel = container.querySelector(`.apr-sdlc[data-id="${id}"]`);
+      const body = {};
+      if (stackSel) body.stack = stackSel.value;
+      if (sdlcSel) body.sdlc = sdlcSel.value;
+      const r = await fetch(`/api/items/${id}/approve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
       if (r.ok) { toast('Idea approved'); loadBoard(); }
       else { toast('Approve failed', 'error'); btn.disabled = false; }
     });

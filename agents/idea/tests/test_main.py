@@ -41,3 +41,37 @@ class TestSubmitIdea:
         with patch("idea_agent.main.expand_prompt", return_value=proposal) as mock:
             submit_idea("prompt", model_override="gpt-4o")
         assert mock.call_args.kwargs["model"] == "gpt-4o"
+
+
+# ── EPIC 2: stack/SDLC proposal ───────────────────────────────────────────────
+
+class TestStackProposal:
+    def test_options_forwarded_to_expand_prompt(self):
+        from idea_agent.main import expand_idea
+        from unittest.mock import patch
+        stacks = [{"id": "python", "display_name": "Python"}]
+        sdlc = [{"id": "tdd", "display_name": "TDD"}]
+        with patch("idea_agent.main.expand_prompt",
+                   return_value={"title": "T", "description": "D"}) as mock:
+            expand_idea("p", stack_options=stacks, sdlc_options=sdlc)
+        assert mock.call_args.kwargs["stack_options"] == stacks
+        assert mock.call_args.kwargs["sdlc_options"] == sdlc
+
+    def test_parse_passes_through_proposal_fields(self):
+        from idea_agent.generator import _parse
+        raw = ('{"title":"T","description":"D","proposed_stack":"go",'
+               '"proposed_sdlc":"tdd","stack_rationale":"because"}')
+        out = _parse(raw, "fallback")
+        assert out["proposed_stack"] == "go"
+        assert out["proposed_sdlc"] == "tdd"
+        assert out["stack_rationale"] == "because"
+
+    def test_guidance_omitted_without_options(self):
+        from idea_agent.generator import _stack_guidance
+        assert _stack_guidance([], []) == ""
+
+    def test_guidance_lists_stack_ids(self):
+        from idea_agent.generator import _stack_guidance
+        g = _stack_guidance([{"id": "go", "display_name": "Go"}],
+                            [{"id": "tdd", "display_name": "TDD"}])
+        assert "go" in g and "tdd" in g and "generic" in g

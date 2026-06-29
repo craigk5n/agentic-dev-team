@@ -291,3 +291,28 @@ class TestGetRepoForStory:
 
     def test_returns_default_for_unknown_id(self):
         assert ws.get_repo_for_story("unknown-id", default="default/repo") == "default/repo"
+
+
+# ── EPIC 2: stack / sdlc fields ───────────────────────────────────────────────
+
+class TestStackSdlcFields:
+    def test_create_with_stack_sdlc_roundtrips(self):
+        from event_bus.work_store import create_item, get_item
+        it = create_item(item_type="idea", title="T", stack="go", sdlc="tdd",
+                         stack_rationale="fits well")
+        got = get_item(it["id"])
+        assert got["stack"] == "go" and got["sdlc"] == "tdd"
+        assert got["stack_rationale"] == "fits well"
+
+    def test_set_stack_sdlc_override(self):
+        from event_bus.work_store import create_item, set_stack_sdlc, get_item
+        it = create_item(item_type="idea", title="T", stack="python", sdlc="standard")
+        set_stack_sdlc(it["id"], "go", "tdd")
+        got = get_item(it["id"])
+        assert got["stack"] == "go" and got["sdlc"] == "tdd"
+
+    def test_story_inherits_stack_from_parent(self):
+        from event_bus.work_store import create_item, get_stack_sdlc_for_story
+        idea = create_item(item_type="idea", title="I", stack="go", sdlc="tdd")
+        story = create_item(item_type="story", title="S", parent_id=idea["id"])
+        assert get_stack_sdlc_for_story(story["id"]) == ("go", "tdd")

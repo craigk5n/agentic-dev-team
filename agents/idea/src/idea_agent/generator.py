@@ -23,18 +23,50 @@ Expand this feature request into a structured proposal:
 Respond ONLY with valid JSON (no markdown fences):
 {{
   "title": "<descriptive title, max 80 chars>",
-  "description": "## Overview\\n\\n<2-3 sentences>\\n\\n## Goals\\n\\n- <goal>\\n\\n## Acceptance Criteria\\n\\n- <criterion>\\n\\n## Out of Scope\\n\\n- <exclusion>"
+  "description": "## Overview\\n\\n<2-3 sentences>\\n\\n## Goals\\n\\n- <goal>\\n\\n## Acceptance Criteria\\n\\n- <criterion>\\n\\n## Out of Scope\\n\\n- <exclusion>"{stack_fields}
 }}
-"""
+{stack_guidance}"""
+
+_STACK_FIELDS = (
+    ',\n  "proposed_stack": "<one stack id from the list>",'
+    '\n  "proposed_sdlc": "<one sdlc id from the list>",'
+    '\n  "stack_rationale": "<one sentence on why this stack fits>"'
+)
 
 
-def expand_prompt(prompt: str, *, model: str, api_key: str = "", redis_conn=None) -> dict:
-    """Call LLM to turn a one-liner into a structured idea dict."""
+def _stack_guidance(stack_options: list[dict], sdlc_options: list[dict]) -> str:
+    if not stack_options:
+        return ""
+    stacks = ", ".join(f"{s['id']} ({s.get('display_name', s['id'])})" for s in stack_options)
+    sdlc = ", ".join(f"{s['id']} ({s.get('display_name', s['id'])})" for s in sdlc_options)
+    return (
+        f"\nChoose the best-fitting tech stack and development style.\n"
+        f"Available stacks (use the id): {stacks}.\n"
+        f"Available SDLC styles (use the id): {sdlc}.\n"
+        f"If no stack clearly fits, choose 'generic'."
+    )
+
+
+def expand_prompt(prompt: str, *, model: str, api_key: str = "", redis_conn=None,
+                  stack_options: list[dict] | None = None,
+                  sdlc_options: list[dict] | None = None) -> dict:
+    """Call LLM to turn a one-liner into a structured idea dict.
+
+    When stack_options/sdlc_options are given, the proposal also includes
+    proposed_stack, proposed_sdlc, and stack_rationale (constrained to the lists).
+    """
+    stack_options = stack_options or []
+    sdlc_options = sdlc_options or []
+    user_msg = _PROMPT.format(
+        prompt=prompt,
+        stack_fields=_STACK_FIELDS if stack_options else "",
+        stack_guidance=_stack_guidance(stack_options, sdlc_options),
+    )
     kwargs: dict = {
         "model": model,
         "messages": [
             {"role": "system", "content": _SYSTEM},
-            {"role": "user", "content": _PROMPT.format(prompt=prompt)},
+            {"role": "user", "content": user_msg},
         ],
         "temperature": 0.3,
     }
@@ -58,6 +90,7 @@ def _parse(raw: str, fallback_prompt: str) -> dict:
     try:
         data = json.loads(clean)
         if "title" in data and "description" in data:
+            # Pass through proposal fields when present (caller validates against catalog).
             return data
     except json.JSONDecodeError:
         log.warning("idea_generator_json_error", raw=raw[:200])

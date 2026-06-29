@@ -67,6 +67,9 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             sequence    INTEGER,
             model_used  TEXT,
             pr_url      TEXT,
+            stack       TEXT,
+            sdlc        TEXT,
+            stack_rationale TEXT,
             created_at  TEXT NOT NULL,
             updated_at  TEXT NOT NULL
         );
@@ -74,7 +77,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_parent ON work_items(parent_id);
     """)
     # Migrate existing DBs that pre-date optional columns
-    for col, definition in [("pr_url", "TEXT"), ("sequence", "INTEGER"), ("repo", "TEXT")]:
+    for col, definition in [("pr_url", "TEXT"), ("sequence", "INTEGER"), ("repo", "TEXT"),
+                            ("stack", "TEXT"), ("sdlc", "TEXT"), ("stack_rationale", "TEXT")]:
         try:
             conn.execute(f"ALTER TABLE work_items ADD COLUMN {col} {definition}")
             conn.commit()
@@ -93,6 +97,9 @@ def create_item(
     sequence: Optional[int] = None,
     model_used: str = "",
     repo: str = "",
+    stack: str = "",
+    sdlc: str = "",
+    stack_rationale: str = "",
     item_id: Optional[str] = None,
     created_at: Optional[str] = None,
 ) -> dict:
@@ -103,13 +110,39 @@ def create_item(
         db.execute(
             """INSERT INTO work_items
                (id, type, title, prompt, description, state, parent_id, sequence,
-                model_used, repo, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                model_used, repo, stack, sdlc, stack_rationale, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (item_id, item_type, title, prompt, description, state, parent_id,
-             sequence, model_used, repo or None, now, now),
+             sequence, model_used, repo or None, stack or None, sdlc or None,
+             stack_rationale or None, now, now),
         )
         db.commit()
     return get_item(item_id)
+
+
+def set_stack_sdlc(item_id: str, stack: str | None, sdlc: str | None) -> dict | None:
+    """Set/override the chosen stack and SDLC on an item (e.g. at approval)."""
+    with _lock:
+        db = get_db()
+        db.execute(
+            "UPDATE work_items SET stack=?, sdlc=?, updated_at=? WHERE id=?",
+            (stack or None, sdlc or None, _now(), item_id),
+        )
+        db.commit()
+    return get_item(item_id)
+
+
+def get_stack_sdlc_for_story(item_id: str) -> tuple[str | None, str | None]:
+    """Return (stack, sdlc) for a story, inheriting from its parent idea when unset."""
+    item = get_item(item_id)
+    if not item:
+        return (None, None)
+    stack, sdlc = item.get("stack"), item.get("sdlc")
+    if (not stack or not sdlc) and item.get("parent_id"):
+        parent = get_item(item["parent_id"]) or {}
+        stack = stack or parent.get("stack")
+        sdlc = sdlc or parent.get("sdlc")
+    return (stack, sdlc)
 
 
 def set_repo(item_id: str, repo: str) -> dict | None:

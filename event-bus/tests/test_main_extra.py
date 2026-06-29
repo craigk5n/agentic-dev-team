@@ -925,3 +925,56 @@ class TestCoderSandboxEnv:
         # the least-privilege coder-bot, not the admin token.
         assert "FORGEJO_CODER_TOKEN" in _CODER_SANDBOX_ENV
         assert "FORGEJO_API_TOKEN" in _CODER_SANDBOX_ENV
+
+
+# ── EPIC 2: stack proposal + approval override ────────────────────────────────
+
+class TestIdeaStackProposal:
+    def test_idea_stores_validated_stack(self, client, monkeypatch):
+        monkeypatch.setattr("event_bus.main.over_budget", lambda *a, **k: False)
+        prop = {"title": "T", "description": "D", "proposed_stack": "go",
+                "proposed_sdlc": "tdd", "stack_rationale": "fits"}
+        with patch("idea_agent.main.expand_idea", return_value=prop):
+            resp = client.post("/api/ideas", json={"prompt": "build a go service"})
+        assert resp.status_code == 202
+        body = resp.json()
+        assert body["stack"] == "go" and body["sdlc"] == "tdd"
+
+    def test_invalid_proposed_stack_falls_back(self, client, monkeypatch):
+        monkeypatch.setattr("event_bus.main.over_budget", lambda *a, **k: False)
+        prop = {"title": "T", "description": "D", "proposed_stack": "cobol",
+                "proposed_sdlc": "waterfall"}
+        with patch("idea_agent.main.expand_idea", return_value=prop):
+            resp = client.post("/api/ideas", json={"prompt": "x"})
+        body = resp.json()
+        assert body["stack"] == "generic" and body["sdlc"] == "standard"
+
+
+class TestApproveStackOverride:
+    def _pending(self):
+        from event_bus.work_store import create_item
+        return create_item(item_type="idea", title="T", description="D",
+                           state="pending-approval", stack="python", sdlc="standard")
+
+    def test_override_applies(self, client):
+        from event_bus.work_store import get_item
+        it = self._pending()
+        with patch("event_bus.main._run_planner", new_callable=AsyncMock):
+            resp = client.post(f"/api/items/{it['id']}/approve", json={"stack": "go", "sdlc": "tdd"})
+        assert resp.status_code == 200
+        final = get_item(it["id"])
+        assert final["stack"] == "go" and final["sdlc"] == "tdd" and final["state"] == "approved"
+
+    def test_invalid_override_returns_422(self, client):
+        it = self._pending()
+        resp = client.post(f"/api/items/{it['id']}/approve", json={"stack": "cobol"})
+        assert resp.status_code == 422
+
+    def test_no_override_keeps_proposal(self, client):
+        from event_bus.work_store import get_item
+        it = self._pending()
+        with patch("event_bus.main._run_planner", new_callable=AsyncMock):
+            resp = client.post(f"/api/items/{it['id']}/approve", json={})
+        assert resp.status_code == 200
+        final = get_item(it["id"])
+        assert final["stack"] == "python" and final["sdlc"] == "standard"

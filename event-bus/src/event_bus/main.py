@@ -42,7 +42,8 @@ from event_bus.prompt_store import get_prompt, set_prompt, delete_prompt, list_p
 from event_bus.dispatch import dispatch_forgejo_event
 from event_bus.work_store import (
     create_item, get_item, grouped_items, list_items, update_state, set_pr_url, set_repo,
-    unlock_next_story, find_item_by_pr_url, get_repo_for_story, STATE_COLORS, get_db
+    unlock_next_story, find_item_by_pr_url, get_repo_for_story, set_stack_sdlc,
+    get_stack_sdlc_for_story, STATE_COLORS, get_db
 )
 from event_bus.telemetry import get_telemetry_summary, render_prometheus
 from event_bus.events.forgejo import ForgejoPREvent, ForgejoReviewEvent
@@ -294,14 +295,23 @@ async def submit_idea(request: Request):
         )
     model_override = (body.get("model_override") or "").strip() or cfg.models.idea
 
+    cat = get_catalog()
+    stack_options = [{"id": s.id, "display_name": s.display_name} for s in cat.list_stacks()]
+    sdlc_options = [{"id": s.id, "display_name": s.display_name} for s in cat.list_sdlc()]
+
     try:
         from idea_agent.main import expand_idea
-        proposal = expand_idea(prompt, model_override=model_override, redis_conn=_redis_conn)
+        proposal = expand_idea(prompt, model_override=model_override, redis_conn=_redis_conn,
+                               stack_options=stack_options, sdlc_options=sdlc_options)
     except ImportError:
         raise HTTPException(status_code=503, detail="idea_agent package not installed")
     except Exception as exc:
         log.error("idea_expansion_failed", error=str(exc))
         raise HTTPException(status_code=500, detail=str(exc))
+
+    # Constrain the proposal to the catalog; unknown/empty resolves to generic/standard.
+    stack = cat.get_stack(proposal.get("proposed_stack")).id
+    sdlc = cat.get_sdlc(proposal.get("proposed_sdlc")).id
 
     item = create_item(
         item_type="idea",
@@ -310,8 +320,11 @@ async def submit_idea(request: Request):
         description=proposal.get("description", ""),
         state="pending-approval",
         model_used=model_override or "",
+        stack=stack,
+        sdlc=sdlc,
+        stack_rationale=(proposal.get("stack_rationale") or "")[:500],
     )
-    log.info("idea_submitted", id=item["id"], title=item["title"])
+    log.info("idea_submitted", id=item["id"], title=item["title"], stack=stack, sdlc=sdlc)
     return item
 
 
@@ -376,14 +389,36 @@ async def get_work_item(item_id: str):
 
 
 @app.post("/api/items/{item_id}/approve", status_code=status.HTTP_200_OK)
-async def approve_item(item_id: str):
+async def approve_item(item_id: str, request: Request):
     item = get_item(item_id)
     if not item:
         raise HTTPException(status_code=404, detail="item not found")
     if item["state"] != "pending-approval":
         raise HTTPException(status_code=409, detail=f"item is '{item['state']}', not pending-approval")
+
+    # Optional stack/SDLC overrides — validated against the catalog (reject invalid).
+    body: dict = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    cat = get_catalog()
+    new_stack, new_sdlc = body.get("stack"), body.get("sdlc")
+    if new_stack is not None and not cat.has_stack(new_stack):
+        raise HTTPException(status_code=422, detail=f"unknown stack: {new_stack!r}")
+    if new_sdlc is not None and not cat.has_sdlc(new_sdlc):
+        raise HTTPException(status_code=422, detail=f"unknown sdlc: {new_sdlc!r}")
+    if new_stack is not None or new_sdlc is not None:
+        set_stack_sdlc(
+            item_id,
+            new_stack if new_stack is not None else item.get("stack"),
+            new_sdlc if new_sdlc is not None else item.get("sdlc"),
+        )
+
     updated = update_state(item_id, "approved")
-    log.info("idea_approved", id=item_id, title=item["title"])
+    final = get_item(item_id) or item
+    log.info("idea_approved", id=item_id, title=item["title"],
+             stack=final.get("stack"), sdlc=final.get("sdlc"))
     # Kick off planner in the background so the response returns immediately
     asyncio.create_task(_run_planner(item_id, item["title"], item["description"] or ""))
     return updated
