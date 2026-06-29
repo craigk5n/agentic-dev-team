@@ -56,6 +56,8 @@ scaffold:
     import { test, expect } from "vitest";
     test("smoke", () => { expect(true).toBe(true); });
 
+test_command: "npm test --silent"
+
 best_practices_prompt: |
   Write modern TypeScript with strict mode on; avoid `any`. Prefer async/await with
   proper error handling over unhandled promises. Use ES modules. Keep functions small

@@ -13,6 +13,9 @@ Flow:
 
 from __future__ import annotations
 import re
+import shlex
+import shutil
+import subprocess
 import tempfile
 from collections.abc import Callable
 from typing import Any
@@ -26,6 +29,50 @@ from coding_agent.opencode_agent import run_opencode_agent
 from typing import Any
 
 log = structlog.get_logger()
+
+# In-coder TDD: how many times the coder re-invokes opencode after a failing
+# test run before giving up and opening the PR anyway (CI/reviewer still gate).
+_MAX_TEST_ITERS = 2
+_TEST_TIMEOUT = 300  # seconds
+
+
+def _run_test_command(
+    repo_dir: str,
+    command: str,
+    log_line: Callable[[str], None] | None = None,
+    timeout: int = _TEST_TIMEOUT,
+) -> tuple[str, str]:
+    """Run the stack's test command in repo_dir.
+
+    Returns (status, output) where status is:
+      'pass'    — tests ran and succeeded
+      'fail'    — tests ran and failed
+      'skipped' — the toolchain isn't available in this sandbox image (no-op)
+    """
+    if not command.strip():
+        return ("skipped", "")
+    primary = shlex.split(command)[0]
+    if shutil.which(primary) is None:
+        log.info("test_skipped_no_toolchain", primary=primary)
+        return ("skipped", f"{primary}: not found in sandbox image")
+    try:
+        proc = subprocess.run(
+            command, cwd=repo_dir, shell=True,
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return ("fail", f"test command timed out after {timeout}s")
+    out = proc.stdout + proc.stderr
+    if log_line:
+        for ln in out.splitlines()[-40:]:
+            log_line(ln)
+    # A failure caused by missing test tooling (not by the code) → skip, don't iterate.
+    if proc.returncode != 0 and re.search(
+        r"No module named|not installed|cannot find package|No such file or directory", out
+    ):
+        log.info("test_skipped_tooling_missing", primary=primary)
+        return ("skipped", out)
+    return ("pass" if proc.returncode == 0 else "fail", out)
 
 
 def _branch_name(item_id: str, title: str) -> str:
@@ -48,12 +95,17 @@ def run_coding_agent(
     description: str,
     model_override: str = "",
     story_prompt: str = "",
+    test_command: str = "",
     log_line: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """
     Run the full coding agent loop for one story.
     Returns a result dict; raises on unrecoverable errors.
     State transitions are handled by the event-bus caller.
+
+    test_command: when set, the coder runs it in-sandbox after writing code and
+    re-attempts (red->green) until it passes or _MAX_TEST_ITERS is reached, before
+    opening the PR. Skipped gracefully if the toolchain isn't in the sandbox image.
     """
     log.info("coding_agent_start", item_id=item_id, title=title)
 
@@ -90,6 +142,33 @@ def run_coding_agent(
                 log_line=log_line,
             )
 
+            # In-coder TDD: run the stack's tests and iterate (red->green) before the PR.
+            test_status = "skipped"
+            if test_command:
+                for attempt in range(_MAX_TEST_ITERS + 1):
+                    test_status, test_output = _run_test_command(tmpdir, test_command, log_line)
+                    if test_status in ("pass", "skipped"):
+                        break
+                    if attempt >= _MAX_TEST_ITERS:
+                        log.warning("tests_still_failing", item_id=item_id, attempts=attempt + 1)
+                        break
+                    if log_line:
+                        log_line(f"[tdd] tests failing — re-attempt {attempt + 1}/{_MAX_TEST_ITERS}")
+                    summary = run_opencode_agent(
+                        story_title=title,
+                        story_description=description,
+                        repo_dir=tmpdir,
+                        model=model,
+                        openrouter_api_key=settings.openrouter_api_key,
+                        review_comments=[{
+                            "body": f"The test suite is failing. Fix the code so `{test_command}` "
+                                    f"passes.\n\nTest output:\n{test_output[-3000:]}"
+                        }],
+                        prompt_template=story_prompt,
+                        log_line=log_line,
+                    )
+                log.info("in_coder_tests", item_id=item_id, status=test_status)
+
             sha = git_ops.commit_all(tmpdir, f"feat: {title}\n\n{summary}")
             if not sha:
                 log.warning("no_changes_committed", item_id=item_id)
@@ -97,11 +176,17 @@ def run_coding_agent(
 
             git_ops.push(tmpdir, branch)
 
+        _test_line = {
+            "pass": "🧪 In-coder tests: **passing**",
+            "fail": "🧪 In-coder tests: **failing** (CI/reviewer will gate)",
+            "skipped": "",
+        }.get(test_status, "")
         pr_body = (
             f"## Story\n{title}\n\n"
             f"## Description\n{description or '(none)'}\n\n"
             f"## Implementation summary\n{summary}\n\n"
-            f"---\n_Work item: `{item_id}`_"
+            + (f"{_test_line}\n\n" if _test_line else "")
+            + f"---\n_Work item: `{item_id}`_"
         )
         pr = forgejo.create_pr(
             owner=owner,
@@ -132,6 +217,7 @@ def run_coding_agent(
         "pr_url": pr_url,
         "sha": sha,
         "summary": summary,
+        "test_status": test_status,
     }
 
 

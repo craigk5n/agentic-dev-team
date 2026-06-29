@@ -162,3 +162,80 @@ class TestFixPrReview:
             )
         assert result["status"] == "no_changes"
         assert result["item_id"] == _UUID
+
+
+# ── In-coder TDD: test-and-iterate loop ───────────────────────────────────────
+
+class TestRunTestCommand:
+    def test_empty_command_skips(self):
+        from coding_agent.main import _run_test_command
+        assert _run_test_command("/tmp", "")[0] == "skipped"
+
+    def test_missing_toolchain_skips(self):
+        from coding_agent.main import _run_test_command
+        status, out = _run_test_command("/tmp", "nonexistent-binary-xyz test ./...")
+        assert status == "skipped"
+
+    def test_passing_command(self, tmp_path):
+        from coding_agent.main import _run_test_command
+        assert _run_test_command(str(tmp_path), "true")[0] == "pass"
+
+    def test_failing_command(self, tmp_path):
+        from coding_agent.main import _run_test_command
+        assert _run_test_command(str(tmp_path), "false")[0] == "fail"
+
+    def test_missing_tooling_output_is_skipped(self, tmp_path):
+        from coding_agent.main import _run_test_command
+        cmd = "python3 -c \"import sys; sys.stderr.write('No module named pytest'); sys.exit(1)\""
+        assert _run_test_command(str(tmp_path), cmd)[0] == "skipped"
+
+
+class TestInCoderTdd:
+    def _patches(self, tmp_path):
+        return (
+            patch("coding_agent.main.ForgejoClient", return_value=_make_forgejo()),
+            patch("coding_agent.main.git_ops.clone"),
+            patch("coding_agent.main.git_ops.configure_identity"),
+            patch("coding_agent.main.git_ops.create_branch"),
+            patch("coding_agent.main.git_ops.commit_all", return_value="a" * 40),
+            patch("coding_agent.main.git_ops.push"),
+            patch("coding_agent.main.tempfile.TemporaryDirectory"),
+        )
+
+    def test_iterates_until_green(self, tmp_path):
+        ps = self._patches(tmp_path)
+        with ps[0], ps[1], ps[2], ps[3], ps[4], ps[5], ps[6] as mock_td, \
+             patch("coding_agent.main.run_opencode_agent", return_value="impl") as oc, \
+             patch("coding_agent.main._run_test_command",
+                   side_effect=[("fail", "boom"), ("pass", "ok")]) as rt:
+            mock_td.return_value.__enter__.return_value = str(tmp_path)
+            mock_td.return_value.__exit__.return_value = False
+            result = run_coding_agent(_UUID, "T", "D", test_command="python3 -m pytest -q")
+        assert result["test_status"] == "pass"
+        assert rt.call_count == 2          # initial fail, then pass
+        assert oc.call_count == 2          # initial write + one fix iteration
+
+    def test_no_command_runs_no_tests(self, tmp_path):
+        ps = self._patches(tmp_path)
+        with ps[0], ps[1], ps[2], ps[3], ps[4], ps[5], ps[6] as mock_td, \
+             patch("coding_agent.main.run_opencode_agent", return_value="impl") as oc, \
+             patch("coding_agent.main._run_test_command") as rt:
+            mock_td.return_value.__enter__.return_value = str(tmp_path)
+            mock_td.return_value.__exit__.return_value = False
+            result = run_coding_agent(_UUID, "T", "D")  # no test_command
+        rt.assert_not_called()
+        assert result["test_status"] == "skipped"
+        assert oc.call_count == 1
+
+    def test_gives_up_after_max_iters(self, tmp_path):
+        ps = self._patches(tmp_path)
+        with ps[0], ps[1], ps[2], ps[3], ps[4], ps[5], ps[6] as mock_td, \
+             patch("coding_agent.main.run_opencode_agent", return_value="impl") as oc, \
+             patch("coding_agent.main._run_test_command", return_value=("fail", "boom")):
+            mock_td.return_value.__enter__.return_value = str(tmp_path)
+            mock_td.return_value.__exit__.return_value = False
+            result = run_coding_agent(_UUID, "T", "D", test_command="pytest")
+        # still opens the PR (CI/reviewer gate), reports failing
+        assert result["status"] == "success"
+        assert result["test_status"] == "fail"
+        assert oc.call_count == 3          # initial + 2 retries (_MAX_TEST_ITERS)

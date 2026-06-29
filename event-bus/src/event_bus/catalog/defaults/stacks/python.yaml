@@ -46,6 +46,8 @@ scaffold:
     def test_smoke():
         assert True
 
+test_command: "python3 -m pytest -q"
+
 best_practices_prompt: |
   Write idiomatic, PEP 8-compliant Python. Use type hints on all function signatures.
   Prefer small, focused functions and dataclasses for data. Handle errors explicitly;

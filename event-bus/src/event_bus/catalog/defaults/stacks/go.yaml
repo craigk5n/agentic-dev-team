@@ -44,6 +44,8 @@ scaffold:
         }
     }
 
+test_command: "go test ./..."
+
 best_practices_prompt: |
   Write idiomatic Go: short names, early returns, explicit error handling (wrap with
   %w). Keep packages cohesive. Avoid unnecessary interfaces. Use table-driven tests
