@@ -18,13 +18,15 @@ ci_workflow: |
       runs-on: ubuntu-latest
       steps:
         - uses: actions/checkout@v4
-        - uses: actions/setup-go@v5
-          with:
-            go-version: "1.22"
-        - name: Vet
-          run: go vet ./...
-        - name: Test
-          run: go test ./...
+        - name: Install Go, vet, test
+          run: |
+            set -euo pipefail
+            # Install the Go toolchain (the runner image has none; EPIC 5 prebuilt
+            # images remove this). A custom container: image can't run checkout (no node).
+            curl -sSL https://go.dev/dl/go1.22.5.linux-amd64.tar.gz | tar -C /usr/local -xz
+            export PATH="$PATH:/usr/local/go/bin"
+            go vet ./...
+            go test ./...
 
 scaffold:
   go.mod: |

@@ -19,17 +19,13 @@ ci_workflow: |
       runs-on: ubuntu-latest
       steps:
         - uses: actions/checkout@v4
-        - uses: actions/setup-node@v4
-          with:
-            node-version: "20"
-        - name: Install
-          run: npm ci || npm install
-        - name: Lint
-          run: npm run lint --if-present
-        - name: Typecheck
-          run: npx --yes tsc --noEmit || true
-        - name: Test
-          run: npm test --if-present
+        - name: Install, check, test
+          run: |
+            set -euo pipefail
+            npm ci || npm install
+            npm run lint --if-present
+            npx --yes tsc --noEmit || true
+            npm test --if-present
 
 scaffold:
   package.json: |
@@ -38,8 +34,7 @@ scaffold:
       "version": "0.1.0",
       "type": "module",
       "scripts": {
-        "test": "vitest run",
-        "lint": "eslint ."
+        "test": "vitest run"
       },
       "devDependencies": {
         "typescript": "^5.4.0",

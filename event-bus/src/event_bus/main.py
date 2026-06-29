@@ -36,7 +36,7 @@ from event_bus.config import settings
 from event_bus.auth import check_basic_auth, is_exempt as auth_is_exempt
 from event_bus.catalog import get_catalog, reload_catalog
 from event_bus.cost_guard import over_budget
-from event_bus.ci_workflow import CI_WORKFLOW_PATH, CI_WORKFLOW_YAML
+from event_bus.ci_workflow import CI_WORKFLOW_PATH
 from event_bus.config_store import get_config, patch_config
 from event_bus.prompt_store import get_prompt, set_prompt, delete_prompt, list_prompts
 from event_bus.dispatch import dispatch_forgejo_event
@@ -431,10 +431,11 @@ def _slugify(text: str) -> str:
     return slug[:40]
 
 
-def _provision_project_repo(idea_id: str, title: str) -> str:
+def _provision_project_repo(idea_id: str, title: str, stack_id: str | None = None) -> str:
     """
-    Create a Forgejo repo for this idea (if it doesn't exist) and register
-    the event-bus webhook on it. Returns 'owner/repo' or '' on failure.
+    Create a Forgejo repo for this idea (if it doesn't exist), commit the stack's
+    CI workflow + scaffold + stack marker, protect main, grant the bots, and
+    register the webhook. Returns 'owner/repo' or '' on failure.
     """
     try:
         from coding_agent.forgejo_client import ForgejoClient
@@ -442,6 +443,8 @@ def _provision_project_repo(idea_id: str, title: str) -> str:
     except ImportError:
         log.warning("coding_agent_not_installed_skipping_repo_provision")
         return ""
+
+    stack = get_catalog().get_stack(stack_id)
 
     repo_name = _slugify(title)
     if not repo_name:
@@ -468,16 +471,21 @@ def _provision_project_repo(idea_id: str, title: str) -> str:
             if not fj.repo_exists(owner, repo_name):
                 fj.create_repo(repo_name, description=title)
                 created = True
-            # Commit the default CI workflow on fresh repos so the Actions runner
-            # tests every push/PR and reports a status the Tester verdict can gate on.
+            # On fresh repos commit the stack's CI workflow + scaffold + a stack
+            # marker in ONE commit, so the Actions runner gets a single clean run on
+            # the complete scaffolded project (not several failing intermediate runs).
             if created:
+                files = {
+                    CI_WORKFLOW_PATH: stack.ci_workflow,
+                    ".devagents/stack": stack.id + "\n",
+                    **stack.scaffold,
+                }
                 try:
-                    fj.create_file(
-                        owner, repo_name, CI_WORKFLOW_PATH, CI_WORKFLOW_YAML,
-                        message="ci: add default test workflow", branch="main",
-                    )
+                    fj.create_files(owner, repo_name, files,
+                                    message=f"chore: scaffold {stack.id} project + CI",
+                                    branch="main")
                 except Exception as exc:
-                    log.warning("ci_workflow_commit_failed", repo=repo_full, error=str(exc))
+                    log.warning("scaffold_commit_failed", repo=repo_full, stack=stack.id, error=str(exc))
                 # Protect main: block direct pushes (agents work via PRs). No required
                 # approvals/status — the reviewer auto-merges and a hard gate would
                 # deadlock that; the event-bus verdicts remain the real gate.
@@ -497,12 +505,29 @@ def _provision_project_repo(idea_id: str, title: str) -> str:
             # Register webhook (idempotent — Forgejo allows duplicates but we accept that)
             webhook_url = f"http://event-bus:8080/webhook/forgejo"
             fj.create_webhook(owner, repo_name, webhook_url, settings.forgejo_webhook_secret)
-        log.info("project_repo_provisioned", repo=repo_full, idea=idea_id, ci_workflow=created)
+        log.info("project_repo_provisioned", repo=repo_full, idea=idea_id,
+                 stack=stack.id, scaffolded=created)
     except Exception as exc:
         log.error("project_repo_provision_failed", repo=repo_full, error=str(exc))
         return ""
 
     return repo_full
+
+
+def _stack_id_for_repo(owner: str, repo: str) -> str:
+    """Resolve a repo's stack id from its committed `.devagents/stack` marker,
+    falling back to generic. Used by steps that only have the repo (recode, tester)."""
+    from event_bus.catalog import GENERIC_STACK_ID
+    try:
+        import base64
+        from coding_agent.forgejo_client import ForgejoClient
+        from coding_agent.config import settings as cs
+        with ForgejoClient(cs.forgejo_base_url, cs.forgejo_api_token) as fj:
+            data = fj.get(f"/repos/{owner}/{repo}/contents/.devagents/stack")
+        content = base64.b64decode(data.get("content", "")).decode().strip()
+        return content if get_catalog().has_stack(content) else GENERIC_STACK_ID
+    except Exception:
+        return GENERIC_STACK_ID
 
 
 async def _run_planner(item_id: str, title: str, description: str) -> None:
@@ -513,8 +538,11 @@ async def _run_planner(item_id: str, title: str, description: str) -> None:
         return
     model = cfg.models.planner
 
-    # Create a dedicated Forgejo repo for this project before decomposing
-    repo_full = await asyncio.to_thread(_provision_project_repo, item_id, title)
+    # Create a dedicated Forgejo repo for this project before decomposing, using
+    # the stack chosen at approval (falls back to generic when unset).
+    item = get_item(item_id) or {}
+    stack_id = item.get("stack")
+    repo_full = await asyncio.to_thread(_provision_project_repo, item_id, title, stack_id)
     if repo_full:
         set_repo(item_id, repo_full)
         log.info("idea_repo_set", idea=item_id, repo=repo_full)

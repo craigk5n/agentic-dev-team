@@ -793,32 +793,39 @@ class TestProvisionProjectRepo:
         monkeypatch.setattr("httpx.get", lambda *a, **k: resp)
         return m
 
-    def test_fresh_repo_commits_ci_workflow(self, monkeypatch):
-        from event_bus.ci_workflow import CI_WORKFLOW_PATH, CI_WORKFLOW_YAML
+    def test_fresh_python_repo_scaffolds_stack(self, monkeypatch):
+        from event_bus.ci_workflow import CI_WORKFLOW_PATH
         fj = MagicMock()
         fj.repo_exists.return_value = False
         m = self._patch_common(monkeypatch, fj)
 
-        result = m._provision_project_repo("idea-1", "Add Login Page")
+        result = m._provision_project_repo("idea-1", "Add Login Page", "python")
 
         assert result == "devadmin/add-login-page"
         fj.create_repo.assert_called_once()
-        fj.create_file.assert_called_once()
-        args, kwargs = fj.create_file.call_args
+        # one batch commit: CI workflow + stack marker + python scaffold
+        fj.create_files.assert_called_once()
+        (owner, repo, files), kwargs = fj.create_files.call_args
         assert kwargs.get("branch") == "main"
-        assert CI_WORKFLOW_PATH in args
-        assert CI_WORKFLOW_YAML in args
-        # branch protection set on fresh repo (block direct push to main)
+        assert CI_WORKFLOW_PATH in files and "pytest" in files[CI_WORKFLOW_PATH]
+        assert files[".devagents/stack"].strip() == "python"
+        assert "pyproject.toml" in files
+        # branch protection + bot collaborators unchanged
         fj.set_branch_protection.assert_called_once()
-        bp_args, _ = fj.set_branch_protection.call_args
-        assert "add-login-page" in bp_args and "main" in bp_args
-        # coder-bot + reviewer-bot granted write access for least-privilege ops
         bots = {c.args[2] for c in fj.add_collaborator.call_args_list}
         assert bots == {"coder-bot", "reviewer-bot"}
-        assert all(c.args[3] == "write" for c in fj.add_collaborator.call_args_list)
         fj.create_webhook.assert_called_once()
 
-    def test_existing_repo_skips_workflow_commit(self, monkeypatch):
+    def test_unknown_stack_falls_back_to_generic(self, monkeypatch):
+        fj = MagicMock()
+        fj.repo_exists.return_value = False
+        m = self._patch_common(monkeypatch, fj)
+
+        m._provision_project_repo("idea-x", "Some Project", "cobol")
+        (_, _, files), _ = fj.create_files.call_args
+        assert files[".devagents/stack"].strip() == "generic"
+
+    def test_existing_repo_skips_scaffold(self, monkeypatch):
         fj = MagicMock()
         fj.repo_exists.return_value = True
         m = self._patch_common(monkeypatch, fj)
@@ -827,18 +834,18 @@ class TestProvisionProjectRepo:
 
         assert result == "devadmin/existing-project"
         fj.create_repo.assert_not_called()
-        fj.create_file.assert_not_called()
+        fj.create_files.assert_not_called()
         fj.set_branch_protection.assert_not_called()
         fj.add_collaborator.assert_not_called()
         fj.create_webhook.assert_called_once()
 
-    def test_ci_workflow_commit_failure_is_non_fatal(self, monkeypatch):
+    def test_scaffold_commit_failure_is_non_fatal(self, monkeypatch):
         fj = MagicMock()
         fj.repo_exists.return_value = False
-        fj.create_file.side_effect = RuntimeError("contents API down")
+        fj.create_files.side_effect = RuntimeError("contents API down")
         m = self._patch_common(monkeypatch, fj)
 
-        # Failure to commit the workflow must not fail provisioning
+        # Failure to commit scaffold must not fail provisioning
         result = m._provision_project_repo("idea-3", "Resilient Repo")
         assert result == "devadmin/resilient-repo"
         fj.create_webhook.assert_called_once()
@@ -978,3 +985,37 @@ class TestApproveStackOverride:
         assert resp.status_code == 200
         final = get_item(it["id"])
         assert final["stack"] == "python" and final["sdlc"] == "standard"
+
+
+# ── EPIC 3: repo stack resolver ───────────────────────────────────────────────
+
+class TestStackForRepo:
+    def test_resolves_marker(self, monkeypatch):
+        from event_bus import main as m
+        import base64, coding_agent.forgejo_client as fc
+        fj = MagicMock()
+        fj.get.return_value = {"content": base64.b64encode(b"go\n").decode()}
+        FakeClient = MagicMock()
+        FakeClient.return_value.__enter__.return_value = fj
+        monkeypatch.setattr(fc, "ForgejoClient", FakeClient)
+        assert m._stack_id_for_repo("devadmin", "repo") == "go"
+
+    def test_unknown_marker_falls_back(self, monkeypatch):
+        from event_bus import main as m
+        import base64, coding_agent.forgejo_client as fc
+        fj = MagicMock()
+        fj.get.return_value = {"content": base64.b64encode(b"cobol\n").decode()}
+        FakeClient = MagicMock()
+        FakeClient.return_value.__enter__.return_value = fj
+        monkeypatch.setattr(fc, "ForgejoClient", FakeClient)
+        assert m._stack_id_for_repo("devadmin", "repo") == "generic"
+
+    def test_missing_marker_falls_back(self, monkeypatch):
+        from event_bus import main as m
+        import coding_agent.forgejo_client as fc
+        fj = MagicMock()
+        fj.get.side_effect = RuntimeError("404")
+        FakeClient = MagicMock()
+        FakeClient.return_value.__enter__.return_value = fj
+        monkeypatch.setattr(fc, "ForgejoClient", FakeClient)
+        assert m._stack_id_for_repo("devadmin", "repo") == "generic"

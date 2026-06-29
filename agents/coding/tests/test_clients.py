@@ -81,6 +81,28 @@ def test_forgejo_create_file():
     assert sent["message"] == "ci: add workflow"
 
 
+def test_forgejo_create_files_batch():
+    captured = {}
+
+    def _handler(request):
+        captured["body"] = request.content
+        return httpx.Response(201, json={"commit": {"sha": "abc"}})
+
+    with respx.mock:
+        respx.post(f"{BASE_FORGEJO}/api/v1/repos/alice/backend/contents").mock(side_effect=_handler)
+        with ForgejoClient(BASE_FORGEJO, "token") as client:
+            client.create_files("alice", "backend",
+                                {"a.txt": "AAA", "dir/b.txt": "BBB"},
+                                "scaffold", branch="main")
+    import json as _json, base64
+    sent = _json.loads(captured["body"])
+    assert sent["branch"] == "main" and sent["message"] == "scaffold"
+    paths = {f["path"]: f for f in sent["files"]}
+    assert set(paths) == {"a.txt", "dir/b.txt"}
+    assert base64.b64decode(paths["a.txt"]["content"]).decode() == "AAA"
+    assert all(f["operation"] == "create" for f in sent["files"])
+
+
 def test_forgejo_set_branch_protection():
     captured = {}
 

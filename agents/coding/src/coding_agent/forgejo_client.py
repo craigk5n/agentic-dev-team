@@ -124,6 +124,24 @@ class ForgejoClient:
         log.info("forgejo_branch_protected", repo=f"{owner}/{repo}", branch=branch)
         return resp.json()
 
+    def create_files(self, owner: str, repo: str, files: dict[str, str],
+                     message: str, branch: str = "main") -> dict[str, Any]:
+        """Create multiple files in a single commit (path -> contents)."""
+        import base64
+        payload_files = [
+            {"operation": "create", "path": path,
+             "content": base64.b64encode(content.encode("utf-8")).decode("ascii")}
+            for path, content in files.items()
+        ]
+        resp = self._http.post(
+            f"{self._base}/api/v1/repos/{owner}/{repo}/contents",
+            json={"branch": branch, "message": message, "files": payload_files},
+        )
+        resp.raise_for_status()
+        log.info("forgejo_files_created", repo=f"{owner}/{repo}",
+                 count=len(files), branch=branch)
+        return resp.json()
+
     def add_collaborator(self, owner: str, repo: str, username: str,
                          permission: str = "write") -> None:
         """Grant `username` collaborator access (permission: read|write|admin).
