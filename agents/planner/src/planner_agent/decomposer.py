@@ -23,7 +23,7 @@ Description:
 {description}
 
 Target repository: {default_repo}
-
+{style_block}
 Create:
 1. One module (epic) grouping all stories
 2. Between 3 and 7 stories — each a concrete, implementable task
@@ -43,7 +43,20 @@ Respond ONLY with valid JSON (no markdown fences):
     }}
   ]
 }}
+Stories are implemented in the order listed.
 """
+
+
+def _style_block(sdlc_directive: str, best_practices: str) -> str:
+    parts = []
+    if sdlc_directive:
+        parts.append(
+            "Development style — follow strictly when splitting and ORDERING stories:\n"
+            + sdlc_directive
+        )
+    if best_practices:
+        parts.append("Stack conventions to honor:\n" + best_practices)
+    return ("\n" + "\n\n".join(parts) + "\n") if parts else ""
 
 
 def decompose_idea(
@@ -53,6 +66,8 @@ def decompose_idea(
     model: str,
     api_key: str = "",
     default_repo: str = "devadmin/sandbox",
+    sdlc_directive: str = "",
+    best_practices: str = "",
     redis_conn=None,
 ) -> dict:
     kwargs: dict = {
@@ -65,6 +80,7 @@ def decompose_idea(
                     title=title,
                     description=description[:4000],
                     default_repo=default_repo,
+                    style_block=_style_block(sdlc_directive, best_practices),
                 ),
             },
         ],

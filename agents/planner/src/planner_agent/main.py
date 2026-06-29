@@ -15,6 +15,8 @@ def run_planner(
     description: str,
     model_override: str = "",
     repo_full_name: str = "",
+    sdlc_directive: str = "",
+    best_practices: str = "",
     redis_conn=None,
 ) -> dict:
     """
@@ -22,6 +24,7 @@ def run_planner(
     Persistence is handled by the caller (event-bus saves to SQLite).
     repo_full_name: the already-provisioned Forgejo repo (owner/name); if empty,
     falls back to settings.default_repo so existing behaviour is unchanged.
+    sdlc_directive / best_practices: stack & SDLC guidance that shape decomposition.
     """
     log.info("planner_start", item_id=item_id, repo=repo_full_name or settings.default_repo)
 
@@ -31,6 +34,8 @@ def run_planner(
         model=model_override or settings.model_planner,
         api_key=settings.effective_api_key,
         default_repo=repo_full_name or settings.default_repo,
+        sdlc_directive=sdlc_directive,
+        best_practices=best_practices,
         redis_conn=redis_conn,
     )
 

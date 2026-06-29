@@ -538,19 +538,27 @@ async def _run_planner(item_id: str, title: str, description: str) -> None:
         return
     model = cfg.models.planner
 
-    # Create a dedicated Forgejo repo for this project before decomposing, using
-    # the stack chosen at approval (falls back to generic when unset).
+    # Resolve the stack chosen at approval (falls back to generic/standard).
     item = get_item(item_id) or {}
-    stack_id = item.get("stack")
-    repo_full = await asyncio.to_thread(_provision_project_repo, item_id, title, stack_id)
+    cat = get_catalog()
+    stack = cat.get_stack(item.get("stack"))
+    sdlc = cat.get_sdlc(item.get("sdlc"))
+
+    # Provision a dedicated Forgejo repo for this project before decomposing.
+    repo_full = await asyncio.to_thread(_provision_project_repo, item_id, title, stack.id)
     if repo_full:
         set_repo(item_id, repo_full)
         log.info("idea_repo_set", idea=item_id, repo=repo_full)
 
     try:
         from planner_agent.main import run_planner
-        plan = await asyncio.to_thread(run_planner, item_id, title, description, model,
-                                       repo_full_name=repo_full, redis_conn=_redis_conn)
+        plan = await asyncio.to_thread(
+            run_planner, item_id, title, description, model,
+            repo_full_name=repo_full,
+            sdlc_directive=sdlc.planner_directive,
+            best_practices=stack.best_practices_prompt,
+            redis_conn=_redis_conn,
+        )
     except ImportError:
         log.error("planner_agent_not_installed")
         return
@@ -572,6 +580,8 @@ async def _run_planner(item_id: str, title: str, description: str) -> None:
             sequence=i + 1,
             model_used=model,
             repo=repo_full,
+            stack=stack.id,
+            sdlc=sdlc.id,
         )
         log.info("story_created", id=story_item["id"], seq=i + 1, state=state,
                  title=story_item["title"], repo=repo_full)

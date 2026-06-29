@@ -46,3 +46,43 @@ class TestRunPlanner:
         with patch("planner_agent.main.decompose_idea", return_value=_PLAN) as mock:
             run_planner("idea-1", "T", "D", repo_full_name="alice/backend")
         assert mock.call_args.kwargs["default_repo"] == "alice/backend"
+
+
+# ── EPIC 4: SDLC-aware decomposition ──────────────────────────────────────────
+
+class TestSdlcAwarePlanning:
+    def test_run_planner_forwards_directive_and_practices(self):
+        _PLAN = {"module_name": "M", "module_description": "d", "stories": []}
+        with patch("planner_agent.main.decompose_idea", return_value=_PLAN) as mock:
+            run_planner("idea-1", "T", "D", sdlc_directive="TESTS FIRST",
+                        best_practices="idiomatic go")
+        assert mock.call_args.kwargs["sdlc_directive"] == "TESTS FIRST"
+        assert mock.call_args.kwargs["best_practices"] == "idiomatic go"
+
+    def test_style_block_includes_both(self):
+        from planner_agent.decomposer import _style_block
+        block = _style_block("write failing tests first", "use type hints")
+        assert "write failing tests first" in block
+        assert "use type hints" in block
+        assert "ORDERING" in block
+
+    def test_style_block_empty_when_none(self):
+        from planner_agent.decomposer import _style_block
+        assert _style_block("", "") == ""
+
+    def test_decompose_injects_directive_into_prompt(self):
+        from unittest.mock import MagicMock
+        import planner_agent.decomposer as dec
+        captured = {}
+
+        def fake_completion(**kwargs):
+            captured["content"] = kwargs["messages"][1]["content"]
+            r = MagicMock()
+            r.choices[0].message.content = '{"module_name":"M","module_description":"d","stories":[]}'
+            return r
+
+        with patch.object(dec.litellm, "completion", side_effect=fake_completion):
+            dec.decompose_idea("T", "D", model="m", sdlc_directive="TDD_DIRECTIVE",
+                               best_practices="GO_CONV")
+        assert "TDD_DIRECTIVE" in captured["content"]
+        assert "GO_CONV" in captured["content"]

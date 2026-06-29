@@ -1019,3 +1019,43 @@ class TestStackForRepo:
         FakeClient.return_value.__enter__.return_value = fj
         monkeypatch.setattr(fc, "ForgejoClient", FakeClient)
         assert m._stack_id_for_repo("devadmin", "repo") == "generic"
+
+
+# ── EPIC 4: SDLC-aware planning wiring ────────────────────────────────────────
+
+class TestPlannerSdlcWiring:
+    def test_directive_passed_and_stories_tagged_in_order(self, monkeypatch):
+        import asyncio
+        from event_bus import main as m
+        monkeypatch.setattr(m, "_redis_conn", fakeredis.FakeRedis())
+        monkeypatch.setattr(m, "over_budget", lambda *a, **k: False)
+        monkeypatch.setattr(m, "get_item", lambda _id: {
+            "id": _id, "stack": "go", "sdlc": "tdd", "title": "T", "description": "D"})
+        monkeypatch.setattr(m, "_provision_project_repo", lambda *a, **k: "devadmin/repo")
+        monkeypatch.setattr(m, "set_repo", lambda *a, **k: None)
+        monkeypatch.setattr(m, "update_state", lambda *a, **k: None)
+        monkeypatch.setattr(m, "get_prompt", lambda *a, **k: "")
+        monkeypatch.setattr(m, "_run_coding_agent", AsyncMock())
+
+        created = []
+        def fake_create_item(**kw):
+            created.append(kw)
+            return {"id": f"s{len(created)}", **kw}
+        monkeypatch.setattr(m, "create_item", fake_create_item)
+
+        plan = {"module_name": "M", "module_description": "d", "stories": [
+            {"title": "write failing tests", "description": "x"},
+            {"title": "implement feature", "description": "y"},
+        ]}
+        run_planner_mock = MagicMock(return_value=plan)
+        monkeypatch.setattr("planner_agent.main.run_planner", run_planner_mock)
+
+        asyncio.run(m._run_planner("idea-1", "T", "D"))
+
+        kw = run_planner_mock.call_args.kwargs
+        assert "fail" in kw["sdlc_directive"].lower()   # tdd directive
+        assert kw["best_practices"]                      # go best practices non-empty
+        # stories tagged with stack/sdlc and kept in planner order
+        assert [c["sequence"] for c in created] == [1, 2]
+        assert all(c["stack"] == "go" and c["sdlc"] == "tdd" for c in created)
+        assert created[0]["title"] == "write failing tests"
