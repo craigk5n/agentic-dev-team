@@ -811,6 +811,38 @@ async def _run_coding_agent(item_id: str, title: str, description: str, story_pr
     _coder_slot_release_and_dispatch()
 
 
+def _post_pr_comment(repo_full_name: str, pr_number: int, body: str) -> bool:
+    """Best-effort PR comment (used to surface a stuck recode to the operator)."""
+    try:
+        from coding_agent.forgejo_client import ForgejoClient
+        from coding_agent.config import settings as cs
+        owner, repo_name = repo_full_name.split("/", 1)
+        with ForgejoClient(cs.forgejo_base_url, cs.forgejo_api_token) as fg:
+            fg.post_pr_comment(owner, repo_name, pr_number, body)
+        return True
+    except Exception as exc:
+        log.warning("pr_comment_failed", repo=repo_full_name, pr=pr_number, error=str(exc))
+        return False
+
+
+def _flag_recode_stuck(repo_full_name: str, pr_number: int, item_id: str,
+                       status: str, attempt: int) -> None:
+    """A recode produced no fix — surface it instead of silently parking the story.
+
+    Re-running with identical feedback would no-op again, so we leave the story in
+    changes-requested and post a PR comment asking for human attention.
+    """
+    log.warning("recode_stuck", item_id=item_id, pr=pr_number, status=status, attempt=attempt)
+    _post_pr_comment(
+        repo_full_name, pr_number,
+        "🤖 **Auto-fix couldn't resolve the failing checks.** The coding agent re-ran "
+        f"(attempt {attempt}) but produced no changes, so this PR is parked in "
+        "`changes-requested` and needs human attention — review the failing CI/checks and "
+        "push a fix, or close the PR.",
+    )
+    update_state(item_id, "changes-requested")
+
+
 async def _run_recode_agent(review_event: ForgejoReviewEvent) -> None:
     """Fetch review comments and re-run the coding agent on the existing PR branch."""
     pr_url = review_event.pr_html_url
@@ -857,7 +889,8 @@ async def _run_recode_agent(review_event: ForgejoReviewEvent) -> None:
         )
     except Exception as exc:
         log.error("recode_agent_failed", item_id=item_id, error=str(exc))
-        update_state(item_id, "in-review")
+        _flag_recode_stuck(review_event.repo_full_name, review_event.pr_number,
+                           item_id, "error", 1)
         return
     finally:
         _expire_log(item_id)
@@ -866,8 +899,9 @@ async def _run_recode_agent(review_event: ForgejoReviewEvent) -> None:
         update_state(item_id, "in-review")
         log.info("recode_agent_complete", item_id=item_id, sha=result.get("sha", "")[:8])
     else:
-        log.warning("recode_no_changes", item_id=item_id)
-        update_state(item_id, "in-review")
+        # opencode made no changes — the recode can't help; flag for a human.
+        _flag_recode_stuck(review_event.repo_full_name, review_event.pr_number,
+                           item_id, result.get("status", "no_changes"), 1)
 
 
 _MAX_RECODE_RETRIES = 3
@@ -917,6 +951,11 @@ async def internal_recode_for_pr(payload: dict):
     retries = int(r.get(retry_key) or 0)
     if retries >= _MAX_RECODE_RETRIES:
         log.warning("recode_retry_cap_reached", pr=pr_number, repo=repo_full_name, retries=retries)
+        _post_pr_comment(
+            repo_full_name, pr_number,
+            f"🤖 **Auto-fix gave up after {retries} attempts.** The checks are still failing — "
+            "this PR needs human attention.",
+        )
         update_state(item["id"], "changes-requested")
         return {"status": "retry_cap_reached", "retries": retries, "item_id": item["id"]}
     r.setex(retry_key, 86400, retries + 1)
@@ -943,17 +982,30 @@ async def internal_recode_for_pr(payload: dict):
 
     async def _recode_task() -> None:
         from coding_agent.main import fix_pr_review
+        result: dict = {}
         try:
-            await asyncio.to_thread(
+            result = await asyncio.to_thread(
                 fix_pr_review,
                 item["id"], item["title"], item.get("description", ""),
                 payload.get("head_ref", ""), repo_full_name,
                 review_comments,
                 review_fix_prompt=review_fix_prompt,
                 log_line=log_cb,
-            )
+            ) or {}
+        except Exception as exc:
+            log.error("recode_agent_failed", item_id=item["id"], error=str(exc))
+            result = {"status": "error"}
         finally:
             _expire_log(item["id"])
+
+        if result.get("status") == "success":
+            # A fix was pushed; the synchronized webhook re-runs review/CI.
+            update_state(item["id"], "in-review")
+            log.info("recode_pushed_fix", item_id=item["id"], sha=result.get("sha", "")[:8])
+        else:
+            # No changes / error — recode can't help; surface it for a human.
+            _flag_recode_stuck(repo_full_name, pr_number, item["id"],
+                               result.get("status", "no_changes"), retries + 1)
 
     asyncio.create_task(_recode_task())
     update_state(item["id"], "changes-requested")

@@ -441,7 +441,8 @@ class TestInternalEndpoints:
         monkeypatch.setattr("event_bus.main._redis_conn", r)
         changes = {**self._story, "state": "changes-requested"}
         with patch("event_bus.main.find_item_by_pr_url", return_value=self._story), \
-             patch("event_bus.main.update_state", return_value=changes):
+             patch("event_bus.main.update_state", return_value=changes), \
+             patch("event_bus.main._post_pr_comment") as comment:
             resp = client.post("/internal/recode-for-pr", json={
                 "repo_full_name": "owner/repo",
                 "pr_number": 5,
@@ -449,6 +450,18 @@ class TestInternalEndpoints:
             })
         assert resp.status_code == 202
         assert resp.json()["status"] == "retry_cap_reached"
+        comment.assert_called_once()  # operator is told auto-fix gave up
+
+    def test_flag_recode_stuck_comments_and_parks(self, monkeypatch):
+        from event_bus import main as m
+        states = []
+        monkeypatch.setattr(m, "update_state", lambda i, s: states.append(s))
+        with patch("event_bus.main._post_pr_comment") as comment:
+            m._flag_recode_stuck("owner/repo", 5, "story-1", "no_changes", 1)
+        comment.assert_called_once()
+        body = comment.call_args[0][2]
+        assert "human attention" in body.lower()
+        assert states == ["changes-requested"]
 
     def test_internal_recode_starts_successfully(self, client, monkeypatch):
         r = fakeredis.FakeRedis()
