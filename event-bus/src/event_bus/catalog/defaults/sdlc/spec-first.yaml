@@ -1,0 +1,10 @@
+id: spec-first
+display_name: Spec-First
+planner_directive: |
+  Front-load a single "Write the design/spec" story that captures interfaces,
+  data shapes, and acceptance criteria before any implementation stories. Later
+  implementation stories must reference and conform to that spec.
+coder_directive: |
+  Implement strictly to the documented spec; if the spec is ambiguous, note it in
+  the PR rather than guessing.
+story_ordering: Spec story first; implementation stories reference the spec.

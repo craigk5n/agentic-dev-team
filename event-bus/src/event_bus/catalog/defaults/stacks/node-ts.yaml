@@ -1,0 +1,67 @@
+id: node-ts
+display_name: Node + TypeScript
+ci_image: node:20-bookworm
+coder_image: dev-agents/coder-node-ts:latest
+default_sdlc: standard
+detect:
+  - package.json
+  - tsconfig.json
+  - "*.ts"
+
+ci_workflow: |
+  name: CI
+  on:
+    push:
+    pull_request:
+
+  jobs:
+    test:
+      runs-on: ubuntu-latest
+      steps:
+        - uses: actions/checkout@v4
+        - uses: actions/setup-node@v4
+          with:
+            node-version: "20"
+        - name: Install
+          run: npm ci || npm install
+        - name: Lint
+          run: npm run lint --if-present
+        - name: Typecheck
+          run: npx --yes tsc --noEmit || true
+        - name: Test
+          run: npm test --if-present
+
+scaffold:
+  package.json: |
+    {
+      "name": "project",
+      "version": "0.1.0",
+      "type": "module",
+      "scripts": {
+        "test": "vitest run",
+        "lint": "eslint ."
+      },
+      "devDependencies": {
+        "typescript": "^5.4.0",
+        "vitest": "^1.6.0"
+      }
+    }
+  tsconfig.json: |
+    {
+      "compilerOptions": {
+        "target": "ES2022",
+        "module": "ESNext",
+        "moduleResolution": "bundler",
+        "strict": true,
+        "esModuleInterop": true,
+        "skipLibCheck": true
+      }
+    }
+  test/smoke.test.ts: |
+    import { test, expect } from "vitest";
+    test("smoke", () => { expect(true).toBe(true); });
+
+best_practices_prompt: |
+  Write modern TypeScript with strict mode on; avoid `any`. Prefer async/await with
+  proper error handling over unhandled promises. Use ES modules. Keep functions small
+  and typed. Write vitest tests covering the public surface.

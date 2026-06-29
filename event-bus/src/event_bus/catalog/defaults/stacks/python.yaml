@@ -1,0 +1,54 @@
+id: python
+display_name: Python
+ci_image: python:3.12-slim
+coder_image: dev-agents/coder-python:latest
+default_sdlc: standard
+detect:
+  - pyproject.toml
+  - requirements.txt
+  - "*.py"
+
+ci_workflow: |
+  name: CI
+  on:
+    push:
+    pull_request:
+
+  jobs:
+    test:
+      runs-on: ubuntu-latest
+      steps:
+        - uses: actions/checkout@v4
+        - uses: actions/setup-python@v5
+          with:
+            python-version: "3.12"
+        - name: Install
+          run: |
+            python -m pip install --quiet --upgrade pip ruff pytest
+            [ -f requirements.txt ] && pip install --quiet -r requirements.txt || true
+            [ -f pyproject.toml ] && pip install --quiet -e . || true
+        - name: Lint
+          run: ruff check .
+        - name: Test
+          run: pytest -q
+
+scaffold:
+  pyproject.toml: |
+    [project]
+    name = "project"
+    version = "0.1.0"
+    requires-python = ">=3.12"
+
+    [tool.ruff]
+    line-length = 100
+
+    [tool.pytest.ini_options]
+    testpaths = ["tests"]
+  tests/test_smoke.py: |
+    def test_smoke():
+        assert True
+
+best_practices_prompt: |
+  Write idiomatic, PEP 8-compliant Python. Use type hints on all function signatures.
+  Prefer small, focused functions and dataclasses for data. Handle errors explicitly;
+  never swallow exceptions silently. Write pytest tests with clear arrange/act/assert.

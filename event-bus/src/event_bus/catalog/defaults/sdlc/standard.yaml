@@ -1,0 +1,8 @@
+id: standard
+display_name: Standard (feature-first)
+planner_directive: |
+  Decompose the work feature-first into small, independently shippable stories.
+  Each story should deliver a vertical slice of functionality with its own tests
+  included in the same story.
+coder_directive: ""
+story_ordering: Dependencies first; each story self-contained with its tests.

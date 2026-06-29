@@ -1,0 +1,42 @@
+id: generic
+display_name: Generic (auto-detect)
+# Backward-compatible fallback for projects without a chosen stack. Uses the
+# existing coder sandbox image and the stack-agnostic CI workflow.
+ci_image: node:20-bullseye
+coder_image: dev-agents/event-bus:latest
+default_sdlc: standard
+detect: []
+
+ci_workflow: |
+  name: CI
+
+  on:
+    push:
+    pull_request:
+
+  jobs:
+    test:
+      runs-on: ubuntu-latest
+      steps:
+        - name: Checkout
+          uses: actions/checkout@v4
+
+        - name: Detect stack and run tests
+          run: |
+            set -euo pipefail
+            if [ -f package.json ]; then
+              (npm ci || npm install)
+              npm test --if-present
+            elif [ -f pyproject.toml ] || [ -f requirements.txt ] || [ -d tests ]; then
+              python3 -m ensurepip --upgrade >/dev/null 2>&1 || true
+              python3 -m pip install --quiet --upgrade pip
+              if [ -f requirements.txt ]; then python3 -m pip install --quiet -r requirements.txt; fi
+              if [ -f pyproject.toml ]; then python3 -m pip install --quiet -e . || true; fi
+              python3 -m pip install --quiet pytest
+              python3 -m pytest -q
+            else
+              echo "No recognized test setup; nothing to run."
+            fi
+
+scaffold: {}
+best_practices_prompt: ""

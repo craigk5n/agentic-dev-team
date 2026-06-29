@@ -34,6 +34,7 @@ from collections.abc import Callable
 
 from event_bus.config import settings
 from event_bus.auth import check_basic_auth, is_exempt as auth_is_exempt
+from event_bus.catalog import get_catalog, reload_catalog
 from event_bus.cost_guard import over_budget
 from event_bus.ci_workflow import CI_WORKFLOW_PATH, CI_WORKFLOW_YAML
 from event_bus.config_store import get_config, patch_config
@@ -922,6 +923,35 @@ async def patch_runtime_config(request: Request):
     except Exception:
         raise HTTPException(status_code=400, detail="invalid JSON")
     return asdict(patch_config(_redis_or_503(), body))
+
+
+# ── Stack & SDLC catalog API (EPIC 1) ─────────────────────────────────────────
+
+@app.get("/api/stacks")
+async def list_stacks():
+    """The tech stacks the Planner can propose (used by the approval UI)."""
+    cat = get_catalog()
+    return {"stacks": [
+        {"id": s.id, "display_name": s.display_name, "default_sdlc": s.default_sdlc}
+        for s in cat.list_stacks()
+    ]}
+
+
+@app.get("/api/sdlc")
+async def list_sdlc_styles():
+    """The SDLC styles that shape story decomposition."""
+    cat = get_catalog()
+    return {"sdlc": [
+        {"id": s.id, "display_name": s.display_name} for s in cat.list_sdlc()
+    ]}
+
+
+@app.post("/api/catalog/reload", status_code=status.HTTP_200_OK)
+async def reload_catalog_endpoint():
+    """Re-read stack/SDLC definitions from disk (after adding a new one)."""
+    cat = reload_catalog()
+    log.info("catalog_reloaded", stacks=len(cat.stacks), sdlc=len(cat.sdlc))
+    return {"stacks": len(cat.stacks), "sdlc": len(cat.sdlc)}
 
 
 # ── Prompt management API ─────────────────────────────────────────────────────

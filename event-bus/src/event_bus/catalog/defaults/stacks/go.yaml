@@ -1,0 +1,48 @@
+id: go
+display_name: Go
+ci_image: golang:1.22
+coder_image: dev-agents/coder-go:latest
+default_sdlc: standard
+detect:
+  - go.mod
+  - "*.go"
+
+ci_workflow: |
+  name: CI
+  on:
+    push:
+    pull_request:
+
+  jobs:
+    test:
+      runs-on: ubuntu-latest
+      steps:
+        - uses: actions/checkout@v4
+        - uses: actions/setup-go@v5
+          with:
+            go-version: "1.22"
+        - name: Vet
+          run: go vet ./...
+        - name: Test
+          run: go test ./...
+
+scaffold:
+  go.mod: |
+    module project
+
+    go 1.22
+  main_test.go: |
+    package main
+
+    import "testing"
+
+    func TestSmoke(t *testing.T) {
+        if 1+1 != 2 {
+            t.Fatal("math is broken")
+        }
+    }
+
+best_practices_prompt: |
+  Write idiomatic Go: short names, early returns, explicit error handling (wrap with
+  %w). Keep packages cohesive. Avoid unnecessary interfaces. Use table-driven tests
+  with the standard testing package and run go vet clean.
