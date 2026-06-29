@@ -1,0 +1,10 @@
+# Per-stack coder image: Python.
+# Base = the default coder image (has python3 + coding_agent + git; opencode is
+# mounted at runtime, not baked). Adds the Python lint/test toolchain so the coder
+# can run tests in-sandbox once that behavior is added (Story 5.1 / true TDD).
+ARG BASE_IMAGE=dev-agents/event-bus:latest
+FROM ${BASE_IMAGE}
+
+RUN pip install --no-cache-dir ruff pytest
+
+LABEL dev-agents.coder-stack="python"
