@@ -8,7 +8,7 @@ A self-hosted autonomous coding team. You describe what to build and approve ide
 >
 > **Every idea you submit kicks off LLM calls across the whole pipeline (idea → planner → coder → reviewer + tester + security).** If the board is reachable by someone you don't trust — because auth is disabled, the password is weak, or the URL is on the public internet — **a stranger can run up your LLM bill,** exhaust your API quota, or get your provider account flagged. With a paid `ANTHROPIC_API_KEY` / `OPENROUTER_API_KEY`, that is real money.
 >
-> **Keep a strong `BOARD_AUTH_PASSWORD`, and bind the board to `localhost` or a trusted private LAN.** Basic auth is one layer — for anything internet-facing, also front it with a VPN or a TLS-terminating reverse proxy. See [Security & access](#security--access).
+> **The one rule that matters: don't expose `:8090` to the internet or an untrusted network.** This is meant to run on your laptop or a trusted home LAN, where keeping a `BOARD_AUTH_PASSWORD` set is enough. See [Security & access](#security--access).
 
 ## How it works
 
@@ -63,11 +63,11 @@ cp .env.example .env        # fill in API keys and secrets
 ./verify.sh                 # smoke-tests all APIs
 ```
 
-Then open `http://localhost:8090` to access the board — **on this machine only.** Do not forward this port or bind it to a public interface (see below).
+Then open `http://localhost:8090` to access the board. Reach it from your machine or trusted LAN — just don't forward the port to the internet (see below).
 
 ## Security & access
 
-This system is designed for a **single operator on a trusted machine or LAN.** Understand these properties before deploying:
+This system is designed for a **single operator on a laptop or trusted home LAN** — running it "mostly unsecured" on your own network is the intended mode, not a compromise. The model is simple: **keep the board off untrusted networks, and keep a `BOARD_AUTH_PASSWORD` set.** Understand these properties:
 
 - **The board uses one shared Basic Auth login.** Endpoints under `http://<host>:8090` — submitting ideas, approving/rejecting, approving PR merges, and changing runtime config (gate flags, model selection, rate limits) — require `BOARD_AUTH_USER` + `BOARD_AUTH_PASSWORD`. There is no per-user model; it's a single operator credential. **If `BOARD_AUTH_PASSWORD` is blank, auth is disabled and the board is fully open** (the event bus logs a `board_auth_disabled` warning at startup, and `verify.sh` flags it).
 - **Weak/disabled auth = open wallet.** Submitting an idea triggers the full agent pipeline, and every stage is an LLM call. Anyone who gets in can submit ideas in a loop and **drive up your LLM bill, burn through your API quota, or get your provider account suspended.** Highest risk with a paid `ANTHROPIC_API_KEY` / `OPENROUTER_API_KEY`; even "free" OpenRouter models have rate limits an attacker can exhaust.
@@ -77,12 +77,13 @@ This system is designed for a **single operator on a trusted machine or LAN.** U
 **Do:**
 - Set a **strong `BOARD_AUTH_PASSWORD`** (`setup.sh` generates one; don't blank it).
 - Keep the board bound to `localhost` (default) or a private network segment you control.
-- For anything internet-facing, also front it with a **VPN** (WireGuard/Tailscale) or a **TLS reverse proxy** (nginx/Caddy) — Basic Auth over plain HTTP sends credentials reversibly, so add TLS.
-- Set per-role **rate and concurrency limits** (`PATCH /api/config`) and prefer free/local models as a cost backstop — defense-in-depth, not a substitute for the above.
+- Set per-role **rate and concurrency limits** and a **daily cost cap** (`PATCH /api/config`) as a bill backstop, and prefer free/local models — defense-in-depth, not a substitute for the above.
 - Keep `SANDBOX_MODE=docker` so coding agents run with scoped, least-privilege credentials that cannot push to `main`.
 
 **Don't:**
 - Don't blank `BOARD_AUTH_PASSWORD`, port-forward `:8090` on your router, bind it to `0.0.0.0` on an untrusted network, or share the URL/credentials with people you wouldn't hand your API key to.
+
+**Do you need TLS/HTTPS?** For localhost or a trusted home LAN, **no** — and don't bother with a hand-rolled self-signed cert (browser warnings, `curl -k`, little benefit). `http://localhost` is already a browser-trusted secure context. TLS only matters if you reach the board from *outside* your trusted network, and the right tool there is a **VPN** (Tailscale/WireGuard) — it restricts access *and* encrypts, and Tailscale even issues a real, browser-trusted cert (`tailscale cert`). Reach for that instead of exposing the port; if you specifically want LAN HTTPS without warnings, **mkcert** installs a locally-trusted CA.
 
 Forgejo has its own admin login (`FORGEJO_ADMIN_PASSWORD`); the reviewer/coder agents authenticate to it with scoped API tokens, not the admin password.
 
