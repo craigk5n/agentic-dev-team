@@ -1,11 +1,16 @@
 id: tdd
 display_name: Test-Driven Development
 planner_directive: |
-  Use strict TDD. For each unit of functionality, create TWO sequenced stories:
-  first a "Write failing tests for X" story (define the behavior as executable
-  tests), then an "Implement X to pass the tests" story. The test story must come
-  before its implementation story in sequence.
+  Use TDD as a discipline WITHIN each story — do not split tests and implementation
+  into separate stories. Decompose the work into small, independently testable units
+  of functionality, one story per unit. Each story must deliver BOTH the tests and
+  the implementation that makes them pass, so its PR is self-contained and passes CI.
+  Do NOT create separate "write failing tests" / "implement" stories: a test-only PR
+  is red by design and would block merge. Phrase each story test-first, e.g.
+  "Implement X (test-first): add tests covering <behavior>, then the code to pass them".
 coder_directive: |
-  Follow red-green-refactor: ensure the new tests fail first, then write the
-  minimal code to make them pass, then refactor. Do not modify the tests to pass.
-story_ordering: For each feature, the write-tests story precedes its implement story.
+  Work test-first (red-green-refactor) within this one story: write the tests first
+  and run them to confirm they fail, then write the minimal code to make them pass,
+  then refactor. The PR you open must contain both the tests and the implementation
+  and must pass them. Never weaken or delete tests just to make them pass.
+story_ordering: One story per testable unit; tests and implementation ship together (test-first within the story).

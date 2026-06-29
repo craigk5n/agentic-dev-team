@@ -110,9 +110,14 @@ class TestDefaults:
         assert "pyproject.toml" in py.scaffold
         assert py.best_practices_prompt
 
-    def test_tdd_directive_orders_tests_first(self):
+    def test_tdd_directive_keeps_tests_and_impl_in_one_story(self):
         tdd = load_sdlc()["tdd"]
-        assert "fail" in tdd.planner_directive.lower()
+        d = tdd.planner_directive.lower()
+        # TDD is a per-story discipline; tests + impl ship together so each PR is
+        # CI-green (no separate test-only story whose PR is red by design).
+        assert "test-first" in d
+        assert "separate" in d            # explicitly warns against splitting
+        assert tdd.coder_directive.strip()
 
 
 # ── catalog + fallback (Story 1.5 / 1.6) ──────────────────────────────────────
