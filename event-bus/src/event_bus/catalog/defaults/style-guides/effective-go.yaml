@@ -1,0 +1,14 @@
+id: effective-go
+display_name: Effective Go
+applies_to_stacks: [go]
+prompt: |
+  Follow Effective Go and standard Go idioms:
+  - Format with gofmt; short, lower-case package names; MixedCaps for exported names,
+    mixedCaps for unexported. Short receiver and local names.
+  - Return errors as the last value; handle them explicitly and wrap with `%w` for
+    context. Don't panic for ordinary errors.
+  - Accept interfaces, return concrete types; keep interfaces small and define them at
+    the consumer. Avoid premature abstraction.
+  - Use early returns to reduce nesting; defer cleanup right after acquiring a resource.
+  - Document exported identifiers with comments starting with the identifier name.
+  - Use table-driven tests with the standard testing package; keep `go vet` clean.

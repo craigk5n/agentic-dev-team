@@ -75,3 +75,20 @@ class TestStackProposal:
         g = _stack_guidance([{"id": "go", "display_name": "Go"}],
                             [{"id": "tdd", "display_name": "TDD"}])
         assert "go" in g and "tdd" in g and "generic" in g
+
+
+class TestStyleGuideProposal:
+    def test_options_forwarded_and_field_present(self):
+        from idea_agent.generator import _style_guidance, _STYLE_FIELD
+        g = _style_guidance([{"id": "google-python", "display_name": "Google Python"}])
+        assert "google-python" in g
+        assert "proposed_style_guides" in _STYLE_FIELD
+
+    def test_expand_forwards_style_options(self):
+        from idea_agent.main import expand_idea
+        from unittest.mock import patch
+        opts = [{"id": "human-voice", "display_name": "Human"}]
+        with patch("idea_agent.main.expand_prompt",
+                   return_value={"title": "T", "description": "D"}) as mock:
+            expand_idea("p", style_guide_options=opts)
+        assert mock.call_args.kwargs["style_guide_options"] == opts

@@ -1228,3 +1228,51 @@ class TestPostMergeCi:
         monkeypatch.setattr(m, "_run_coding_agent", lambda *a, **k: dispatched.append(1))
         m._post_merge_fix("s-1", "failure")
         assert dispatched == []  # cap reached -> no further auto-fix, left for a human
+
+
+# ── Style guides: proposal, approval override, injection ──────────────────────
+
+class TestStyleGuidesApi:
+    def test_list_style_guides_endpoint(self, client):
+        resp = client.get("/api/style-guides")
+        assert resp.status_code == 200
+        ids = {g["id"] for g in resp.json()["style_guides"]}
+        assert {"google-python", "human-voice"} <= ids
+        assert all("applies_to_stacks" in g for g in resp.json()["style_guides"])
+
+    def test_idea_persists_applicable_guides_only(self, client, monkeypatch):
+        monkeypatch.setattr("event_bus.main.over_budget", lambda *a, **k: False)
+        # propose a python-applicable guide + a go-only guide; only the applicable one sticks
+        prop = {"title": "T", "description": "D", "proposed_stack": "python",
+                "proposed_sdlc": "standard",
+                "proposed_style_guides": ["google-python", "effective-go", "human-voice"]}
+        with patch("idea_agent.main.expand_idea", return_value=prop):
+            resp = client.post("/api/ideas", json={"prompt": "x"})
+        body = resp.json()
+        guides = (body.get("style_guides") or "").split(",")
+        assert "google-python" in guides and "human-voice" in guides
+        assert "effective-go" not in guides   # go-only, dropped for a python project
+
+    def test_approve_accepts_style_guide_override(self, client):
+        from event_bus.work_store import create_item, get_item
+        it = create_item(item_type="idea", title="T", state="pending-approval",
+                         stack="python", sdlc="standard", style_guides=["human-voice"])
+        with patch("event_bus.main._run_planner", new_callable=AsyncMock):
+            resp = client.post(f"/api/items/{it['id']}/approve",
+                               json={"style_guides": ["google-python", "conventional-commits"]})
+        assert resp.status_code == 200
+        assert "google-python" in get_item(it["id"])["style_guides"]
+
+    def test_approve_rejects_unknown_guide(self, client):
+        from event_bus.work_store import create_item
+        it = create_item(item_type="idea", title="T", state="pending-approval")
+        resp = client.post(f"/api/items/{it['id']}/approve", json={"style_guides": ["bogus-guide"]})
+        assert resp.status_code == 422
+
+    def test_coder_prompt_includes_guides(self):
+        from event_bus.main import _augment_coder_prompt
+        from event_bus.catalog import get_catalog
+        c = get_catalog()
+        out = _augment_coder_prompt("base", c.get_stack("python"), c.get_sdlc("standard"),
+                                    c.get_style_guides(["google-python"]))
+        assert "Google Python" in out and "docstring" in out.lower()

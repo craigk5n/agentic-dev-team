@@ -32,6 +32,7 @@ _STACK_FIELDS = (
     '\n  "proposed_sdlc": "<one sdlc id from the list>",'
     '\n  "stack_rationale": "<one sentence on why this stack fits>"'
 )
+_STYLE_FIELD = ',\n  "proposed_style_guides": ["<zero or more style-guide ids from the list>"]'
 
 
 def _stack_guidance(stack_options: list[dict], sdlc_options: list[dict]) -> str:
@@ -47,20 +48,34 @@ def _stack_guidance(stack_options: list[dict], sdlc_options: list[dict]) -> str:
     )
 
 
+def _style_guidance(style_guide_options: list[dict]) -> str:
+    if not style_guide_options:
+        return ""
+    guides = ", ".join(f"{s['id']} ({s.get('display_name', s['id'])})" for s in style_guide_options)
+    return (
+        f"\nAlso recommend any code-style guides that fit this project (use the ids; "
+        f"choose zero or more). Available: {guides}."
+    )
+
+
 def expand_prompt(prompt: str, *, model: str, api_key: str = "", redis_conn=None,
                   stack_options: list[dict] | None = None,
-                  sdlc_options: list[dict] | None = None) -> dict:
+                  sdlc_options: list[dict] | None = None,
+                  style_guide_options: list[dict] | None = None) -> dict:
     """Call LLM to turn a one-liner into a structured idea dict.
 
     When stack_options/sdlc_options are given, the proposal also includes
     proposed_stack, proposed_sdlc, and stack_rationale (constrained to the lists).
+    style_guide_options adds proposed_style_guides (a list).
     """
     stack_options = stack_options or []
     sdlc_options = sdlc_options or []
+    style_guide_options = style_guide_options or []
+    stack_fields = (_STACK_FIELDS if stack_options else "") + (_STYLE_FIELD if style_guide_options else "")
     user_msg = _PROMPT.format(
         prompt=prompt,
-        stack_fields=_STACK_FIELDS if stack_options else "",
-        stack_guidance=_stack_guidance(stack_options, sdlc_options),
+        stack_fields=stack_fields,
+        stack_guidance=_stack_guidance(stack_options, sdlc_options) + _style_guidance(style_guide_options),
     )
     kwargs: dict = {
         "model": model,

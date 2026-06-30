@@ -62,3 +62,15 @@ class SdlcStyle(BaseModel):
     coder_directive: str = ""
     # Free-text hint describing story ordering rules (e.g. "tests before impl").
     story_ordering: str = ""
+
+
+class StyleGuide(BaseModel):
+    """A selectable, composable code-style guide injected into coder + reviewer prompts."""
+    model_config = {"extra": "forbid"}
+
+    id: str = Field(pattern=_SLUG)
+    display_name: str
+    # Distilled guidance (a checklist, not the full source guide) added to prompts.
+    prompt: str
+    # Stacks this guide applies to; empty = cross-cutting (applies to every stack).
+    applies_to_stacks: list[str] = Field(default_factory=list)

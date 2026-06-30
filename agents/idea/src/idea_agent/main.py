@@ -21,11 +21,13 @@ def expand_idea(
     redis_conn=None,
     stack_options: list[dict] | None = None,
     sdlc_options: list[dict] | None = None,
+    style_guide_options: list[dict] | None = None,
 ) -> dict:
     """
     Expand a prompt into a structured proposal dict.
     Returns {title, description, ...} — persistence is handled by the caller.
-    When stack_options/sdlc_options are given, also proposes a stack + SDLC.
+    When stack_options/sdlc_options are given, also proposes a stack + SDLC,
+    and style_guide_options adds proposed_style_guides.
     """
     log.info("idea_agent_start", prompt=prompt[:80])
     proposal = expand_prompt(
@@ -35,6 +37,7 @@ def expand_idea(
         redis_conn=redis_conn,
         stack_options=stack_options,
         sdlc_options=sdlc_options,
+        style_guide_options=style_guide_options,
     )
     log.info("idea_agent_done", title=proposal.get("title", ""),
              stack=proposal.get("proposed_stack"))

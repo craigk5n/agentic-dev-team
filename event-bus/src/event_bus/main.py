@@ -43,7 +43,8 @@ from event_bus.dispatch import dispatch_forgejo_event
 from event_bus.work_store import (
     create_item, get_item, grouped_items, list_items, update_state, set_pr_url, set_repo,
     unlock_next_story, find_item_by_pr_url, get_repo_for_story, set_stack_sdlc,
-    get_stack_sdlc_for_story, STATE_COLORS, get_db
+    get_stack_sdlc_for_story, set_style_guides, get_style_guides_for_story,
+    STATE_COLORS, get_db
 )
 from event_bus.telemetry import get_telemetry_summary, render_prometheus
 from event_bus.events.forgejo import ForgejoPREvent, ForgejoReviewEvent
@@ -289,11 +290,13 @@ async def submit_idea(request: Request):
     cat = get_catalog()
     stack_options = [{"id": s.id, "display_name": s.display_name} for s in cat.list_stacks()]
     sdlc_options = [{"id": s.id, "display_name": s.display_name} for s in cat.list_sdlc()]
+    style_options = [{"id": g.id, "display_name": g.display_name} for g in cat.list_style_guides()]
 
     try:
         from idea_agent.main import expand_idea
         proposal = expand_idea(prompt, model_override=model_override, redis_conn=_redis_conn,
-                               stack_options=stack_options, sdlc_options=sdlc_options)
+                               stack_options=stack_options, sdlc_options=sdlc_options,
+                               style_guide_options=style_options)
     except ImportError:
         raise HTTPException(status_code=503, detail="idea_agent package not installed")
     except Exception as exc:
@@ -303,6 +306,9 @@ async def submit_idea(request: Request):
     # Constrain the proposal to the catalog; unknown/empty resolves to generic/standard.
     stack = cat.get_stack(proposal.get("proposed_stack")).id
     sdlc = cat.get_sdlc(proposal.get("proposed_sdlc")).id
+    # Keep proposed guides that exist AND apply to the chosen stack.
+    applicable = {g.id for g in cat.style_guides_for_stack(stack)}
+    guides = [g for g in (proposal.get("proposed_style_guides") or []) if g in applicable]
 
     item = create_item(
         item_type="idea",
@@ -314,8 +320,10 @@ async def submit_idea(request: Request):
         stack=stack,
         sdlc=sdlc,
         stack_rationale=(proposal.get("stack_rationale") or "")[:500],
+        style_guides=guides,
     )
-    log.info("idea_submitted", id=item["id"], title=item["title"], stack=stack, sdlc=sdlc)
+    log.info("idea_submitted", id=item["id"], title=item["title"], stack=stack, sdlc=sdlc,
+             guides=guides)
     return item
 
 
@@ -395,21 +403,31 @@ async def approve_item(item_id: str, request: Request):
         pass
     cat = get_catalog()
     new_stack, new_sdlc = body.get("stack"), body.get("sdlc")
+    new_guides = body.get("style_guides")
     if new_stack is not None and not cat.has_stack(new_stack):
         raise HTTPException(status_code=422, detail=f"unknown stack: {new_stack!r}")
     if new_sdlc is not None and not cat.has_sdlc(new_sdlc):
         raise HTTPException(status_code=422, detail=f"unknown sdlc: {new_sdlc!r}")
+    if new_guides is not None:
+        if not isinstance(new_guides, list):
+            raise HTTPException(status_code=422, detail="style_guides must be a list")
+        for g in new_guides:
+            if not cat.has_style_guide(g):
+                raise HTTPException(status_code=422, detail=f"unknown style guide: {g!r}")
     if new_stack is not None or new_sdlc is not None:
         set_stack_sdlc(
             item_id,
             new_stack if new_stack is not None else item.get("stack"),
             new_sdlc if new_sdlc is not None else item.get("sdlc"),
         )
+    if new_guides is not None:
+        set_style_guides(item_id, new_guides)
 
     updated = update_state(item_id, "approved")
     final = get_item(item_id) or item
     log.info("idea_approved", id=item_id, title=item["title"],
-             stack=final.get("stack"), sdlc=final.get("sdlc"))
+             stack=final.get("stack"), sdlc=final.get("sdlc"),
+             guides=final.get("style_guides"))
     # Kick off planner in the background so the response returns immediately
     asyncio.create_task(_run_planner(item_id, item["title"], item["description"] or ""))
     return updated
@@ -559,6 +577,7 @@ async def _run_planner(item_id: str, title: str, description: str) -> None:
         return
 
     stories = plan.get("stories", [])
+    idea_guides = [g for g in (item.get("style_guides") or "").split(",") if g]
     first_story: dict = {}
     for i, story in enumerate(stories):
         # Only the first story starts ready; the rest are backlog until their predecessor merges
@@ -574,6 +593,7 @@ async def _run_planner(item_id: str, title: str, description: str) -> None:
             repo=repo_full,
             stack=stack.id,
             sdlc=sdlc.id,
+            style_guides=idea_guides,
         )
         log.info("story_created", id=story_item["id"], seq=i + 1, state=state,
                  title=story_item["title"], repo=repo_full)
@@ -629,13 +649,16 @@ def _coder_context(item_id: str):
     return cat.get_stack(stack_id), cat.get_sdlc(sdlc_id)
 
 
-def _augment_coder_prompt(story_prompt: str, stack, sdlc) -> str:
-    """Prepend stack conventions + SDLC coder directive to the coder's prompt."""
+def _augment_coder_prompt(story_prompt: str, stack, sdlc, guides=()) -> str:
+    """Prepend stack conventions + SDLC coder directive + style guides to the prompt."""
     extra = []
     if stack.best_practices_prompt.strip():
         extra.append("Stack conventions:\n" + stack.best_practices_prompt.strip())
     if sdlc.coder_directive.strip():
         extra.append("Development style:\n" + sdlc.coder_directive.strip())
+    for g in guides:
+        if g.prompt.strip():
+            extra.append(f"Style guide — {g.display_name}:\n" + g.prompt.strip())
     if not extra:
         return story_prompt
     return (story_prompt or "").rstrip() + "\n\n" + "\n\n".join(extra)
@@ -742,7 +765,8 @@ async def _run_coding_agent(item_id: str, title: str, description: str, story_pr
         description = f"repo: {repo}\n{description}"
     # Resolve the story's stack/SDLC → augment the prompt (5.3) + pick the image (5.2)
     stack, sdlc = _coder_context(item_id)
-    story_prompt = _augment_coder_prompt(story_prompt, stack, sdlc)
+    guides = get_catalog().get_style_guides(get_style_guides_for_story(item_id))
+    story_prompt = _augment_coder_prompt(story_prompt, stack, sdlc, guides)
     log_cb = _make_log_cb(item_id)
     log.info("coding_agent_dispatch", id=item_id, mode=settings.sandbox_mode,
              stack=stack.id, coder_image=stack.coder_image)
@@ -1197,12 +1221,24 @@ async def list_sdlc_styles():
     ]}
 
 
+@app.get("/api/style-guides")
+async def list_style_guides():
+    """The code-style guides the user can apply (multi-select at approval)."""
+    cat = get_catalog()
+    return {"style_guides": [
+        {"id": g.id, "display_name": g.display_name, "applies_to_stacks": g.applies_to_stacks}
+        for g in cat.list_style_guides()
+    ]}
+
+
 @app.post("/api/catalog/reload", status_code=status.HTTP_200_OK)
 async def reload_catalog_endpoint():
-    """Re-read stack/SDLC definitions from disk (after adding a new one)."""
+    """Re-read stack/SDLC/style-guide definitions from disk (after adding a new one)."""
     cat = reload_catalog()
-    log.info("catalog_reloaded", stacks=len(cat.stacks), sdlc=len(cat.sdlc))
-    return {"stacks": len(cat.stacks), "sdlc": len(cat.sdlc)}
+    log.info("catalog_reloaded", stacks=len(cat.stacks), sdlc=len(cat.sdlc),
+             style_guides=len(cat.style_guides))
+    return {"stacks": len(cat.stacks), "sdlc": len(cat.sdlc),
+            "style_guides": len(cat.style_guides)}
 
 
 # ── Prompt management API ─────────────────────────────────────────────────────

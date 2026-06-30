@@ -184,3 +184,31 @@ class TestCatalogApi:
         resp = client.post("/api/catalog/reload")
         assert resp.status_code == 200
         assert resp.json()["stacks"] >= 4 and resp.json()["sdlc"] >= 3
+
+
+# ── Style guides ──────────────────────────────────────────────────────────────
+
+class TestStyleGuides:
+    def test_seed_guides_present(self):
+        from event_bus.catalog import get_catalog
+        ids = {g.id for g in get_catalog().list_style_guides()}
+        assert {"google-python", "human-voice", "conventional-commits",
+                "google-typescript", "effective-go"} <= ids
+
+    def test_filter_by_stack(self):
+        from event_bus.catalog import get_catalog
+        c = get_catalog()
+        py = {g.id for g in c.style_guides_for_stack("python")}
+        assert "google-python" in py            # python-scoped
+        assert "human-voice" in py              # cross-cutting
+        assert "effective-go" not in py         # go-scoped, excluded
+        # cross-cutting guides always present
+        assert "conventional-commits" in {g.id for g in c.style_guides_for_stack("go")}
+
+    def test_get_and_has(self):
+        from event_bus.catalog import get_catalog
+        c = get_catalog()
+        assert c.has_style_guide("human-voice")
+        assert not c.has_style_guide("nope")
+        got = c.get_style_guides(["google-python", "nope", "human-voice"])
+        assert [g.id for g in got] == ["google-python", "human-voice"]  # unknown dropped

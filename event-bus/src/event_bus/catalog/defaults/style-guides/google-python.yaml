@@ -1,0 +1,17 @@
+id: google-python
+display_name: Google Python Style Guide
+applies_to_stacks: [python]
+prompt: |
+  Follow the Google Python Style Guide (on top of PEP 8):
+  - Module/function/class docstrings in Google format: a one-line summary, then
+    Args:, Returns:, Raises: sections where relevant.
+  - Explicit, absolute imports; import modules not individual names where it aids
+    readability; never use wildcard imports.
+  - Prefer comprehensions and generator expressions when they stay simple; avoid
+    nesting them more than one level.
+  - Use guard clauses / early returns over deep nesting. Default arguments must not
+    be mutable.
+  - Name with snake_case for functions/variables, CapWords for classes, and
+    CONSTANT_CASE for module-level constants. Avoid single-character names except
+    for counters/iterators.
+  - Catch specific exceptions, never bare `except:`. Keep public APIs fully typed.

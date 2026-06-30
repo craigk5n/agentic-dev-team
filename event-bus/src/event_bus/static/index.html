@@ -543,6 +543,11 @@ button.approve-btn:hover { background: rgba(34,197,94,.25); }
   background: rgba(99,102,241,.18); color: #a5b4fc;
   border: 1px solid rgba(99,102,241,.35); vertical-align: middle;
 }
+.guide-wrap { margin-bottom: 6px; }
+.guide-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 3px; }
+.guide-pickers { display: flex; flex-direction: column; gap: 2px; }
+.guide-opt { font-size: 11px; color: inherit; display: flex; align-items: center; gap: 5px; cursor: pointer; }
+.guide-opt input { margin: 0; }
 .stack-cost { margin-top: 16px; max-width: 420px; }
 .stack-cost-title { color: var(--muted); font-size: 12px; margin-bottom: 6px; text-transform: uppercase; letter-spacing: .04em; }
 button.reject-btn {
@@ -1077,17 +1082,30 @@ button.code-btn:hover { background: rgba(59,130,246,.25); }
 const ROLES = ['idea', 'planner', 'coder', 'reviewer', 'tester', 'security'];
 
 // Stack/SDLC catalog options (cached; loaded lazily for the approval UI).
-let STACK_OPTS = [], SDLC_OPTS = [];
+let STACK_OPTS = [], SDLC_OPTS = [], GUIDE_OPTS = [];
 async function loadCatalogOptions() {
   if (STACK_OPTS.length) return;
   try {
-    const [st, sd] = await Promise.all([api('/api/stacks'), api('/api/sdlc')]);
+    const [st, sd, gd] = await Promise.all([api('/api/stacks'), api('/api/sdlc'), api('/api/style-guides')]);
     STACK_OPTS = st.stacks || [];
     SDLC_OPTS = sd.sdlc || [];
+    GUIDE_OPTS = gd.style_guides || [];
   } catch (e) { /* approval UI degrades to plain approve */ }
 }
 function optionList(opts, selected) {
   return opts.map(o => `<option value="${o.id}"${o.id === selected ? ' selected' : ''}>${escHtml(o.display_name)}</option>`).join('');
+}
+// Style guides applicable to a stack (cross-cutting ones + stack-scoped ones).
+function guidesForStack(stackId) {
+  return GUIDE_OPTS.filter(g => !(g.applies_to_stacks || []).length || (g.applies_to_stacks || []).includes(stackId));
+}
+function guideChecklist(itemId, stackId, selected) {
+  const sel = new Set(selected || []);
+  const guides = guidesForStack(stackId);
+  if (!guides.length) return '';
+  return `<div class="guide-pickers" data-id="${itemId}">` + guides.map(g =>
+    `<label class="guide-opt"><input type="checkbox" class="apr-guide" data-id="${itemId}" value="${g.id}"${sel.has(g.id) ? ' checked' : ''}> ${escHtml(g.display_name)}</label>`
+  ).join('') + `</div>`;
 }
 
 // ── Tab routing ───────────────────────────────────────────────────────────────
@@ -1663,7 +1681,10 @@ async function loadBoard() {
             <select class="apr-stack" data-id="${item.id}" title="Tech stack">${optionList(STACK_OPTS, item.stack)}</select>
             <select class="apr-sdlc" data-id="${item.id}" title="SDLC style">${optionList(SDLC_OPTS, item.sdlc)}</select>
           </div>` : '';
-        actions = `${rationale}${stackSel}<div class="board-item-actions">
+        const selGuides = (item.style_guides || '').split(',').filter(Boolean);
+        const guidesBox = GUIDE_OPTS.length
+          ? `<div class="guide-wrap" data-id="${item.id}"><div class="guide-label">Style guides</div>${guideChecklist(item.id, item.stack, selGuides)}</div>` : '';
+        actions = `${rationale}${stackSel}${guidesBox}<div class="board-item-actions">
           <button class="approve-btn" data-id="${item.id}">Approve</button>
           <button class="reject-btn" data-id="${item.id}">Reject</button>
         </div>`;
@@ -1704,6 +1725,17 @@ async function loadBoard() {
   container.innerHTML = html;
   refreshTimestamps();
 
+  // Changing the stack re-filters the applicable style guides (keep still-valid checks)
+  container.querySelectorAll('.apr-stack').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const id = sel.dataset.id;
+      const wrap = container.querySelector(`.guide-pickers[data-id="${id}"]`);
+      if (!wrap) return;
+      const checked = [...container.querySelectorAll(`.apr-guide[data-id="${id}"]:checked`)].map(c => c.value);
+      wrap.outerHTML = guideChecklist(id, sel.value, checked);
+    });
+  });
+
   // Approve / Reject buttons
   container.querySelectorAll('.approve-btn').forEach(btn => {
     btn.addEventListener('click', async (e) => {
@@ -1715,6 +1747,9 @@ async function loadBoard() {
       const body = {};
       if (stackSel) body.stack = stackSel.value;
       if (sdlcSel) body.sdlc = sdlcSel.value;
+      if (GUIDE_OPTS.length) {
+        body.style_guides = [...container.querySelectorAll(`.apr-guide[data-id="${id}"]:checked`)].map(c => c.value);
+      }
       const r = await fetch(`/api/items/${id}/approve`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

@@ -17,7 +17,7 @@ import structlog
 import yaml
 from pydantic import ValidationError
 
-from event_bus.catalog.schema import SdlcStyle, StackDefinition
+from event_bus.catalog.schema import SdlcStyle, StackDefinition, StyleGuide
 
 log = structlog.get_logger()
 
@@ -62,3 +62,7 @@ def load_stacks(dirs: list[Path] | None = None) -> dict[str, StackDefinition]:
 
 def load_sdlc(dirs: list[Path] | None = None) -> dict[str, SdlcStyle]:
     return _load_kind(dirs or catalog_dirs(), "sdlc", SdlcStyle)
+
+
+def load_style_guides(dirs: list[Path] | None = None) -> dict[str, StyleGuide]:
+    return _load_kind(dirs or catalog_dirs(), "style-guides", StyleGuide)

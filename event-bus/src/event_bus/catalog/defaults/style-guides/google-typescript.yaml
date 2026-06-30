@@ -1,0 +1,14 @@
+id: google-typescript
+display_name: Google TypeScript Style Guide
+applies_to_stacks: [node-ts]
+prompt: |
+  Follow the Google TypeScript Style Guide:
+  - Prefer `const`; use `let` only when reassigning; never `var`. Use `===`/`!==`.
+  - Name with lowerCamelCase for variables/functions, UpperCamelCase for types/classes,
+    CONSTANT_CASE for module constants. No `I`-prefix on interfaces.
+  - Annotate exported/public signatures; let inference handle obvious locals. Avoid
+    `any` — prefer `unknown` plus narrowing.
+  - Use ES module imports/exports; avoid default exports in favor of named exports.
+  - Prefer interfaces/types for shapes; use readonly and immutability where practical.
+  - Handle async with async/await and explicit error handling; never leave floating
+    promises.

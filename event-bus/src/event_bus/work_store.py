@@ -70,6 +70,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             stack       TEXT,
             sdlc        TEXT,
             stack_rationale TEXT,
+            style_guides TEXT,
             created_at  TEXT NOT NULL,
             updated_at  TEXT NOT NULL
         );
@@ -78,7 +79,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     """)
     # Migrate existing DBs that pre-date optional columns
     for col, definition in [("pr_url", "TEXT"), ("sequence", "INTEGER"), ("repo", "TEXT"),
-                            ("stack", "TEXT"), ("sdlc", "TEXT"), ("stack_rationale", "TEXT")]:
+                            ("stack", "TEXT"), ("sdlc", "TEXT"), ("stack_rationale", "TEXT"),
+                            ("style_guides", "TEXT")]:
         try:
             conn.execute(f"ALTER TABLE work_items ADD COLUMN {col} {definition}")
             conn.commit()
@@ -100,24 +102,31 @@ def create_item(
     stack: str = "",
     sdlc: str = "",
     stack_rationale: str = "",
+    style_guides: Optional[list[str]] = None,
     item_id: Optional[str] = None,
     created_at: Optional[str] = None,
 ) -> dict:
     item_id = item_id or str(uuid.uuid4())
     now = created_at or _now()
+    guides_csv = ",".join(style_guides) if style_guides else None
     with _lock:
         db = get_db()
         db.execute(
             """INSERT INTO work_items
                (id, type, title, prompt, description, state, parent_id, sequence,
-                model_used, repo, stack, sdlc, stack_rationale, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                model_used, repo, stack, sdlc, stack_rationale, style_guides,
+                created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (item_id, item_type, title, prompt, description, state, parent_id,
              sequence, model_used, repo or None, stack or None, sdlc or None,
-             stack_rationale or None, now, now),
+             stack_rationale or None, guides_csv, now, now),
         )
         db.commit()
     return get_item(item_id)
+
+
+def _parse_guides(csv: str | None) -> list[str]:
+    return [g for g in (csv or "").split(",") if g]
 
 
 def set_stack_sdlc(item_id: str, stack: str | None, sdlc: str | None) -> dict | None:
@@ -130,6 +139,44 @@ def set_stack_sdlc(item_id: str, stack: str | None, sdlc: str | None) -> dict | 
         )
         db.commit()
     return get_item(item_id)
+
+
+def set_style_guides(item_id: str, style_guides: list[str]) -> dict | None:
+    """Set/override the selected style guides on an item (e.g. at approval)."""
+    csv = ",".join(style_guides) if style_guides else None
+    with _lock:
+        db = get_db()
+        db.execute(
+            "UPDATE work_items SET style_guides=?, updated_at=? WHERE id=?",
+            (csv, _now(), item_id),
+        )
+        db.commit()
+    return get_item(item_id)
+
+
+def get_style_guides_for_story(item_id: str) -> list[str]:
+    """Return the style-guide ids for a story, inheriting from its parent idea when unset."""
+    item = get_item(item_id)
+    if not item:
+        return []
+    guides = _parse_guides(item.get("style_guides"))
+    if not guides and item.get("parent_id"):
+        parent = get_item(item["parent_id"]) or {}
+        guides = _parse_guides(parent.get("style_guides"))
+    return guides
+
+
+def get_style_guides_for_repo(repo: str) -> list[str]:
+    """Return the style-guide ids for a repo (all its items share the idea's guides)."""
+    if not repo:
+        return []
+    with _lock:
+        row = get_db().execute(
+            "SELECT style_guides FROM work_items "
+            "WHERE repo=? AND style_guides IS NOT NULL AND style_guides != '' LIMIT 1",
+            (repo,),
+        ).fetchone()
+    return _parse_guides(row["style_guides"]) if row else []
 
 
 def get_stack_sdlc_for_story(item_id: str) -> tuple[str | None, str | None]:

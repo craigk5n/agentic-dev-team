@@ -1,0 +1,10 @@
+id: conventional-commits
+display_name: Conventional Commits
+prompt: |
+  Use Conventional Commits for every commit message and PR title:
+  - Format: `<type>(<optional scope>): <description>` — imperative, lower-case, no
+    trailing period; keep the summary under ~72 chars.
+  - Types: feat, fix, docs, style, refactor, perf, test, build, ci, chore.
+  - Use `feat` for new behavior and `fix` for bug fixes. A breaking change adds `!`
+    after the type/scope and a `BREAKING CHANGE:` footer.
+  - Put extra detail (why, not just what) in the commit body, separated by a blank line.

@@ -58,13 +58,21 @@ def handle_pr_event(
         from event_bus.main import _stack_id_for_repo
         from event_bus.catalog import get_catalog
         owner, repo = repo_full_name.split("/", 1)
-        stack = get_catalog().get_stack(_stack_id_for_repo(owner, repo))
+        cat = get_catalog()
+        stack = cat.get_stack(_stack_id_for_repo(owner, repo))
         stack_id = stack.id
         if stack.best_practices_prompt.strip():
             reviewer_task_prompt += (
                 "\n\nStack conventions to check (this is a "
                 f"{stack.display_name} project):\n" + stack.best_practices_prompt.strip()
             )
+        # Make the reviewer check adherence to the project's chosen style guides.
+        from event_bus.work_store import get_style_guides_for_repo
+        for g in cat.get_style_guides(get_style_guides_for_repo(repo_full_name)):
+            if g.prompt.strip():
+                reviewer_task_prompt += (
+                    f"\n\nStyle guide to check — {g.display_name}:\n" + g.prompt.strip()
+                )
     except Exception as exc:
         log.warning("reviewer_stack_resolve_skipped", error=str(exc))
 

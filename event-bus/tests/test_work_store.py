@@ -316,3 +316,22 @@ class TestStackSdlcFields:
         idea = create_item(item_type="idea", title="I", stack="go", sdlc="tdd")
         story = create_item(item_type="story", title="S", parent_id=idea["id"])
         assert get_stack_sdlc_for_story(story["id"]) == ("go", "tdd")
+
+
+class TestStyleGuidesStore:
+    def test_create_and_inherit(self):
+        from event_bus.work_store import (create_item, get_style_guides_for_story,
+                                          get_style_guides_for_repo, set_style_guides)
+        idea = create_item(item_type="idea", title="I", style_guides=["google-python", "human-voice"])
+        story = create_item(item_type="story", title="S", parent_id=idea["id"], repo="o/r")
+        # story inherits the idea's guides
+        assert get_style_guides_for_story(story["id"]) == ["google-python", "human-voice"]
+        # repo lookup finds them
+        idea2 = create_item(item_type="idea", title="I2", repo="o/r2", style_guides=["effective-go"])
+        assert get_style_guides_for_repo("o/r2") == ["effective-go"]
+
+    def test_set_override(self):
+        from event_bus.work_store import create_item, set_style_guides, get_item, _parse_guides
+        it = create_item(item_type="idea", title="I", style_guides=["human-voice"])
+        set_style_guides(it["id"], ["google-python", "conventional-commits"])
+        assert _parse_guides(get_item(it["id"])["style_guides"]) == ["google-python", "conventional-commits"]
