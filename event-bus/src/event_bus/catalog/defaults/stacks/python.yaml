@@ -24,22 +24,35 @@ ci_workflow: |
             set -euo pipefail
             # The runner image lacks pip; install it (EPIC 5 prebuilt images remove this).
             apt-get update -qq && apt-get install -y -qq python3-pip >/dev/null
-            python3 -m pip install --quiet --upgrade ruff pytest mypy pip-audit
-            if [ -f requirements.txt ]; then python3 -m pip install --quiet -r requirements.txt; fi
-            if [ -f pyproject.toml ]; then python3 -m pip install --quiet -e . || true; fi
+            python3 -m pip install --quiet --upgrade ruff pytest mypy pip-audit tomli
+            # Install the project + its declared dependencies. Best-effort editable
+            # install, then install the declared deps directly so a dropped build
+            # backend can't stop the tests from importing them.
+            python3 -m pip install -q -e . 2>/dev/null || true
+            if [ -f requirements.txt ]; then python3 -m pip install -q -r requirements.txt || true; fi
+            DEPS=""
+            if grep -Eq '^[[:space:]]*dependencies[[:space:]]*=[[:space:]]*\[[[:space:]]*["A-Za-z]' pyproject.toml 2>/dev/null; then
+              python3 -c "import tomli; d=tomli.load(open('pyproject.toml','rb')); print('\n'.join(d.get('project',{}).get('dependencies',[])))" > /tmp/declared-deps.txt || true
+              if [ -s /tmp/declared-deps.txt ]; then python3 -m pip install -q -r /tmp/declared-deps.txt || true; DEPS=1; fi
+            fi
             ruff check .
-            mypy .
+            # Type-check the source. Flags are on the CLI (not reliant on the coder
+            # leaving [tool.mypy] intact); target src/ when present so a module under
+            # src isn't found twice (as both "mod" and "src.mod") from the repo root.
+            if [ -d src ]; then
+              mypy --explicit-package-bases --ignore-missing-imports src
+            else
+              mypy --explicit-package-bases --ignore-missing-imports --exclude '(^|/)(tests|build|dist)/' .
+            fi
             python3 -m pytest -q
             # Vulnerability scan — scoped to the project's OWN declared dependencies
             # (auditing the whole environment would flag the runner's base packages).
             if [ -s requirements.txt ]; then
               echo "Auditing requirements.txt for known vulnerabilities..."
               pip-audit -r requirements.txt
-            elif grep -Eq '^[[:space:]]*dependencies[[:space:]]*=[[:space:]]*\[[[:space:]]*["A-Za-z]' pyproject.toml 2>/dev/null; then
+            elif [ -n "$DEPS" ] && [ -s /tmp/declared-deps.txt ]; then
               echo "Auditing declared dependencies for known vulnerabilities..."
-              python3 -m pip install -q tomli
-              python3 -c "import tomli; d=tomli.load(open('pyproject.toml','rb')); print('\n'.join(d.get('project',{}).get('dependencies',[])))" > /tmp/declared-deps.txt
-              if [ -s /tmp/declared-deps.txt ]; then pip-audit -r /tmp/declared-deps.txt; else echo "no parseable dependencies"; fi
+              pip-audit -r /tmp/declared-deps.txt
             else
               echo "No third-party dependencies declared — skipping vulnerability scan."
             fi
@@ -116,6 +129,8 @@ best_practices_prompt: |
     - ruff   (lint / style)
     - mypy   (static type-checking)
     - pytest (tests, with clear arrange/act/assert)
-  If you add third-party dependencies, pin them in pyproject.toml and prefer well-
-  maintained libraries with no known advisories — imported dependencies are scanned for
-  known vulnerabilities with pip-audit in CI, which will fail the build if any are found.
+  If you add third-party dependencies, add them to pyproject.toml's [project.dependencies]
+  and keep the existing [build-system], [tool.setuptools], [tool.ruff], [tool.mypy], and
+  [tool.pytest.ini_options] sections intact. Pin deps and prefer well-maintained libraries
+  with no known advisories — imported dependencies are scanned for known vulnerabilities
+  with pip-audit in CI, which will fail the build if any are found.
