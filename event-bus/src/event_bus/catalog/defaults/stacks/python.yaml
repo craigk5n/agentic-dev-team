@@ -30,13 +30,16 @@ ci_workflow: |
             ruff check .
             mypy .
             python3 -m pytest -q
-            # Vulnerability scan — only when the project declares third-party dependencies.
+            # Vulnerability scan — scoped to the project's OWN declared dependencies
+            # (auditing the whole environment would flag the runner's base packages).
             if [ -s requirements.txt ]; then
               echo "Auditing requirements.txt for known vulnerabilities..."
               pip-audit -r requirements.txt
             elif grep -Eq '^[[:space:]]*dependencies[[:space:]]*=[[:space:]]*\[[[:space:]]*["A-Za-z]' pyproject.toml 2>/dev/null; then
               echo "Auditing declared dependencies for known vulnerabilities..."
-              pip-audit
+              python3 -m pip install -q tomli
+              python3 -c "import tomli; d=tomli.load(open('pyproject.toml','rb')); print('\n'.join(d.get('project',{}).get('dependencies',[])))" > /tmp/declared-deps.txt
+              if [ -s /tmp/declared-deps.txt ]; then pip-audit -r /tmp/declared-deps.txt; else echo "no parseable dependencies"; fi
             else
               echo "No third-party dependencies declared — skipping vulnerability scan."
             fi
