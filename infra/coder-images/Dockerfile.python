@@ -5,6 +5,6 @@
 ARG BASE_IMAGE=dev-agents/event-bus:latest
 FROM ${BASE_IMAGE}
 
-RUN pip install --no-cache-dir ruff pytest
+RUN pip install --no-cache-dir ruff pytest mypy pip-audit
 
 LABEL dev-agents.coder-stack="python"

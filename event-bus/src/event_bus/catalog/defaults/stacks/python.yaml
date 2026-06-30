@@ -19,16 +19,27 @@ ci_workflow: |
       runs-on: ubuntu-latest
       steps:
         - uses: actions/checkout@v4
-        - name: Install, lint, test
+        - name: Install, lint, type-check, test, audit
           run: |
             set -euo pipefail
             # The runner image lacks pip; install it (EPIC 5 prebuilt images remove this).
             apt-get update -qq && apt-get install -y -qq python3-pip >/dev/null
-            python3 -m pip install --quiet --upgrade ruff pytest
+            python3 -m pip install --quiet --upgrade ruff pytest mypy pip-audit
             if [ -f requirements.txt ]; then python3 -m pip install --quiet -r requirements.txt; fi
             if [ -f pyproject.toml ]; then python3 -m pip install --quiet -e . || true; fi
             ruff check .
+            mypy .
             python3 -m pytest -q
+            # Vulnerability scan — only when the project declares third-party dependencies.
+            if [ -s requirements.txt ]; then
+              echo "Auditing requirements.txt for known vulnerabilities..."
+              pip-audit -r requirements.txt
+            elif grep -Eq '^[[:space:]]*dependencies[[:space:]]*=[[:space:]]*\[[[:space:]]*["A-Za-z]' pyproject.toml 2>/dev/null; then
+              echo "Auditing declared dependencies for known vulnerabilities..."
+              pip-audit
+            else
+              echo "No third-party dependencies declared — skipping vulnerability scan."
+            fi
 
 scaffold:
   pyproject.toml: |
@@ -55,6 +66,14 @@ scaffold:
     "tests/*" = ["F401", "F811"]
     # Package __init__.py files routinely re-export symbols for the public API.
     "__init__.py" = ["F401"]
+
+    [tool.mypy]
+    # Lenient static type-checking: resolve the src/ layout, tolerate third-party
+    # packages without stubs, and don't type-check the test suite.
+    ignore_missing_imports = true
+    explicit_package_bases = true
+    mypy_path = "src"
+    exclude = "(^|/)(tests|build|dist)/"
 
     [tool.pytest.ini_options]
     testpaths = ["tests"]
@@ -84,6 +103,13 @@ scaffold:
 test_command: "python3 -m pytest -q"
 
 best_practices_prompt: |
-  Write idiomatic, PEP 8-compliant Python. Use type hints on all function signatures.
-  Prefer small, focused functions and dataclasses for data. Handle errors explicitly;
-  never swallow exceptions silently. Write pytest tests with clear arrange/act/assert.
+  Write idiomatic, PEP 8-compliant Python with type hints on every function signature.
+  Prefer small, focused functions and dataclasses for data; handle errors explicitly and
+  never swallow exceptions silently. Your code must pass the project's checks — run all
+  three locally and fix every issue before finishing:
+    - ruff   (lint / style)
+    - mypy   (static type-checking)
+    - pytest (tests, with clear arrange/act/assert)
+  If you add third-party dependencies, pin them in pyproject.toml and prefer well-
+  maintained libraries with no known advisories — imported dependencies are scanned for
+  known vulnerabilities with pip-audit in CI, which will fail the build if any are found.

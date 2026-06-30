@@ -110,6 +110,15 @@ class TestDefaults:
         assert "pyproject.toml" in py.scaffold
         assert py.best_practices_prompt
 
+    def test_python_runs_ruff_mypy_pytest_and_audit(self):
+        py = load_stacks()["python"]
+        for tool in ("ruff", "mypy", "pytest", "pip-audit"):
+            assert tool in py.ci_workflow, f"CI workflow should run {tool}"
+        # prompt nudges the coder to use the same tools
+        prompt = py.best_practices_prompt.lower()
+        for tool in ("ruff", "mypy", "pytest", "pip-audit"):
+            assert tool in prompt, f"prompt should mention {tool}"
+
     def test_tdd_directive_keeps_tests_and_impl_in_one_story(self):
         tdd = load_sdlc()["tdd"]
         d = tdd.planner_directive.lower()

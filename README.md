@@ -18,16 +18,28 @@ A self-hosted autonomous coding team. You describe what to build and approve ide
 You submit an idea
   → Idea Agent expands it into a structured proposal (+ proposes a tech stack & SDLC style)
   → You approve it (confirm or override the stack & style)
-    → Planner Agent decomposes it into stories (per the SDLC style — e.g. TDD = tests first)
-      → Coding Agent implements each story and opens a PR (in the stack's image, with its conventions)
+    → Planner Agent decomposes it into stories (per the SDLC style — e.g. TDD = tests-first)
+      → Coding Agent implements each story, runs the stack's tests in its sandbox, opens a PR
         → Reviewer + Tester + Security agents evaluate the PR in parallel
-          → All verdicts green → PR merges → next story picks up
+          → All verdicts + CI green → PR merges → CI re-runs on main →
+            pass → story done, next story starts   |   fail → back to a developer
 ```
 
 **Stack-aware:** each project is tailored to a tech stack (Python, Node+TS, Go, …) and an
 SDLC style (standard, TDD, spec-first) chosen at approval — driving the CI workflow,
-scaffold, prompts, and per-stack cost telemetry. The catalog is config-driven; adding a
-stack needs no code change. See **[docs/STACKS.md](docs/STACKS.md)**.
+scaffold, prompts, per-stack coder image, and per-stack cost telemetry. The catalog is
+config-driven; adding a stack needs no code change. See **[docs/STACKS.md](docs/STACKS.md)**.
+
+**Quality gates & resilience:**
+- **Stack-appropriate CI** — Python enforces `ruff` (lint), `mypy` (types), `pytest`, and
+  `pip-audit` (dependency vulnerability scan) on any imported dependencies.
+- **In-coder TDD** — the coder runs the stack's tests in its sandbox and iterates to green
+  *before* opening a PR, so fewer PRs arrive broken.
+- **Merge-conflict recovery** — a story branched from a stale `main` is auto-rebased and its
+  conflicts resolved, instead of stalling.
+- **Post-merge CI gate** — `merged` is transient: CI runs on `main` after the merge; only on
+  success does the story become `done` and the next story start. A failure returns it to a
+  developer (with a capped automatic fix attempt).
 
 ## Agents
 
@@ -35,10 +47,12 @@ stack needs no code change. See **[docs/STACKS.md](docs/STACKS.md)**.
 |---|---|---|---|
 | Idea | Claude / OpenRouter | Manual prompt | Structured proposal → `pending-approval` |
 | Planner | Claude / OpenRouter | Idea approved | Stories with sequence, repo, description |
-| Coder | opencode (any model) | Story `ready` | Branch + PR → story `in-review` |
+| Coder | opencode (any model) | Story `ready` | Branch + in-sandbox tests + PR → story `in-review` |
 | Reviewer | Claude / OpenRouter | PR opened | Code review verdict (pass/warn/fail) |
 | Tester | OpenRouter | PR opened | Test run verdict |
 | Security | OpenRouter | PR opened | SAST + secret scan verdict |
+
+A PR auto-merges only when all three verdicts and CI are green (plus any enabled human gate); the coder runs in a per-stack image, in an ephemeral sandbox with scoped credentials that cannot push to `main`.
 
 ## Human approval gates
 
@@ -110,9 +124,13 @@ See `infra/.env.example` for the full list.
 
 ```
 idea:   pending-approval → approved → rejected
-story:  backlog → ready → in-progress → in-review → approved → merged → done
+story:  backlog → ready → in-progress → in-review → merged → done
                                       ↘ changes-requested → ready
 ```
+
+`merged` is **transient** — after a PR merges, CI runs on `main`; on success the story
+becomes `done` and the next sequenced story unlocks, on failure it returns to a developer
+(`changes-requested`). A story the coder finds nothing to implement goes straight to `done`.
 
 ## Repository layout
 
@@ -122,6 +140,7 @@ agents/
   planner/    # Planner Agent (litellm + OpenRouter)
   coding/     # Coding Agent (opencode subprocess)
   reviewer/   # Reviewer, Tester, Security agents + telemetry
-event-bus/    # FastAPI webhook receiver, work item store, board UI
-infra/        # Docker Compose files, setup scripts, .env.example
+event-bus/    # FastAPI webhook receiver, work item store, board UI, stack/SDLC catalog
+infra/        # Docker Compose files, setup scripts, .env.example, per-stack coder images
+docs/         # STACKS.md — the stack/SDLC catalog schema + how to add a stack
 ```
