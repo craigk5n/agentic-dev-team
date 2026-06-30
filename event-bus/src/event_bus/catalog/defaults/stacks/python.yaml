@@ -22,8 +22,9 @@ ci_workflow: |
         - name: Install, lint, type-check, test, audit
           run: |
             set -euo pipefail
-            # The runner image lacks pip; install it (EPIC 5 prebuilt images remove this).
-            apt-get update -qq && apt-get install -y -qq python3-pip >/dev/null
+            # The runner image lacks pip + venv; install them (EPIC 5 prebuilt images
+            # remove this). python3-venv is needed by pip-audit's isolated resolver.
+            apt-get update -qq && apt-get install -y -qq python3-pip python3-venv >/dev/null
             python3 -m pip install --quiet --upgrade ruff pytest mypy pip-audit tomli
             # Install the project + its declared dependencies. Best-effort editable
             # install, then install the declared deps directly so a dropped build
