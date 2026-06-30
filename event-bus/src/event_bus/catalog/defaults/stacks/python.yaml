@@ -17,15 +17,15 @@ ci_workflow: |
   jobs:
     test:
       runs-on: ubuntu-latest
+      # Run CI inside the prebuilt Python image: ruff/mypy/pytest/pip-audit/tomli + a
+      # working venv + git + node (for checkout) are all baked in, so there are no
+      # per-run toolchain installs and none of the bare-runner environment gaps.
+      container: dev-agents/coder-python:latest
       steps:
         - uses: actions/checkout@v4
-        - name: Install, lint, type-check, test, audit
+        - name: Install deps, lint, type-check, test, audit
           run: |
             set -euo pipefail
-            # The runner image lacks pip + venv; install them (EPIC 5 prebuilt images
-            # remove this). python3-venv is needed by pip-audit's isolated resolver.
-            apt-get update -qq && apt-get install -y -qq python3-pip python3-venv >/dev/null
-            python3 -m pip install --quiet --upgrade ruff pytest mypy pip-audit tomli
             # Install the project + its declared dependencies. Best-effort editable
             # install, then install the declared deps directly so a dropped build
             # backend can't stop the tests from importing them.
@@ -42,8 +42,10 @@ ci_workflow: |
             # src isn't found twice (as both "mod" and "src.mod") from the repo root.
             if [ -d src ]; then
               mypy --explicit-package-bases --ignore-missing-imports src
-            else
+            elif find . -name '*.py' -not -path './tests/*' -not -path './build/*' -not -path './dist/*' | grep -q .; then
               mypy --explicit-package-bases --ignore-missing-imports --exclude '(^|/)(tests|build|dist)/' .
+            else
+              echo "No source files to type-check yet."
             fi
             python3 -m pytest -q
             # Vulnerability scan — scoped to the project's OWN declared dependencies

@@ -1,6 +1,6 @@
-# Per-stack coder image: Node + TypeScript.
-# Base = the default coder image; adds the Node.js runtime so the coder can run
-# tsc/vitest in-sandbox once that behavior is added (Story 5.1 / true TDD).
+# Per-stack image: Node + TypeScript. Used both as the coder sandbox and the CI job
+# container. Base = the default coder image (+ git); adds the Node.js runtime (which
+# also satisfies actions/checkout's need for node when used as the CI container).
 ARG BASE_IMAGE=dev-agents/event-bus:latest
 FROM ${BASE_IMAGE}
 

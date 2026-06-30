@@ -1,10 +1,16 @@
-# Per-stack coder image: Python.
-# Base = the default coder image (has python3 + coding_agent + git; opencode is
-# mounted at runtime, not baked). Adds the Python lint/test toolchain so the coder
-# can run tests in-sandbox once that behavior is added (Story 5.1 / true TDD).
+# Per-stack image: Python. Used both as the coder sandbox and the CI job container.
+# Base = the default coder image (python3.12-slim + coding_agent + git; opencode is
+# mounted at runtime). Adds the lint/test toolchain and node (for actions/checkout).
 ARG BASE_IMAGE=dev-agents/event-bus:latest
 FROM ${BASE_IMAGE}
 
-RUN pip install --no-cache-dir ruff pytest mypy pip-audit
+# Python lint/test/audit toolchain (baked in so CI doesn't install it per-run).
+RUN pip install --no-cache-dir ruff pytest mypy pip-audit tomli
+
+# Node.js — required when this image is the CI job container, because Forgejo's
+# actions/checkout is a JS action that needs node.
+ARG NODE_VERSION=20.15.0
+ADD https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.gz /tmp/node.tgz
+RUN tar -C /usr/local --strip-components=1 -xzf /tmp/node.tgz && rm /tmp/node.tgz
 
 LABEL dev-agents.coder-stack="python"

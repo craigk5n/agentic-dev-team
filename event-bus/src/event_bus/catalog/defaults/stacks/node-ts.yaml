@@ -17,6 +17,8 @@ ci_workflow: |
   jobs:
     test:
       runs-on: ubuntu-latest
+      # Run CI inside the prebuilt Node image (node + npm + git baked in).
+      container: dev-agents/coder-node-ts:latest
       steps:
         - uses: actions/checkout@v4
         - name: Install, check, test

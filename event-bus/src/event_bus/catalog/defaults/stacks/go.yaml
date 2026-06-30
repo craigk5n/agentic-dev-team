@@ -16,15 +16,14 @@ ci_workflow: |
   jobs:
     test:
       runs-on: ubuntu-latest
+      # Run CI inside the prebuilt Go image (go toolchain + git + node for checkout
+      # baked in) — no per-run toolchain download.
+      container: dev-agents/coder-go:latest
       steps:
         - uses: actions/checkout@v4
-        - name: Install Go, vet, test
+        - name: Vet + test
           run: |
             set -euo pipefail
-            # Install the Go toolchain (the runner image has none; EPIC 5 prebuilt
-            # images remove this). A custom container: image can't run checkout (no node).
-            curl -sSL https://go.dev/dl/go1.22.5.linux-amd64.tar.gz | tar -C /usr/local -xz
-            export PATH="$PATH:/usr/local/go/bin"
             go vet ./...
             go test ./...
 
