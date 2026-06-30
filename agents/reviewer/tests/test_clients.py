@@ -108,3 +108,21 @@ def test_get_diff_returns_stdout(tmp_path):
         mock_run.side_effect = [fetch_result, diff_result]
         diff = get_diff(str(tmp_path), "main", "abc123")
     assert "+new line" in diff
+
+
+def test_update_pr_branch_success():
+    with respx.mock:
+        respx.post(f"{BASE}/api/v1/repos/alice/backend/pulls/7/update").mock(
+            return_value=httpx.Response(202, json={})
+        )
+        with ForgejoClient(BASE, "token") as client:
+            assert client.update_pr_branch("alice", "backend", 7) is True
+
+
+def test_update_pr_branch_conflict_returns_false():
+    with respx.mock:
+        respx.post(f"{BASE}/api/v1/repos/alice/backend/pulls/7/update").mock(
+            return_value=httpx.Response(409, json={"message": "conflict"})
+        )
+        with ForgejoClient(BASE, "token") as client:
+            assert client.update_pr_branch("alice", "backend", 7) is False

@@ -212,3 +212,38 @@ class TestApplyGate:
             result = apply_gate(r, "owner/repo", 1, verdicts)
         # 'warn' does not trigger security_signoff block → should auto-merge
         assert result["gate_status"] == "merged"
+
+
+class TestMergeabilityGate:
+    def test_conflict_triggers_recode(self):
+        r = _make_redis({"security_signoff": False, "pr_merge_approval": False})
+        with patch("reviewer.gate.ForgejoClient") as mock_fj, \
+             patch("reviewer.gate._trigger_recode") as recode:
+            ctx = MagicMock()
+            ctx.get_pr.return_value = {"mergeable": False, "head": {"ref": "br"},
+                                      "html_url": "http://f/owner/repo/pulls/1"}
+            ctx.update_pr_branch.return_value = False   # update can't resolve it
+            mock_fj.return_value.__enter__.return_value = ctx
+            from reviewer.gate import apply_gate
+            result = apply_gate(r, "owner/repo", 1, _verdicts("pass"))
+        assert result["gate_status"] == "changes_requested"
+        assert result["reason"] == "merge_conflict"
+        recode.assert_called_once()
+        ctx.merge_pr.assert_not_called()
+
+    def test_update_branch_resolves_then_merges(self):
+        r = _make_redis({"security_signoff": False, "pr_merge_approval": False})
+        with patch("reviewer.gate.ForgejoClient") as mock_fj:
+            ctx = MagicMock()
+            ctx.get_pr.side_effect = [
+                {"mergeable": False, "head": {"ref": "br"}, "html_url": "u"},
+                {"mergeable": True},
+                {"html_url": "u"},   # _auto_merge's post-merge get_pr
+            ]
+            ctx.update_pr_branch.return_value = True
+            ctx.merge_pr.return_value = {"merged": True}
+            mock_fj.return_value.__enter__.return_value = ctx
+            from reviewer.gate import apply_gate
+            result = apply_gate(r, "owner/repo", 1, _verdicts("pass"))
+        assert result["gate_status"] == "merged"
+        ctx.update_pr_branch.assert_called_once()

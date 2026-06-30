@@ -70,3 +70,19 @@ class ForgejoClient:
         )
         resp.raise_for_status()
         return {"merged": True, "pr_number": pr_number}
+
+    def update_pr_branch(self, owner: str, repo: str, pr_number: int,
+                         style: str = "merge") -> bool:
+        """Update a PR's head branch with its base (merge base into head).
+
+        Returns True if the branch was updated (now current with base), False if
+        the update could not be applied (e.g. a real merge conflict). style:
+        'merge' | 'rebase'.
+        """
+        resp = self._client.post(
+            f"/api/v1/repos/{owner}/{repo}/pulls/{pr_number}/update",
+            params={"style": style},
+        )
+        if resp.status_code in (200, 202):
+            return True
+        return False

@@ -99,3 +99,52 @@ class TestClone:
     def test_rejects_bad_url_format(self, tmp_path):
         with pytest.raises(ValueError, match="Unexpected"):
             git_ops.clone("not-a-url", "owner", "repo", "goodtoken", str(tmp_path / "out"))
+
+
+# ── merge_base_branch / has_unpushed (real git repos) ─────────────────────────
+
+def _git(args, cwd):
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+def _make_origin_with_branch(tmp_path):
+    """origin repo on main + a feature branch behind main, cloned into work/."""
+    origin = tmp_path / "origin"; origin.mkdir()
+    _git(["init", "-q", "-b", "main"], origin)
+    _git(["config", "user.email", "t@t"], origin); _git(["config", "user.name", "t"], origin)
+    (origin / "a.txt").write_text("base\n")
+    _git(["add", "-A"], origin); _git(["commit", "-q", "-m", "base"], origin)
+    _git(["checkout", "-q", "-b", "feature"], origin)
+    (origin / "b.txt").write_text("feature\n")
+    _git(["add", "-A"], origin); _git(["commit", "-q", "-m", "feat"], origin)
+    _git(["checkout", "-q", "main"], origin)
+    (origin / "c.txt").write_text("advanced\n")  # main moves ahead, no overlap with feature
+    _git(["add", "-A"], origin); _git(["commit", "-q", "-m", "advance main"], origin)
+    work = tmp_path / "work"
+    subprocess.run(["git", "clone", "-q", str(origin), str(work)], check=True, capture_output=True)
+    _git(["config", "user.email", "t@t"], work); _git(["config", "user.name", "t"], work)
+    _git(["checkout", "-q", "-b", "feature", "origin/feature"], work)
+    return work
+
+def test_merge_base_branch_clean(tmp_path):
+    work = _make_origin_with_branch(tmp_path)
+    assert git_ops.merge_base_branch(str(work), base="main") is True
+    # main's file is now present on the branch
+    assert (work / "c.txt").exists()
+
+def test_has_unpushed_true_after_merge(tmp_path):
+    work = _make_origin_with_branch(tmp_path)
+    assert git_ops.has_unpushed(str(work), "feature") is False
+    git_ops.merge_base_branch(str(work), base="main")
+    assert git_ops.has_unpushed(str(work), "feature") is True
+
+def test_merge_base_branch_conflict_returns_false(tmp_path):
+    work = _make_origin_with_branch(tmp_path)
+    origin = tmp_path / "origin"
+    # overlapping edit to a.txt on origin/main ...
+    _git(["checkout", "-q", "main"], origin)
+    (origin / "a.txt").write_text("main-side\n")
+    _git(["commit", "-qam", "edit a on main"], origin)
+    # ... and a different edit to a.txt on the feature branch (in work)
+    (work / "a.txt").write_text("feature-side\n")
+    _git(["commit", "-qam", "edit a on feature"], work)
+    assert git_ops.merge_base_branch(str(work), base="main") is False  # conflict

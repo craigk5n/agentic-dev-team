@@ -252,6 +252,19 @@ def fix_pr_review(
             git_ops.configure_identity(tmpdir, settings.git_author_name, settings.git_author_email)
             git_ops.checkout_branch(tmpdir, branch)
 
+            # Bring the branch up to date with base so a stale/conflicting PR can
+            # merge. A clean merge advances the branch; a conflict leaves markers for
+            # the agent to resolve below.
+            merge_clean = git_ops.merge_base_branch(tmpdir, base="main")
+            if not merge_clean and "conflict" not in (review_comments[-1].get("body", "").lower()
+                                                       if review_comments else ""):
+                review_comments = review_comments + [{
+                    "path": "",
+                    "body": "Resolve the git merge conflicts with `main`: remove all conflict "
+                            "markers (<<<<<<<, =======, >>>>>>>) and keep a correct, working "
+                            "combination of both sides.",
+                }]
+
             model = model_override or settings.model_coder
             summary = run_opencode_agent(
                 story_title=title,
@@ -265,11 +278,13 @@ def fix_pr_review(
             )
 
             sha = git_ops.commit_all(tmpdir, f"fix: address review comments\n\n{summary[:500]}")
-            if not sha:
+            # Push if the agent changed anything OR the merge advanced the branch.
+            if not sha and not git_ops.has_unpushed(tmpdir, branch):
                 log.warning("recode_no_changes", item_id=item_id)
                 return {"status": "no_changes", "item_id": item_id, "summary": summary}
 
             git_ops.push(tmpdir, branch)
+            sha = sha or git_ops._run(["git", "rev-parse", "HEAD"], cwd=tmpdir)
 
     log.info("recode_agent_done", item_id=item_id, sha=sha[:8])
     return {"status": "success", "item_id": item_id, "sha": sha, "summary": summary}

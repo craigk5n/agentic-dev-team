@@ -163,6 +163,12 @@ def apply_gate(
     if ci_outcome is not None:
         return ci_outcome
 
+    # Gate 4: the PR must be conflict-free with its base. A story branched from a
+    # stale main conflicts; try updating the branch from base, else recode to rebase.
+    merge_outcome = _mergeability_gate(r, owner, repo, pr_number, repo_full_name)
+    if merge_outcome is not None:
+        return merge_outcome
+
     # All checks pass — auto-merge
     return _auto_merge(owner, repo, pr_number, repo_full_name)
 
@@ -259,6 +265,50 @@ def _ci_gate(
         )
     log.info("ci_gate_timeout", repo=repo_full_name, pr=pr_number)
     return {"gate_status": "blocked", "reason": "ci_timeout"}
+
+
+def _mergeability_gate(
+    r: "redis_module.Redis",
+    owner: str,
+    repo: str,
+    pr_number: int,
+    repo_full_name: str,
+) -> dict | None:
+    """Ensure the PR can merge cleanly. Returns a gate-outcome if it blocks, else None.
+
+    If the PR isn't mergeable (its branch is behind/conflicts with base), first try
+    updating the branch from base. If that resolves it, proceed; otherwise trigger a
+    recode (the coder rebases on current base and resolves) instead of failing merge.
+    """
+    body = (
+        "⚠️ **Merge conflict with base** — this branch is behind `main` and conflicts. "
+        "The coding agent will rebase on the latest base and resolve."
+    )
+    try:
+        with ForgejoClient(settings.forgejo_base_url, settings.effective_forgejo_token) as fj:
+            pr = fj.get_pr(owner, repo, pr_number)
+            if pr.get("mergeable") is not False:
+                return None  # mergeable (or Forgejo hasn't computed it) — let merge proceed
+
+            # Behind/conflicting — try to bring the branch up to date with base.
+            if fj.update_pr_branch(owner, repo, pr_number):
+                pr = fj.get_pr(owner, repo, pr_number)
+                if pr.get("mergeable") is not False:
+                    log.info("mergeability_resolved_by_update", repo=repo_full_name, pr=pr_number)
+                    return None
+
+            head_ref = (pr.get("head") or {}).get("ref", "")
+            pr_url = pr.get("html_url", "")
+            fj.post_pr_comment(owner, repo, pr_number, body)
+    except Exception as exc:
+        # Can't determine mergeability — don't block; _auto_merge surfaces real failures.
+        log.warning("mergeability_gate_skipped", repo=repo_full_name, pr=pr_number, error=str(exc))
+        return None
+
+    _clear_verdicts(r, repo_full_name, pr_number)
+    _trigger_recode(repo_full_name, pr_number, pr_url, head_ref, body)
+    log.info("gate_merge_conflict", repo=repo_full_name, pr=pr_number)
+    return {"gate_status": "changes_requested", "reason": "merge_conflict"}
 
 
 def _auto_merge(owner: str, repo: str, pr_number: int, repo_full_name: str) -> dict:

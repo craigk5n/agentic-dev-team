@@ -128,6 +128,8 @@ class TestFixPrReview:
             patch("coding_agent.main.git_ops.clone"),
             patch("coding_agent.main.git_ops.configure_identity"),
             patch("coding_agent.main.git_ops.checkout_branch"),
+            patch("coding_agent.main.git_ops.merge_base_branch", return_value=True),
+            patch("coding_agent.main.git_ops.has_unpushed", return_value=False),
             patch("coding_agent.main.git_ops.commit_all", return_value=sha),
             patch("coding_agent.main.git_ops.push"),
             patch("coding_agent.main.run_opencode_agent", return_value="Fixed issues"),
@@ -151,6 +153,8 @@ class TestFixPrReview:
             patch("coding_agent.main.git_ops.clone"),
             patch("coding_agent.main.git_ops.configure_identity"),
             patch("coding_agent.main.git_ops.checkout_branch"),
+            patch("coding_agent.main.git_ops.merge_base_branch", return_value=True),
+            patch("coding_agent.main.git_ops.has_unpushed", return_value=False),
             patch("coding_agent.main.git_ops.commit_all", return_value=""),
             patch("coding_agent.main.run_opencode_agent", return_value="nothing to fix"),
             patch("coding_agent.main.tempfile.TemporaryDirectory") as mock_td,
@@ -162,6 +166,29 @@ class TestFixPrReview:
             )
         assert result["status"] == "no_changes"
         assert result["item_id"] == _UUID
+
+    def test_merge_advance_pushes_even_without_edits(self, tmp_path):
+        # Clean merge brought the branch current but opencode made no edits ->
+        # still push (the merge commit) and report success, not no_changes.
+        forgejo = _make_forgejo()
+        with (
+            patch("coding_agent.main.ForgejoClient", return_value=forgejo),
+            patch("coding_agent.main.git_ops.clone"),
+            patch("coding_agent.main.git_ops.configure_identity"),
+            patch("coding_agent.main.git_ops.checkout_branch"),
+            patch("coding_agent.main.git_ops.merge_base_branch", return_value=True),
+            patch("coding_agent.main.git_ops.has_unpushed", return_value=True),
+            patch("coding_agent.main.git_ops.commit_all", return_value=""),
+            patch("coding_agent.main.git_ops._run", return_value="c" * 40),
+            patch("coding_agent.main.git_ops.push") as push,
+            patch("coding_agent.main.run_opencode_agent", return_value="no edits"),
+            patch("coding_agent.main.tempfile.TemporaryDirectory") as mock_td,
+        ):
+            mock_td.return_value.__enter__.return_value = str(tmp_path)
+            mock_td.return_value.__exit__.return_value = False
+            result = fix_pr_review(_UUID, "t", "d", "branch", "alice/backend", [])
+        assert result["status"] == "success"
+        push.assert_called_once()
 
 
 # ── In-coder TDD: test-and-iterate loop ───────────────────────────────────────

@@ -9,8 +9,9 @@ from pathlib import Path
 def clone(base_url: str, owner: str, repo: str, api_token: str, dest: str, branch: str = "") -> None:
     """Clone a Forgejo repo into dest using token-embedded URL.
 
-    If branch is given, clone that specific branch (--branch <branch>).
-    This ensures PR commits are available in the shallow clone.
+    Clones full history (these repos are small) so the diff against the base branch
+    can be computed reliably. A shallow, single-branch clone hides the merge-base, so
+    `git diff base...head` came back empty and reviews ran on nothing.
     """
     if not base_url.startswith(("http://", "https://")):
         raise ValueError(f"Unexpected base_url scheme: {base_url!r}")
@@ -19,7 +20,7 @@ def clone(base_url: str, owner: str, repo: str, api_token: str, dest: str, branc
     url = f"{base_url.rstrip('/')}/{owner}/{repo}.git"
     scheme, rest = url.split("://", 1)
     auth_url = f"{scheme}://devadmin:{api_token}@{rest}"
-    cmd = ["git", "clone", "--depth", "50"]
+    cmd = ["git", "clone"]
     if branch:
         cmd += ["--branch", branch]
     cmd += [auth_url, dest]
@@ -35,16 +36,20 @@ def checkout(repo_dir: str, sha: str) -> None:
 
 
 def get_diff(repo_dir: str, base_ref: str, head_sha: str) -> str:
-    """Return the unified diff between base_ref and head_sha."""
-    # Make sure both refs are fetched
-    subprocess.run(
-        ["git", "fetch", "--depth", "50", "origin", base_ref],
-        cwd=repo_dir, capture_output=True,
-    )
+    """Return the unified diff of head_sha against base_ref (changes the PR adds)."""
+    # Ensure the base branch is present (full history → merge-base is reachable).
+    subprocess.run(["git", "fetch", "origin", base_ref], cwd=repo_dir, capture_output=True)
     result = subprocess.run(
         ["git", "diff", f"origin/{base_ref}...{head_sha}"],
         cwd=repo_dir,
         capture_output=True,
         text=True,
     )
-    return result.stdout
+    if result.stdout.strip():
+        return result.stdout
+    # Fall back to a two-dot diff if the merge-base form yields nothing.
+    two_dot = subprocess.run(
+        ["git", "diff", f"origin/{base_ref}..{head_sha}"],
+        cwd=repo_dir, capture_output=True, text=True,
+    )
+    return two_dot.stdout

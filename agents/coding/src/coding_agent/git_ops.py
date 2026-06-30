@@ -148,3 +148,32 @@ def commit_all(repo_dir: str, message: str) -> str:
 def push(repo_dir: str, branch_name: str) -> None:
     _run(["git", "push", "origin", branch_name], cwd=repo_dir)
     log.info("git_pushed", branch=branch_name)
+
+
+def merge_base_branch(repo_dir: str, base: str = "main") -> bool:
+    """Merge origin/<base> into the current branch to bring a stale PR up to date.
+
+    Returns True if the merge was clean. On conflict, returns False and leaves the
+    conflict markers in the working tree for the agent to resolve (the subsequent
+    commit_all completes the merge).
+    """
+    _run(["git", "fetch", "origin", base], cwd=repo_dir)
+    result = subprocess.run(
+        ["git", "merge", "--no-edit", f"origin/{base}"],
+        cwd=repo_dir, capture_output=True, text=True,
+    )
+    clean = result.returncode == 0
+    log.info("git_merge_base", base=base, clean=clean)
+    return clean
+
+
+def has_unpushed(repo_dir: str, branch_name: str) -> bool:
+    """True if the local branch has commits not yet on origin/<branch> (e.g. a merge)."""
+    out = subprocess.run(
+        ["git", "rev-list", "--count", f"origin/{branch_name}..HEAD"],
+        cwd=repo_dir, capture_output=True, text=True,
+    )
+    try:
+        return int(out.stdout.strip() or "0") > 0
+    except ValueError:
+        return False
