@@ -16,8 +16,8 @@ A self-hosted autonomous coding team. You describe what to build and approve ide
 
 ```
 You submit an idea
-  → Idea Agent expands it into a structured proposal (+ proposes a tech stack & SDLC style)
-  → You approve it (confirm or override the stack & style)
+  → Idea Agent expands it into a structured proposal (+ proposes a tech stack, SDLC style & code-style guides)
+  → You approve it (confirm or override the stack, style & guides)
     → Planner Agent decomposes it into stories (per the SDLC style — e.g. TDD = tests-first)
       → Coding Agent implements each story, runs the stack's tests in its sandbox, opens a PR
         → Reviewer + Tester + Security agents evaluate the PR in parallel
@@ -29,6 +29,23 @@ You submit an idea
 SDLC style (standard, TDD, spec-first) chosen at approval — driving the CI workflow,
 scaffold, prompts, per-stack coder image, and per-stack cost telemetry. The catalog is
 config-driven; adding a stack needs no code change. See **[docs/STACKS.md](docs/STACKS.md)**.
+
+**Code-style guides:** you can also pick one or more code-style guides (e.g. Google
+Python, Effective Go, Conventional Commits, or a "natural, human-sounding code" guide).
+The Idea Agent proposes a fitting set; you confirm or override at approval; the guidance
+is injected into the **coder** prompt (how it writes) and the **reviewer** prompt (what it
+checks). Guides are multi-select and composable, and stack-scoped ones only appear for the
+matching stack (Google Python won't show for a Go project).
+
+> **Why "distilled" guides?** Each guide ships a *concise checklist* (the rules that
+> matter), **not** the full document or a URL — the model can't fetch anything during a
+> call, and dumping a 40k-token style guide into every coder/reviewer call would be
+> redundant (the model already knows the famous public guides from training), dilute the
+> signal, and — since this system runs largely on free models that don't support prompt
+> caching — inflate the token cost of every call for no benefit. A focused checklist
+> reinforces the specifics while keeping each call lean. (For a *proprietary* guide the
+> model hasn't seen, full text + prompt caching would be the right tool — a possible
+> opt-in extension, not the default.)
 
 **Quality gates & resilience:**
 - **Stack-appropriate CI** — Python enforces `ruff` (lint), `mypy` (types), `pytest`, and
