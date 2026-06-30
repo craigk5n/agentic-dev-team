@@ -181,9 +181,11 @@ class TestWorkItemsApi:
         merged = {**self._ready, "state": "merged"}
         with patch("event_bus.main.get_item", return_value=in_review), \
              patch("event_bus.main.update_state", return_value=merged), \
-             patch("event_bus.main.unlock_next_story", return_value=None):
+             patch("event_bus.main.get_repo_for_story", return_value="dev/repo"), \
+             patch("event_bus.main._await_post_merge_ci", new_callable=AsyncMock):
             resp = client.post("/api/items/story-1/merged")
         assert resp.status_code == 200
+        assert resp.json()["post_merge_ci"] == "pending"
 
     def test_mark_merged_not_found(self, client):
         with patch("event_bus.main.get_item", return_value=None):
@@ -195,18 +197,18 @@ class TestWorkItemsApi:
             resp = client.post("/api/items/story-1/merged")
         assert resp.status_code == 409
 
-    def test_mark_merged_with_unlocked_story(self, client, monkeypatch):
+    def test_mark_merged_is_transient_pending_ci(self, client, monkeypatch):
         monkeypatch.setattr("event_bus.main._redis_conn", fakeredis.FakeRedis())
         in_review = {**self._ready, "state": "in-review"}
         merged = {**self._ready, "state": "merged"}
-        next_story = {"id": "story-2", "title": "Next", "state": "ready",
-                      "type": "story", "description": ""}
         with patch("event_bus.main.get_item", return_value=in_review), \
              patch("event_bus.main.update_state", return_value=merged), \
-             patch("event_bus.main.unlock_next_story", return_value=next_story):
+             patch("event_bus.main.get_repo_for_story", return_value="dev/repo"), \
+             patch("event_bus.main._await_post_merge_ci", new_callable=AsyncMock) as await_ci:
             resp = client.post("/api/items/story-1/merged")
         assert resp.status_code == 200
-        assert resp.json()["unlocked"] is not None
+        # unlock no longer happens at merge time; the post-merge CI gate drives it
+        await_ci.assert_called_once()
 
     def test_log_stream_item_not_found(self, client):
         with patch("event_bus.main.get_item", return_value=None):
@@ -313,7 +315,8 @@ class TestForgejoWebhookExtra:
                    "pull_request": {**FORGEJO_PR_OPENED["pull_request"], "merged": True}}
         with patch("event_bus.main.find_item_by_pr_url", return_value=story), \
              patch("event_bus.main.update_state", return_value=merged), \
-             patch("event_bus.main.unlock_next_story", return_value=None):
+             patch("event_bus.main.get_repo_for_story", return_value="dev/myrepo"), \
+             patch("event_bus.main._await_post_merge_ci", new_callable=AsyncMock):
             resp = self._post(client, payload)
         assert resp.status_code == 202
         assert resp.json()["result"] == "merged"
@@ -332,12 +335,12 @@ class TestForgejoWebhookExtra:
                    "pull_request": {**FORGEJO_PR_OPENED["pull_request"], "merged": True}}
         with patch("event_bus.main.find_item_by_pr_url", return_value=story), \
              patch("event_bus.main.update_state", return_value=merged), \
-             patch("event_bus.main.unlock_next_story", return_value=next_story), \
-             patch("event_bus.main.get_prompt", return_value=""), \
-             patch("event_bus.main._run_coding_agent", new_callable=AsyncMock):
+             patch("event_bus.main.get_repo_for_story", return_value="dev/myrepo"), \
+             patch("event_bus.main._await_post_merge_ci", new_callable=AsyncMock) as await_ci:
             resp = self._post(client, payload)
         assert resp.status_code == 202
-        assert resp.json()["unlocked"] == "s-2"
+        assert resp.json()["result"] == "merged"
+        await_ci.assert_called_once()
 
     def test_pr_synchronize_clears_retry_key(self, client):
         payload = {**FORGEJO_PR_OPENED,
@@ -409,22 +412,21 @@ class TestInternalEndpoints:
         assert resp.status_code == 200
         assert resp.json()["merged"]["state"] == "merged"
 
-    def test_internal_pr_merged_with_unlocked_story(self, client, monkeypatch):
+    def test_internal_pr_merged_sets_merged_pending_ci(self, client, monkeypatch):
         monkeypatch.setattr("event_bus.main._redis_conn", fakeredis.FakeRedis())
         merged = {**self._story, "state": "merged"}
-        next_s = {"id": "s-2", "title": "Next", "state": "ready", "type": "story",
-                  "description": ""}
         with patch("event_bus.main.find_item_by_pr_url", return_value=self._story), \
              patch("event_bus.main.update_state", return_value=merged), \
-             patch("event_bus.main.unlock_next_story", return_value=next_s), \
-             patch("event_bus.main.get_prompt", return_value=""), \
-             patch("event_bus.main._run_coding_agent", new_callable=AsyncMock):
+             patch("event_bus.main.get_repo_for_story", return_value="owner/repo"), \
+             patch("event_bus.main._await_post_merge_ci", new_callable=AsyncMock) as await_ci:
             resp = client.post("/internal/pr-merged", json={
                 "pr_url": "http://forgejo/owner/repo/pulls/5",
                 "pr_number": 5,
+                "repo_full_name": "owner/repo",
             })
         assert resp.status_code == 200
-        assert resp.json()["unlocked"] == "s-2"
+        assert resp.json()["post_merge_ci"] == "pending"
+        await_ci.assert_called_once()
 
     def test_internal_recode_no_story(self, client):
         with patch("event_bus.main.find_item_by_pr_url", return_value=None):
@@ -1152,3 +1154,77 @@ class TestReviewerStackPrompt:
              patch("event_bus.prompt_store.get_prompt", return_value="base task"):
             handle_pr_event("devadmin/repo", 1, "sha", "opened")
         assert "PEP 8" in captured.get("task_prompt", "")
+
+
+# ── Post-merge CI gate: merged -> (CI) -> done | back-to-dev ───────────────────
+
+class TestPostMergeCi:
+    def test_ci_success_marks_done_and_advances(self, monkeypatch):
+        import asyncio
+        from event_bus import main as m
+        states = {}
+        monkeypatch.setattr(m, "update_state", lambda i, s: states.__setitem__(i, s))
+        monkeypatch.setattr(m, "get_item", lambda i: {"id": i, "state": "merged"})
+        monkeypatch.setattr(m, "_get_branch_head", lambda *a, **k: "sha123")
+        monkeypatch.setattr(m, "_poll_commit_ci", lambda *a, **k: "success")
+        advanced = []
+        monkeypatch.setattr(m, "_advance_after_done", lambda i: advanced.append(i))
+        asyncio.run(m._await_post_merge_ci("s-1", "dev/repo"))
+        assert states["s-1"] == "done"
+        assert advanced == ["s-1"]
+
+    def test_ci_failure_returns_to_developer(self, monkeypatch):
+        import asyncio
+        from event_bus import main as m
+        states = []
+        monkeypatch.setattr(m, "update_state", lambda i, s: states.append(s))
+        monkeypatch.setattr(m, "get_item",
+                            lambda i: {"id": i, "state": "merged", "title": "T", "description": "d"})
+        monkeypatch.setattr(m, "_get_branch_head", lambda *a, **k: "sha")
+        monkeypatch.setattr(m, "_poll_commit_ci", lambda *a, **k: "failure")
+        fixes = []
+        monkeypatch.setattr(m, "_post_merge_fix", lambda i, res: fixes.append((i, res)))
+        asyncio.run(m._await_post_merge_ci("s-1", "dev/repo"))
+        assert "changes-requested" in states
+        assert fixes == [("s-1", "failure")]
+
+    def test_no_ci_workflow_still_marks_done(self, monkeypatch):
+        import asyncio
+        from event_bus import main as m
+        states = {}
+        monkeypatch.setattr(m, "update_state", lambda i, s: states.__setitem__(i, s))
+        monkeypatch.setattr(m, "get_item", lambda i: {"id": i, "state": "merged"})
+        monkeypatch.setattr(m, "_get_branch_head", lambda *a, **k: "sha")
+        monkeypatch.setattr(m, "_poll_commit_ci", lambda *a, **k: "none")
+        monkeypatch.setattr(m, "_advance_after_done", lambda i: None)
+        asyncio.run(m._await_post_merge_ci("s-1", "dev/repo"))
+        assert states["s-1"] == "done"
+
+    def test_poll_commit_ci_reads_status(self, monkeypatch):
+        from event_bus import main as m
+        import coding_agent.forgejo_client as fc
+        fj = MagicMock()
+        fj.get.return_value = {"state": "success", "statuses": [{"status": "success"}]}
+        FakeClient = MagicMock(); FakeClient.return_value.__enter__.return_value = fj
+        monkeypatch.setattr(fc, "ForgejoClient", FakeClient)
+        assert m._poll_commit_ci("dev/repo", "sha", timeout=5, interval=1, grace=1) == "success"
+
+    def test_poll_commit_ci_failure(self, monkeypatch):
+        from event_bus import main as m
+        import coding_agent.forgejo_client as fc
+        fj = MagicMock()
+        fj.get.return_value = {"state": "failure", "statuses": [{"status": "failure"}]}
+        FakeClient = MagicMock(); FakeClient.return_value.__enter__.return_value = fj
+        monkeypatch.setattr(fc, "ForgejoClient", FakeClient)
+        assert m._poll_commit_ci("dev/repo", "sha", timeout=5, interval=1, grace=1) == "failure"
+
+    def test_post_merge_fix_respects_cap(self, monkeypatch):
+        from event_bus import main as m
+        r = fakeredis.FakeRedis()
+        r.set("post_merge_fix:s-1", str(m._POST_MERGE_FIX_CAP))
+        monkeypatch.setattr(m, "_redis_conn", r)
+        monkeypatch.setattr(m, "get_item", lambda i: {"id": i, "title": "T", "description": "d"})
+        dispatched = []
+        monkeypatch.setattr(m, "_run_coding_agent", lambda *a, **k: dispatched.append(1))
+        m._post_merge_fix("s-1", "failure")
+        assert dispatched == []  # cap reached -> no further auto-fix, left for a human

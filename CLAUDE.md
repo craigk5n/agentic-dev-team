@@ -50,9 +50,14 @@ Dockerfiles (build-on-demand): `infra/coder-images/`.
 
 ```
 idea:    pending-approval -> approved -> rejected
-story:   backlog -> ready -> in-progress -> in-review -> approved -> merged -> done
+story:   backlog -> ready -> in-progress -> in-review -> merged -> done
                                          \-> changes-requested -> ready
 ```
+
+`merged` is **transient**: when a PR merges, CI runs on `main`. On success the story
+becomes `done` and the next sequenced story unlocks; on failure it returns to a
+developer (`changes-requested`, with a capped automatic fix attempt). A story the
+coder finds nothing to implement (`no_changes`) goes straight to `done` (no PR/CI).
 
 ## Human Approval Gates (config flags)
 

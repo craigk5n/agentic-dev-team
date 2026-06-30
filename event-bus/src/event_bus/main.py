@@ -237,25 +237,16 @@ async def forgejo_webhook(
         log.warning("forgejo_parse_error", error=str(exc))
         raise HTTPException(status_code=400, detail="payload validation failed") from exc
 
-    # Auto-advance story when PR is merged in Forgejo
+    # Auto-advance story when PR is merged in Forgejo. 'merged' is transient — the
+    # post-merge CI gate (in _on_story_merged) drives done/fix + unlocks the next story.
     if event.action == "closed" and event.pull_request.merged:
         pr_url = event.pull_request.html_url
         item = find_item_by_pr_url(pr_url)
         if item:
-            updated = update_state(item["id"], "merged")
-            unlocked = unlock_next_story(item["id"])
-            log.info("pr_merged_auto_advance",
-                     item_id=item["id"], pr=event.pr_number,
-                     next=unlocked["id"] if unlocked else None)
-            if unlocked:
-                update_state(unlocked["id"], "in-progress")
-                story_prompt = get_prompt(_redis_or_503(), "coder.story")
-                asyncio.create_task(_run_coding_agent(
-                    unlocked["id"], unlocked["title"], unlocked.get("description") or "", story_prompt,
-                ))
-                log.info("coding_agent_auto_triggered", story_id=unlocked["id"])
-            return {"result": "merged", "item_id": item["id"],
-                    "unlocked": unlocked["id"] if unlocked else None}
+            if item["state"] != "merged":  # ignore duplicate merged webhooks
+                _on_story_merged(item["id"], event.repo_full_name)
+            log.info("pr_merged_auto_advance", item_id=item["id"], pr=event.pr_number)
+            return {"result": "merged", "item_id": item["id"]}
         log.info("pr_merged_no_story", pr_url=pr_url)
         return {"result": "skipped", "reason": "no matching story for PR"}
 
@@ -907,6 +898,114 @@ async def _run_recode_agent(review_event: ForgejoReviewEvent) -> None:
 _MAX_RECODE_RETRIES = 3
 
 
+# ── Post-merge CI gate: merged is transient; CI on main decides done vs fix ────
+_POST_MERGE_CI_TIMEOUT = 600   # seconds to wait for CI on the merge commit
+_POST_MERGE_CI_GRACE = 60      # if no status appears by now, treat as "no CI workflow"
+_POST_MERGE_FIX_CAP = 2        # automated fix attempts before leaving it for a human
+
+
+def _get_branch_head(repo_full_name: str, branch: str = "main") -> str:
+    from coding_agent.forgejo_client import ForgejoClient
+    from coding_agent.config import settings as cs
+    owner, repo = repo_full_name.split("/", 1)
+    with ForgejoClient(cs.forgejo_base_url, cs.forgejo_api_token) as fj:
+        data = fj.get(f"/repos/{owner}/{repo}/branches/{branch}")
+    return (data.get("commit") or {}).get("id", "")
+
+
+def _poll_commit_ci(repo_full_name: str, sha: str,
+                    timeout: int = _POST_MERGE_CI_TIMEOUT,
+                    interval: int = 10, grace: int = _POST_MERGE_CI_GRACE) -> str:
+    """Poll a commit's CI status. Returns 'success' | 'failure' | 'none' | 'timeout'."""
+    import time as _t
+    from coding_agent.forgejo_client import ForgejoClient
+    from coding_agent.config import settings as cs
+    owner, repo = repo_full_name.split("/", 1)
+    start = _t.time()
+    with ForgejoClient(cs.forgejo_base_url, cs.forgejo_api_token) as fj:
+        while True:
+            try:
+                st = fj.get(f"/repos/{owner}/{repo}/commits/{sha}/status")
+            except Exception:
+                st = {}
+            state = st.get("state") or ""
+            statuses = st.get("statuses") or []
+            elapsed = _t.time() - start
+            if statuses:
+                if state == "success":
+                    return "success"
+                if state in ("failure", "error"):
+                    return "failure"
+            elif elapsed >= grace:
+                return "none"  # no CI workflow reported a status
+            if elapsed >= timeout:
+                return "timeout"
+            _t.sleep(interval)
+
+
+def _advance_after_done(item_id: str) -> None:
+    """Unlock + dispatch the next sequenced story once item_id is done."""
+    unlocked = unlock_next_story(item_id)
+    if unlocked:
+        update_state(unlocked["id"], "in-progress")
+        story_prompt = get_prompt(_redis_conn, "coder.story")
+        asyncio.create_task(_run_coding_agent(
+            unlocked["id"], unlocked["title"], unlocked.get("description") or "", story_prompt,
+        ))
+        log.info("coding_agent_auto_triggered", story_id=unlocked["id"])
+
+
+def _post_merge_fix(item_id: str, ci_result: str) -> None:
+    """Post-merge CI failed on main — return the story to a developer (capped auto-fix)."""
+    item = get_item(item_id) or {}
+    cap_key = f"post_merge_fix:{item_id}"
+    attempts = int((_redis_conn.get(cap_key) or 0)) if _redis_conn else 0
+    if attempts >= _POST_MERGE_FIX_CAP:
+        log.warning("post_merge_fix_cap_reached", item_id=item_id, attempts=attempts)
+        return  # leave it in changes-requested for a human
+    if _redis_conn:
+        _redis_conn.setex(cap_key, 86400, attempts + 1)
+    update_state(item_id, "in-progress")
+    story_prompt = get_prompt(_redis_conn, "coder.story")
+    desc = (item.get("description") or "") + (
+        f"\n\nNOTE: after merge, CI on `main` is failing ({ci_result}). Open a fix that "
+        "makes the test suite pass on main."
+    )
+    asyncio.create_task(_run_coding_agent(item_id, item.get("title", ""), desc, story_prompt))
+    log.info("post_merge_fix_dispatched", item_id=item_id, attempt=attempts + 1)
+
+
+async def _await_post_merge_ci(item_id: str, repo_full_name: str) -> None:
+    """After a PR merges, run/observe CI on main: success → done + advance; fail → back to dev."""
+    if not repo_full_name:
+        # No repo context to verify — don't strand the story.
+        update_state(item_id, "done")
+        _advance_after_done(item_id)
+        return
+    sha = await asyncio.to_thread(_get_branch_head, repo_full_name, "main")
+    result = await asyncio.to_thread(_poll_commit_ci, repo_full_name, sha)
+    item = get_item(item_id)
+    if not item or item.get("state") != "merged":
+        return  # state changed elsewhere; don't clobber
+    if result in ("success", "none"):
+        update_state(item_id, "done")
+        log.info("post_merge_ci_passed", item_id=item_id, ci=result, sha=sha[:8])
+        _advance_after_done(item_id)
+    else:
+        update_state(item_id, "changes-requested")
+        log.warning("post_merge_ci_failed", item_id=item_id, ci=result, sha=sha[:8])
+        _post_merge_fix(item_id, result)
+
+
+def _on_story_merged(item_id: str, repo_full_name: str = "") -> dict | None:
+    """A PR merged → 'merged' is transient; post-merge CI on main decides done vs fix.
+    The next story is NOT unlocked until this one reaches 'done' (CI-verified main)."""
+    updated = update_state(item_id, "merged")
+    repo = repo_full_name or get_repo_for_story(item_id)
+    asyncio.create_task(_await_post_merge_ci(item_id, repo))
+    return updated
+
+
 @app.post("/internal/pr-merged", status_code=status.HTTP_200_OK)
 async def internal_pr_merged(payload: dict):
     """Called by the reviewer gate after auto-merging a PR via the API."""
@@ -915,18 +1014,9 @@ async def internal_pr_merged(payload: dict):
     item = find_item_by_pr_url(pr_url) if pr_url else None
     if not item:
         raise HTTPException(status_code=404, detail="no story found for this PR")
-    updated = update_state(item["id"], "merged")
-    unlocked = unlock_next_story(item["id"])
-    log.info("internal_pr_merged", item_id=item["id"], pr=pr_number,
-             next=unlocked["id"] if unlocked else None)
-    if unlocked:
-        update_state(unlocked["id"], "in-progress")
-        story_prompt = get_prompt(_redis_or_503(), "coder.story")
-        asyncio.create_task(_run_coding_agent(
-            unlocked["id"], unlocked["title"], unlocked.get("description") or "", story_prompt,
-        ))
-        log.info("coding_agent_auto_triggered", story_id=unlocked["id"])
-    return {"merged": updated, "unlocked": unlocked["id"] if unlocked else None}
+    updated = _on_story_merged(item["id"], payload.get("repo_full_name", ""))
+    log.info("internal_pr_merged", item_id=item["id"], pr=pr_number)
+    return {"merged": updated, "post_merge_ci": "pending"}
 
 
 @app.post("/internal/recode-for-pr", status_code=status.HTTP_202_ACCEPTED)
@@ -1044,12 +1134,9 @@ async def mark_merged(item_id: str):
         raise HTTPException(status_code=404, detail="item not found")
     if item["state"] not in ("in-review", "changes-requested"):
         raise HTTPException(status_code=409, detail=f"item is '{item['state']}', expected in-review")
-    updated = update_state(item_id, "merged")
-    unlocked = unlock_next_story(item_id)
-    if unlocked:
-        log.info("story_unlocked", id=unlocked["id"], seq=unlocked.get("sequence"), title=unlocked["title"])
-    log.info("story_merged", id=item_id, next_unlocked=unlocked["id"] if unlocked else None)
-    return {"merged": updated, "unlocked": unlocked}
+    updated = _on_story_merged(item_id)
+    log.info("story_merged", id=item_id, post_merge_ci="pending")
+    return {"merged": updated, "post_merge_ci": "pending"}
 
 
 # ── Runtime config API (Phase 6) ──────────────────────────────────────────────
