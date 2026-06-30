@@ -21,6 +21,7 @@ def main() -> None:
     description = os.environ.get("STORY_DESCRIPTION", "")
     story_prompt = os.environ.get("STORY_PROMPT", "")
     test_command = os.environ.get("STORY_TEST_CMD", "")
+    install_command = os.environ.get("STORY_INSTALL_CMD", "")
 
     try:
         from coding_agent.main import run_coding_agent
@@ -30,6 +31,7 @@ def main() -> None:
             description,
             story_prompt=story_prompt,
             test_command=test_command,
+            install_command=install_command,
             log_line=lambda line: print(line, flush=True),
         )
     except Exception as exc:

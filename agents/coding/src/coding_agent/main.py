@@ -36,6 +36,30 @@ _MAX_TEST_ITERS = 2
 _TEST_TIMEOUT = 300  # seconds
 
 
+def _run_install(
+    repo_dir: str,
+    command: str,
+    log_line: Callable[[str], None] | None = None,
+    timeout: int = _TEST_TIMEOUT,
+) -> None:
+    """Best-effort install of the project + deps before in-coder tests. Never raises."""
+    if not command.strip():
+        return
+    try:
+        proc = subprocess.run(
+            command, cwd=repo_dir, shell=True,
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        log.warning("install_timed_out")
+        return
+    if proc.returncode != 0:
+        log.info("install_command_nonzero", rc=proc.returncode)
+        if log_line:
+            for ln in (proc.stdout + proc.stderr).splitlines()[-10:]:
+                log_line(ln)
+
+
 def _run_test_command(
     repo_dir: str,
     command: str,
@@ -96,6 +120,7 @@ def run_coding_agent(
     model_override: str = "",
     story_prompt: str = "",
     test_command: str = "",
+    install_command: str = "",
     log_line: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """
@@ -106,6 +131,8 @@ def run_coding_agent(
     test_command: when set, the coder runs it in-sandbox after writing code and
     re-attempts (red->green) until it passes or _MAX_TEST_ITERS is reached, before
     opening the PR. Skipped gracefully if the toolchain isn't in the sandbox image.
+    install_command: run before each test attempt to install the project + its
+    dependencies, so in-coder tests can import third-party packages.
     """
     log.info("coding_agent_start", item_id=item_id, title=title)
 
@@ -146,6 +173,9 @@ def run_coding_agent(
             test_status = "skipped"
             if test_command:
                 for attempt in range(_MAX_TEST_ITERS + 1):
+                    # Install the project + deps first so tests can import them
+                    # (re-run each attempt in case the agent added a dependency).
+                    _run_install(tmpdir, install_command, log_line)
                     test_status, test_output = _run_test_command(tmpdir, test_command, log_line)
                     if test_status in ("pass", "skipped"):
                         break

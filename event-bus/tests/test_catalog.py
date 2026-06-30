@@ -110,6 +110,12 @@ class TestDefaults:
         assert "pyproject.toml" in py.scaffold
         assert py.best_practices_prompt
 
+    def test_python_installs_deps_before_in_coder_tests(self):
+        py = load_stacks()["python"]
+        # install_command installs the project + deps so in-coder pytest can import them
+        assert "pip install" in py.install_command
+        assert "-e ." in py.install_command
+
     def test_python_runs_ruff_mypy_pytest_and_audit(self):
         py = load_stacks()["python"]
         for tool in ("ruff", "mypy", "pytest", "pip-audit"):

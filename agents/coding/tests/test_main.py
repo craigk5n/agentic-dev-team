@@ -266,3 +266,41 @@ class TestInCoderTdd:
         assert result["status"] == "success"
         assert result["test_status"] == "fail"
         assert oc.call_count == 3          # initial + 2 retries (_MAX_TEST_ITERS)
+
+
+class TestInstallBeforeTests:
+    def test_run_install_empty_is_noop(self):
+        from coding_agent.main import _run_install
+        assert _run_install("/tmp", "") is None  # no command -> no-op, no raise
+
+    def test_run_install_runs_command(self, tmp_path):
+        from coding_agent.main import _run_install
+        marker = tmp_path / "installed"
+        _run_install(str(tmp_path), f"touch {marker}")
+        assert marker.exists()
+
+    def test_run_install_tolerates_failure(self, tmp_path):
+        from coding_agent.main import _run_install
+        # a failing install command must not raise
+        assert _run_install(str(tmp_path), "exit 1") is None
+
+    def test_install_runs_before_each_test_attempt(self, tmp_path):
+        forgejo = _make_forgejo()
+        with (
+            patch("coding_agent.main.ForgejoClient", return_value=forgejo),
+            patch("coding_agent.main.git_ops.clone"),
+            patch("coding_agent.main.git_ops.configure_identity"),
+            patch("coding_agent.main.git_ops.create_branch"),
+            patch("coding_agent.main.git_ops.commit_all", return_value="a" * 40),
+            patch("coding_agent.main.git_ops.push"),
+            patch("coding_agent.main.tempfile.TemporaryDirectory") as mock_td,
+            patch("coding_agent.main.run_opencode_agent", return_value="impl"),
+            patch("coding_agent.main._run_install") as install,
+            patch("coding_agent.main._run_test_command",
+                  side_effect=[("fail", "x"), ("pass", "ok")]),
+        ):
+            mock_td.return_value.__enter__.return_value = str(tmp_path)
+            mock_td.return_value.__exit__.return_value = False
+            run_coding_agent(_UUID, "T", "D",
+                             test_command="pytest", install_command="pip install -e .")
+        assert install.call_count == 2  # once per test attempt (fail, then pass)

@@ -30,6 +30,9 @@ class StackDefinition(BaseModel):
     scaffold: dict[str, str] = Field(default_factory=dict)
     # Language idioms/best practices injected into coder + reviewer prompts.
     best_practices_prompt: str = ""
+    # Shell command run in-sandbox before the test loop to install the project and
+    # its dependencies (so in-coder tests can import third-party deps). Empty = none.
+    install_command: str = ""
     # Shell command the coding agent runs in-sandbox to verify its work before
     # opening the PR (TDD red->green). Empty = skip in-coder testing for this stack.
     test_command: str = ""

@@ -100,6 +100,9 @@ scaffold:
     .ruff_cache/
     .mypy_cache/
 
+install_command: |
+  python3 -m pip install -q -e . 2>/dev/null || true
+  if [ -f requirements.txt ]; then python3 -m pip install -q -r requirements.txt || true; fi
 test_command: "python3 -m pytest -q"
 
 best_practices_prompt: |

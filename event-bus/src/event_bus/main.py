@@ -649,6 +649,7 @@ def _run_coding_agent_sandboxed_sync(
     log_cb,
     coder_image: str = "",
     test_command: str = "",
+    install_command: str = "",
 ) -> dict:
     """Blocking: spawn an ephemeral Docker container for one coding agent run.
     Returns the result dict from sandbox_runner (same shape as run_coding_agent).
@@ -664,6 +665,7 @@ def _run_coding_agent_sandboxed_sync(
         "STORY_DESCRIPTION": (description or "")[:4000],
         "STORY_PROMPT": (story_prompt or "")[:4000],
         "STORY_TEST_CMD": test_command or "",
+        "STORY_INSTALL_CMD": install_command or "",
     })
 
     volumes: dict = {}
@@ -749,7 +751,7 @@ async def _run_coding_agent(item_id: str, title: str, description: str, story_pr
             result = await asyncio.to_thread(
                 _run_coding_agent_sandboxed_sync,
                 item_id, title, description, story_prompt, log_cb, stack.coder_image,
-                stack.test_command,
+                stack.test_command, stack.install_command,
             )
         else:
             try:
@@ -761,7 +763,8 @@ async def _run_coding_agent(item_id: str, title: str, description: str, story_pr
                 return
             result = await asyncio.to_thread(run_coding_agent, item_id, title, description,
                                              story_prompt=story_prompt,
-                                             test_command=stack.test_command, log_line=log_cb)
+                                             test_command=stack.test_command,
+                                             install_command=stack.install_command, log_line=log_cb)
     except Exception as exc:
         log.error("coding_agent_failed", id=item_id, error=str(exc))
         update_state(item_id, "ready")  # unclaim so it can be retried
