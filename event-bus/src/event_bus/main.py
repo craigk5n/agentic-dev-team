@@ -251,10 +251,14 @@ async def forgejo_webhook(
         log.info("pr_merged_no_story", pr_url=pr_url)
         return {"result": "skipped", "reason": "no matching story for PR"}
 
-    # A new commit on the PR resets the recode retry counter
+    # A new commit on the PR from a HUMAN resets the recode retry counter (give the
+    # human's fix fresh auto-fix attempts). The coder-bot's OWN recode commits must
+    # NOT reset it — otherwise every recode resets the cap and recodes loop forever.
     if event.action in ("synchronize", "synchronized"):
-        retry_key = f"recode_retries:{event.repo_full_name}:{event.pr_number}"
-        _redis_or_503().delete(retry_key)
+        pusher = (event.sender or {}).get("login", "")
+        if pusher and pusher != settings.forgejo_coder_user:
+            retry_key = f"recode_retries:{event.repo_full_name}:{event.pr_number}"
+            _redis_or_503().delete(retry_key)
 
     outcome = dispatch_forgejo_event(event, _queue_or_503())
     log.info("forgejo_webhook", result=outcome.result, reason=outcome.reason, job=outcome.job_id)

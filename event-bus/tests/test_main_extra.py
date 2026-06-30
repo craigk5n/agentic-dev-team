@@ -342,12 +342,24 @@ class TestForgejoWebhookExtra:
         assert resp.json()["result"] == "merged"
         await_ci.assert_called_once()
 
-    def test_pr_synchronize_clears_retry_key(self, client):
-        payload = {**FORGEJO_PR_OPENED,
-                   "action": "synchronize",
-                   "pull_request": {**FORGEJO_PR_OPENED["pull_request"], "merged": False}}
-        resp = self._post(client, payload)
-        assert resp.status_code == 202
+    def test_human_push_resets_retry_key_but_coder_bot_does_not(self, client, monkeypatch):
+        # A human's commit resets the recode cap (fresh attempts); the coder-bot's own
+        # recode commits must NOT, or the cap never fires and recodes loop forever.
+        r = fakeredis.FakeRedis()
+        monkeypatch.setattr("event_bus.main._redis_conn", r)
+        from event_bus.config import settings as _s
+        monkeypatch.setattr(_s, "forgejo_coder_user", "coder-bot")
+        key = "recode_retries:dev/myrepo:42"
+        base = {**FORGEJO_PR_OPENED, "action": "synchronized",
+                "pull_request": {**FORGEJO_PR_OPENED["pull_request"], "merged": False}}
+
+        r.set(key, "3")
+        assert self._post(client, {**base, "sender": {"login": "alice"}}).status_code == 202
+        assert r.get(key) is None  # human push -> reset
+
+        r.set(key, "3")
+        assert self._post(client, {**base, "sender": {"login": "coder-bot"}}).status_code == 202
+        assert r.get(key) == b"3"  # coder-bot recode commit -> NOT reset
 
     def test_review_event_changes_requested_triggers_recode(self, client):
         review_payload = {
