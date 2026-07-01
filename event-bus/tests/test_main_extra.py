@@ -518,6 +518,36 @@ class TestSandboxResilience:
         assert fake_client.containers.list.call_args[1]["filters"] == {"label": "dev-agents.sandbox=true"}
 
 
+class TestImportPlan:
+    def test_import_creates_approved_idea_and_normalizes(self, client, monkeypatch):
+        monkeypatch.setattr("event_bus.main._redis_conn", fakeredis.FakeRedis())
+        monkeypatch.setattr("event_bus.main.over_budget", lambda *a, **k: False)
+        fake = {"id": "imp-1", "title": "Imported plan", "state": "approved", "type": "idea"}
+        with patch("event_bus.main.create_item", return_value=fake) as ci, \
+             patch("event_bus.main._run_import", new_callable=AsyncMock) as ri:
+            resp = client.post("/api/ideas/import", json={
+                "plan_text": "## Epic 1 — Data\n### Story 1.1 build the model with a spec " * 3,
+                "stack": "python", "sdlc": "standard",
+                "planner_model": "openrouter/anthropic/claude-sonnet-4-6"})
+        assert resp.status_code == 202
+        kw = ci.call_args.kwargs
+        assert kw["state"] == "approved" and kw["stack"] == "python"
+        assert "Epic 1" in kw["prompt"]                      # the plan is stored verbatim
+        assert kw["planner_model"] == "openrouter/anthropic/claude-sonnet-4-6"
+        ri.assert_called_once()
+
+    def test_import_rejects_short_plan(self, client, monkeypatch):
+        monkeypatch.setattr("event_bus.main._redis_conn", fakeredis.FakeRedis())
+        resp = client.post("/api/ideas/import", json={"plan_text": "too short"})
+        assert resp.status_code == 400
+
+    def test_import_rejects_unknown_stack(self, client, monkeypatch):
+        monkeypatch.setattr("event_bus.main._redis_conn", fakeredis.FakeRedis())
+        monkeypatch.setattr("event_bus.main.over_budget", lambda *a, **k: False)
+        resp = client.post("/api/ideas/import", json={"plan_text": "x" * 100, "stack": "cobol"})
+        assert resp.status_code == 422
+
+
 # ── /api/prompts endpoints ────────────────────────────────────────────────────
 
 class TestPromptsApi:

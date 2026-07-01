@@ -4,9 +4,34 @@ from __future__ import annotations
 import structlog
 
 from planner_agent.config import settings
-from planner_agent.decomposer import decompose_idea
+from planner_agent.decomposer import decompose_idea, normalize_plan
 
 log = structlog.get_logger()
+
+
+def run_import(
+    item_id: str,
+    plan_text: str,
+    model_override: str = "",
+    repo_full_name: str = "",
+    stack: str = "",
+    redis_conn=None,
+) -> dict:
+    """Normalize an externally-authored plan into our epic/story model. Same return
+    shape as run_planner; persistence is handled by the caller."""
+    log.info("import_start", item_id=item_id, repo=repo_full_name or settings.default_repo,
+             plan_chars=len(plan_text or ""))
+    plan = normalize_plan(
+        plan_text,
+        model=model_override or settings.model_planner,
+        api_key=settings.effective_api_key,
+        default_repo=repo_full_name or settings.default_repo,
+        stack=stack,
+        redis_conn=redis_conn,
+    )
+    log.info("import_done", item_id=item_id, epics=len(plan.get("epics", [])),
+             stories=len(plan.get("stories", [])))
+    return plan
 
 
 def run_planner(

@@ -452,6 +452,46 @@ async def submit_idea(request: Request):
     return item
 
 
+@app.post("/api/ideas/import", status_code=status.HTTP_202_ACCEPTED)
+async def import_plan(request: Request):
+    """Import an externally-authored plan (pasted PRD/markdown). Skips idea expansion
+    and auto-decomposition: the plan is normalized into our epic/story model and held
+    at the plan-approval gate for review."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid JSON")
+    plan_text = (body.get("plan_text") or "").strip()
+    if len(plan_text) < 40:
+        raise HTTPException(status_code=400, detail="'plan_text' is required (paste the plan)")
+
+    cfg = get_config(_redis_or_503())
+    if over_budget(_redis_or_503(), cfg.limits.max_cost_usd_daily):
+        raise HTTPException(status_code=429, detail="daily LLM cost cap reached; imports paused")
+
+    cat = get_catalog()
+    stack = body.get("stack") or GENERIC_STACK_ID
+    sdlc = body.get("sdlc") or "standard"
+    if not cat.has_stack(stack):
+        raise HTTPException(status_code=422, detail=f"unknown stack: {stack!r}")
+    if not cat.has_sdlc(sdlc):
+        raise HTTPException(status_code=422, detail=f"unknown sdlc: {sdlc!r}")
+    guides = [g for g in (body.get("style_guides") or []) if cat.has_style_guide(g)]
+    planner_model = (body.get("planner_model") or "").strip()
+    title = (body.get("title") or "Imported plan").strip()[:80]
+
+    item = create_item(
+        item_type="idea", title=title, prompt=plan_text,
+        description="Imported plan — normalized into epics + stories, held for review.",
+        state="approved", stack=stack, sdlc=sdlc, style_guides=guides,
+        planner_model=planner_model,
+    )
+    log.info("plan_imported", id=item["id"], title=title, chars=len(plan_text),
+             stack=stack, sdlc=sdlc, model=planner_model or "default")
+    asyncio.create_task(_run_import(item["id"]))
+    return item
+
+
 # ── Work items API ────────────────────────────────────────────────────────────
 
 def _fetch_verdicts(pr_url: str) -> dict:
@@ -720,6 +760,14 @@ async def _run_planner(item_id: str, title: str, description: str) -> None:
         log.error("planner_failed", id=item_id, error=str(exc))
         return
 
+    _persist_plan(item_id, plan, repo_full, stack, sdlc, model, cfg)
+
+
+def _persist_plan(item_id: str, plan: dict, repo_full: str, stack, sdlc,
+                  model: str, cfg) -> None:
+    """Create the plan's epic-tagged stories and apply the plan-approval gate. Shared by
+    the auto-planner (_run_planner) and the plan importer (_run_import)."""
+    item = get_item(item_id) or {}
     stories = plan.get("stories", [])
     idea_guides = [g for g in (item.get("style_guides") or "").split(",") if g]
     # Plan-approval gate: when ON, every story is parked in backlog until the operator
@@ -747,14 +795,9 @@ async def _run_planner(item_id: str, title: str, description: str) -> None:
         if i == 0:
             first_story = story_item
 
-    log.info(
-        "planner_complete",
-        idea_id=item_id,
-        module=plan.get("project_name") or plan.get("module_name"),
-        epics=len(plan.get("epics", [])),
-        story_count=len(stories),
-        repo=repo_full,
-    )
+    log.info("planner_complete", idea_id=item_id,
+             module=plan.get("project_name") or plan.get("module_name"),
+             epics=len(plan.get("epics", [])), story_count=len(stories), repo=repo_full)
 
     if stories and not plan_gate:
         update_state(first_story["id"], "in-progress")
@@ -766,6 +809,33 @@ async def _run_planner(item_id: str, title: str, description: str) -> None:
     elif stories:
         log.info("plan_awaiting_approval", idea_id=item_id,
                  epics=len(plan.get("epics", [])), stories=len(stories))
+
+
+async def _run_import(item_id: str) -> None:
+    """Normalize an imported (externally-authored) plan into epic-tagged stories:
+    provision the repo, run the normalizer, then persist through the shared gate."""
+    cfg = get_config(_redis_or_503())
+    item = get_item(item_id) or {}
+    plan_text = item.get("prompt") or ""
+    cat = get_catalog()
+    stack = cat.get_stack(item.get("stack"))
+    sdlc = cat.get_sdlc(item.get("sdlc"))
+    model = (item.get("planner_model") or "").strip() or cfg.models.planner
+
+    repo_full = await asyncio.to_thread(_provision_project_repo, item_id, item.get("title", ""), stack.id)
+    if repo_full:
+        set_repo(item_id, repo_full)
+        log.info("idea_repo_set", idea=item_id, repo=repo_full)
+
+    try:
+        from planner_agent.main import run_import
+        plan = await asyncio.to_thread(
+            run_import, item_id, plan_text, model,
+            repo_full_name=repo_full, stack=stack.id, redis_conn=_redis_conn)
+    except Exception as exc:
+        log.error("import_failed", id=item_id, error=str(exc))
+        return
+    _persist_plan(item_id, plan, repo_full, stack, sdlc, model, cfg)
 
 
 @app.post("/api/items/{item_id}/code", status_code=status.HTTP_202_ACCEPTED)

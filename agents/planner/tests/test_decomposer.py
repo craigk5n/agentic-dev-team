@@ -3,7 +3,7 @@
 import json
 from unittest.mock import MagicMock, patch
 
-from planner_agent.decomposer import decompose_idea
+from planner_agent.decomposer import decompose_idea, normalize_plan
 
 
 def _mock_llm(text: str):
@@ -101,5 +101,40 @@ class TestTwoLevelPlan:
                    side_effect=_seq("{bad json")):
             plan = decompose_idea("My Feature", "D", model="m", default_repo="devadmin/sandbox")
         assert plan["module_name"].startswith("My Feature")
+        assert len(plan["stories"]) == 1
+        assert plan["stories"][0]["description"].startswith("repo: devadmin/sandbox")
+
+
+class TestNormalizePlan:
+    _NORM = {"project_name": "Task API", "epics": [
+        {"name": "Data Model", "description": "models + storage"},
+        {"name": "Endpoints", "description": "REST"}],
+        "stories": [
+            {"title": "Task model", "epic": "Data Model", "description": "repo: o/r\nmodel", "priority": "high"},
+            {"title": "CRUD endpoints", "epic": "Endpoints", "description": "endpoints", "priority": "medium"},
+        ]}
+
+    def test_maps_pasted_plan_to_epic_story_model(self):
+        with patch("planner_agent.decomposer.litellm.completion",
+                   side_effect=_seq(self._NORM)):
+            plan = normalize_plan("## Epic 1 ...\n### Story ...", model="m", default_repo="o/r")
+        assert plan["project_name"] == "Task API"
+        assert [e["name"] for e in plan["epics"]] == ["Data Model", "Endpoints"]
+        assert [s["title"] for s in plan["stories"]] == ["Task model", "CRUD endpoints"]
+        assert plan["stories"][0]["epic"] == "Data Model"
+        # repo prefix enforced even when the model omits it
+        assert plan["stories"][1]["description"].startswith("repo: o/r")
+
+    def test_reconciliation_guidance_in_prompt(self):
+        with patch("planner_agent.decomposer.litellm.completion",
+                   side_effect=_seq(self._NORM)) as mock:
+            normalize_plan("some plan text", model="m", default_repo="o/r")
+        prompt = mock.call_args[1]["messages"][1]["content"].lower()
+        assert "already scaffolded" in prompt          # drops setup stories
+        assert "re-structuring an existing plan" in prompt
+
+    def test_fallback_on_unparseable(self):
+        with patch("planner_agent.decomposer.litellm.completion", side_effect=_seq("{bad")):
+            plan = normalize_plan("x" * 100, model="m", default_repo="devadmin/sandbox")
         assert len(plan["stories"]) == 1
         assert plan["stories"][0]["description"].startswith("repo: devadmin/sandbox")

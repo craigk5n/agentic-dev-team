@@ -946,6 +946,32 @@ button.code-btn:hover { background: rgba(59,130,246,.25); }
     <div id="idea-result" class="result"></div>
   </div>
 
+  <h2 style="margin-top:28px">Import a plan</h2>
+  <div class="card">
+    <p style="color:var(--muted);font-size:12px;margin:0 0 12px">
+      Already have a plan (e.g. built with ChatGPT/Claude/Grok, or a hand-written PRD)?
+      Paste it and we'll normalize it into epics + stories, then hold it for review.
+      A strong model handles large plans best.
+    </p>
+    <form id="import-form">
+      <div class="field">
+        <label for="import-title">Title <span style="color:var(--muted)">(optional)</span></label>
+        <input id="import-title" placeholder="derived from the plan if blank">
+      </div>
+      <div class="field">
+        <label for="import-plan">Plan (markdown / PRD)</label>
+        <textarea id="import-plan" placeholder="Paste the full plan — epics, stories, specs…" style="min-height:180px"></textarea>
+      </div>
+      <div class="row">
+        <div class="field"><label>Tech stack</label><select id="import-stack"></select></div>
+        <div class="field"><label>SDLC style</label><select id="import-sdlc"></select></div>
+      </div>
+      <div class="field"><label>Planning model</label><select id="import-model"></select></div>
+      <button type="submit" id="import-btn">Import plan →</button>
+    </form>
+    <div id="import-result" class="result"></div>
+  </div>
+
   <h2 style="margin-top:28px">Projects</h2>
   <div id="projects-list"><div class="board-empty">Loading…</div></div>
 </section>
@@ -1374,6 +1400,36 @@ document.getElementById('idea-form').addEventListener('submit', async e => {
   } finally {
     btn.disabled = false;
     btn.textContent = 'Create Project →';
+  }
+});
+
+document.getElementById('import-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const btn = document.getElementById('import-btn');
+  const plan = document.getElementById('import-plan').value.trim();
+  if (plan.length < 40) { toast('Paste a plan first', 'error'); return; }
+  btn.disabled = true; btn.textContent = 'Normalizing…';
+  const body = {
+    plan_text: plan,
+    title: document.getElementById('import-title').value.trim() || undefined,
+    stack: document.getElementById('import-stack').value,
+    sdlc: document.getElementById('import-sdlc').value,
+    planner_model: document.getElementById('import-model').value || undefined,
+  };
+  try {
+    const data = await api('/api/ideas/import', { method: 'POST', body: JSON.stringify(body) });
+    showResult('import-result',
+      `<strong>${escHtml(data.title || 'Plan imported')}</strong><br>
+       Normalizing into epics + stories — it'll appear on the board shortly with a
+       <strong>Start plan</strong> button once ready.`, 'success');
+    toast('Plan imported — normalizing…');
+    e.target.reset();
+    populateImportForm();  // reset() clears selects; repopulate
+  } catch (err) {
+    showResult('import-result', `Error: ${err.message}`, 'error');
+    toast(err.message, 'error');
+  } finally {
+    btn.disabled = false; btn.textContent = 'Import plan →';
   }
 });
 
@@ -2135,7 +2191,25 @@ async function loadBoard() {
 
 // ── Projects view (archive / restore / delete + repo links) ────────────────────
 
+async function populateImportForm() {
+  await loadCatalogOptions();
+  const st = document.getElementById('import-stack');
+  const sd = document.getElementById('import-sdlc');
+  const md = document.getElementById('import-model');
+  if (st && !st.options.length) st.innerHTML = optionList(STACK_OPTS, 'generic');
+  if (sd && !sd.options.length) sd.innerHTML = optionList(SDLC_OPTS, 'standard');
+  if (md && !md.options.length) {
+    // Same presets as the approval card, but flag Sonnet as recommended for import.
+    md.innerHTML = PLANNER_MODELS.map(m => {
+      const label = m.value === 'openrouter/anthropic/claude-sonnet-4-6'
+        ? 'Claude Sonnet — recommended for import' : m.label;
+      return `<option value="${escHtml(m.value)}">${escHtml(label)}</option>`;
+    }).join('');
+  }
+}
+
 async function loadProjects() {
+  populateImportForm();
   const el = document.getElementById('projects-list');
   if (!el) return;
   let d;

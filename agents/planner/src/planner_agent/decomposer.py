@@ -234,3 +234,84 @@ def _fallback(title: str, default_repo: str) -> dict:
             "priority": "medium", "epic": title[:60],
         }],
     }
+
+
+_MAX_PLAN_CHARS = 120_000
+
+_NORMALIZE_PROMPT = """\
+Convert this EXISTING, pre-written implementation plan into a normalized epic/story
+structure for an autonomous coding pipeline. You are RE-STRUCTURING an existing plan,
+not inventing one — preserve its epics, ordering, and technical specifics.
+
+PLAN:
+{plan}
+
+Rules:
+- Preserve the plan's own epics/phases and their order. If it has none, group related
+  work into coherent epics, foundational-first (data model / core before features).
+- The target repo is ALREADY scaffolded (build files, test harness, CI). OMIT pure
+  setup/scaffolding steps ("create pyproject", "empty package skeleton", "git init").
+{no_stub}
+- Carry each story's concrete spec (schemas, endpoints, names, acceptance) into its
+  description so a coding agent can implement it without the original document.
+- Each story description MUST start with "repo: {default_repo}" on its own line.
+- Tag every story with the exact name of the epic it belongs to.
+
+Respond ONLY with valid JSON (no markdown fences):
+{{"project_name": "<name>",
+  "epics": [{{"name": "<epic>", "description": "<one sentence>"}}],
+  "stories": [{{"title": "<title>", "epic": "<epic name>", "description": "repo: {default_repo}\\n<spec>", "priority": "high"|"medium"|"low"}}]}}
+Order stories by epic, in the epics' order.
+"""
+
+
+def normalize_plan(
+    plan_text: str,
+    *,
+    model: str,
+    api_key: str = "",
+    default_repo: str = "devadmin/sandbox",
+    stack: str = "",
+    redis_conn=None,
+) -> dict:
+    """Map an externally-authored plan (pasted PRD/markdown) onto our epic/story model,
+    reconciled with the execution rules (scaffolded repo, shippable+testable slices).
+    Returns the same shape as decompose_idea."""
+    call = dict(model=model, api_key=api_key, stack=stack, redis_conn=redis_conn)
+    try:
+        data = _complete_json(
+            [{"role": "system", "content": _SYSTEM},
+             {"role": "user", "content": _NORMALIZE_PROMPT.format(
+                 plan=(plan_text or "")[:_MAX_PLAN_CHARS], no_stub=_NO_STUB,
+                 default_repo=default_repo)}],
+            **call)
+    except Exception as exc:
+        log.warning("normalize_plan_failed", error=str(exc)[:160])
+        return _fallback("Imported plan", default_repo)
+
+    project_name = (data.get("project_name") or "Imported plan")[:80]
+    epics = [{"name": e["name"], "description": e.get("description", "")}
+             for e in data.get("epics", []) if e.get("name")]
+    epic_names = {e["name"] for e in epics}
+    flat = []
+    for s in data.get("stories", []):
+        if not s.get("title"):
+            continue
+        ep = s.get("epic") or (epics[0]["name"] if epics else "Plan")
+        if ep not in epic_names:                      # story references an unlisted epic
+            epics.append({"name": ep, "description": ""})
+            epic_names.add(ep)
+        flat.append({
+            "title": s["title"][:200],
+            "description": _ensure_repo_prefix(s.get("description", ""), default_repo),
+            "priority": s.get("priority", "medium"),
+            "epic": ep,
+        })
+    if not flat:
+        return _fallback(project_name, default_repo)
+    # Keep stories grouped by epic order (the model may interleave).
+    order = {e["name"]: i for i, e in enumerate(epics)}
+    flat.sort(key=lambda s: order.get(s["epic"], 999))
+    log.info("plan_normalized", project=project_name, epics=len(epics), stories=len(flat))
+    return {"project_name": project_name, "module_name": project_name,
+            "epics": epics, "stories": flat}
