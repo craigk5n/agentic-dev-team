@@ -51,6 +51,16 @@ class TestDecomposeIdea:
         prompt_content = mock.call_args[1]["messages"][1]["content"]
         assert "alice/backend" in prompt_content
 
+    def test_prompt_forbids_stub_only_stories(self):
+        # The repo is already scaffolded at provisioning; the planner must not emit
+        # signature-only / setup-only first stories (they can't pass review — the
+        # function is unimplemented — and churn the recode loop until it's parked).
+        with patch("planner_agent.decomposer.litellm.completion", return_value=_mock_llm(json.dumps(_VALID))) as mock:
+            decompose_idea("T", "D", model="m")
+        prompt = mock.call_args[1]["messages"][1]["content"].lower()
+        assert "already scaffolded" in prompt
+        assert "signature" in prompt  # explicit no-signature-only rule
+
     def test_tolerates_markdown_fences(self):
         raw = f"```json\n{json.dumps(_VALID)}\n```"
         with patch("planner_agent.decomposer.litellm.completion", return_value=_mock_llm(raw)):

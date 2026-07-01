@@ -28,6 +28,16 @@ Create:
 1. One module (epic) grouping all stories
 2. Between 3 and 7 stories — each a concrete, implementable task
 
+The target repository is ALREADY scaffolded: build/manifest files, a test harness,
+and CI already exist. So:
+- Do NOT create setup/scaffolding/"initialize the project" stories — that work is done.
+- Every story must deliver a working, independently testable vertical slice — real
+  behavior PLUS its tests — that can pass code review on its own.
+- NEVER make a story that only declares a function signature, a stub, or a
+  placeholder: an unimplemented signature fails review and cannot be fixed within
+  its own scope. The FIRST story must implement a minimal but complete and tested
+  piece of real functionality.
+
 Each story description MUST start with "repo: {default_repo}" on its own line
 so the Coding Agent knows where to work.
 
