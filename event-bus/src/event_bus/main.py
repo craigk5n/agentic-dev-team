@@ -950,6 +950,20 @@ async def _run_recode_agent(review_event: ForgejoReviewEvent) -> None:
 _MAX_RECODE_RETRIES = 3
 
 
+def _recode_cap_for_item(item: dict) -> int:
+    """Resolve the recode cap for a story: the stack's ``recode_cap`` if it sets a
+    positive one, else the global default. Lets stricter-CI stacks (e.g. Rust) get
+    more auto-fix attempts before a PR is parked for a human."""
+    try:
+        stack = get_catalog().get_stack(item.get("stack") or "")
+        cap = getattr(stack, "recode_cap", 0) or 0
+        if cap > 0:
+            return cap
+    except Exception as exc:  # noqa: BLE001 — never block a recode on catalog issues
+        log.warning("recode_cap_resolve_failed", error=str(exc)[:120])
+    return _MAX_RECODE_RETRIES
+
+
 # ── Post-merge CI gate: merged is transient; CI on main decides done vs fix ────
 _POST_MERGE_CI_TIMEOUT = 600   # seconds to wait for CI on the merge commit
 _POST_MERGE_CI_GRACE = 60      # if no status appears by now, treat as "no CI workflow"
@@ -1076,7 +1090,7 @@ async def internal_recode_for_pr(payload: dict):
     """
     Called by the reviewer gate (worker) when checks fail.
     Triggers the recode agent without going through the Forgejo webhook chain.
-    Capped at _MAX_RECODE_RETRIES attempts per PR to break infinite loops.
+    Capped per PR (stack's recode_cap, else the global default) to break loops.
     """
     repo_full_name = payload.get("repo_full_name", "")
     pr_number = payload.get("pr_number", 0)
@@ -1087,12 +1101,13 @@ async def internal_recode_for_pr(payload: dict):
     if not item:
         raise HTTPException(status_code=404, detail="no story found for this PR")
 
-    # Retry cap — prevent infinite recode loops
+    # Retry cap — prevent infinite recode loops (per-stack; Rust et al. can raise it)
     r = _redis_or_503()
+    cap = _recode_cap_for_item(item)
     retry_key = f"recode_retries:{repo_full_name}:{pr_number}"
     retries = int(r.get(retry_key) or 0)
-    if retries >= _MAX_RECODE_RETRIES:
-        log.warning("recode_retry_cap_reached", pr=pr_number, repo=repo_full_name, retries=retries)
+    if retries >= cap:
+        log.warning("recode_retry_cap_reached", pr=pr_number, repo=repo_full_name, retries=retries, cap=cap)
         _post_pr_comment(
             repo_full_name, pr_number,
             f"🤖 **Auto-fix gave up after {retries} attempts.** The checks are still failing — "

@@ -753,6 +753,14 @@ class TestHelperFunctions:
         from event_bus.main import _reconcile_coder_slots
         _reconcile_coder_slots()  # must not raise
 
+    def test_recode_cap_per_stack(self):
+        # Rust raises its cap; stacks without one fall back to the global default;
+        # an unknown/empty stack resolves to generic (no cap) → global default.
+        from event_bus.main import _recode_cap_for_item, _MAX_RECODE_RETRIES
+        assert _recode_cap_for_item({"stack": "rust"}) == 5
+        assert _recode_cap_for_item({"stack": "python"}) == _MAX_RECODE_RETRIES
+        assert _recode_cap_for_item({"stack": ""}) == _MAX_RECODE_RETRIES
+
     def test_internal_recode_no_redis_returns_503(self, client, monkeypatch):
         story = {"id": "s-1", "title": "T", "state": "in-review",
                  "type": "story", "description": ""}

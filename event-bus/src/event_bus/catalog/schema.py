@@ -40,6 +40,10 @@ class StackDefinition(BaseModel):
     default_sdlc: str = "standard"
     # Optional file globs used to auto-detect this stack (fallback path).
     detect: list[str] = Field(default_factory=list)
+    # Max automatic recode attempts per PR before it's parked for a human. 0 = use
+    # the global default; raise it for stacks whose CI has a larger failure surface
+    # (e.g. Rust: rustfmt + clippy + doc-tests) so the coder gets room to converge.
+    recode_cap: int = Field(default=0, ge=0)
 
     @field_validator("scaffold")
     @classmethod

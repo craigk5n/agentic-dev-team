@@ -107,6 +107,19 @@ class TestDefaults:
         assert "cargo test" in rs.ci_workflow
         assert "Cargo.toml" in rs.scaffold and "src/lib.rs" in rs.scaffold
         assert rs.coder_image == "dev-agents/coder-rust:latest"
+        assert rs.recode_cap == 5  # stricter CI (fmt+clippy+doc-tests) gets more attempts
+
+    def test_recode_cap_defaults_to_zero(self):
+        # Stacks that don't set a cap use 0 (→ the orchestrator's global default).
+        assert load_stacks()["python"].recode_cap == 0
+
+    def test_ci_push_trigger_scoped_to_main(self):
+        # push CI must be main-only: PR-branch commits fire pull_request only (no
+        # double-run / combined-status race), while merges to main still run CI for
+        # the post-merge gate.
+        for sid in ("python", "go", "node-ts", "rust", "generic"):
+            wf = load_stacks()[sid].ci_workflow
+            assert "branches: [main]" in wf, f"{sid} push not scoped to main"
 
     def test_default_sdlc_present(self):
         ids = set(load_sdlc().keys())

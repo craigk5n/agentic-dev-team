@@ -11,6 +11,7 @@ ci_workflow: |
   name: CI
   on:
     push:
+      branches: [main]
     pull_request:
 
   jobs:
@@ -55,6 +56,10 @@ scaffold:
     }
 
 test_command: "cargo test"
+
+# Rust's CI checks more than most (rustfmt + clippy + doc-tests), so give the coder
+# a couple of extra auto-fix attempts before a PR is parked for a human.
+recode_cap: 5
 
 best_practices_prompt: |
   Write idiomatic, safe Rust (2021 edition). Prefer returning Result/Option over

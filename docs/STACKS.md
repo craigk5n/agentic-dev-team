@@ -42,7 +42,10 @@ detect:                          # hint files (future auto-detection)
   - "*.py"
 ci_workflow: |                   # committed to .forgejo/workflows/ci.yml on provisioning
   name: CI
-  on: { push: , pull_request: }
+  on:                            # scope push to main: PR-branch commits fire
+    push:                        # pull_request only (no double-run), while merges
+      branches: [main]           # to main still run CI for the post-merge gate
+    pull_request:
   jobs:
     test:
       runs-on: ubuntu-latest
@@ -58,6 +61,9 @@ scaffold:                        # path -> contents, committed on fresh-repo pro
         assert True
 best_practices_prompt: |         # injected into the coder + reviewer prompts
   Write idiomatic, PEP 8-compliant Python with type hints...
+recode_cap: 0                    # max auto-fix attempts per PR before parking for a
+                                 # human; 0 = global default. Raise for stricter-CI
+                                 # stacks (Rust uses 5).
 ```
 
 Validation rejects unknown fields, bad ids, and unsafe scaffold paths (absolute or `..`).
