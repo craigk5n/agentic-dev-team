@@ -107,17 +107,19 @@ def _style_block(sdlc_directive: str, best_practices: str) -> str:
     return ("\n" + "\n\n".join(parts) + "\n") if parts else ""
 
 
-def _complete_json(messages, *, model, api_key, stack, redis_conn, max_tokens=None):
+def _complete_json(messages, *, model, api_key, stack, redis_conn, max_tokens=None,
+                   timeout=None, attempts=None):
     """One LLM call returning parsed JSON, with a bounded timeout + retry. Raises the
-    last error after _MAX_ATTEMPTS so callers can fall back."""
+    last error after the attempt budget so callers can fall back."""
     kwargs: dict = {"model": model, "messages": messages, "temperature": 0.2,
-                    "timeout": _CALL_TIMEOUT, "num_retries": 0}
+                    "timeout": timeout or _CALL_TIMEOUT, "num_retries": 0}
     if api_key:
         kwargs["api_key"] = api_key
     if max_tokens:
         kwargs["max_tokens"] = max_tokens
     last_exc: Exception | None = None
-    for attempt in range(1, _MAX_ATTEMPTS + 1):
+    max_attempts = attempts or _MAX_ATTEMPTS
+    for attempt in range(1, max_attempts + 1):
         try:
             resp = litellm.completion(**kwargs)
             if redis_conn is not None:
@@ -132,9 +134,9 @@ def _complete_json(messages, *, model, api_key, stack, redis_conn, max_tokens=No
             return json.loads(clean)   # empty/malformed → JSONDecodeError → retry
         except Exception as exc:       # timeout, provider error, or bad JSON
             last_exc = exc
-            log.warning("planner_llm_retry", attempt=attempt, max=_MAX_ATTEMPTS,
+            log.warning("planner_llm_retry", attempt=attempt, max=max_attempts,
                         error=str(exc)[:140])
-            if attempt < _MAX_ATTEMPTS:
+            if attempt < max_attempts:
                 time.sleep(_RETRY_BACKOFF * attempt)
     raise last_exc
 
@@ -263,6 +265,55 @@ _MAX_PLAN_CHARS = 200_000   # fits a large PRD on a big-context model (Sonnet); 
 
 _MAX_IMPORT_EPICS = 25   # backstop for a very large PRD
 
+# Import pass-2 calls legitimately generate long output (an epic's full specs), so they
+# get a longer timeout and a bigger output budget than ordinary planning calls — but
+# only 2 attempts, and the whole import aborts after 3 consecutive epic failures so a
+# systematic problem can't burn money grinding through every epic with retries.
+_IMPORT_TIMEOUT = 300.0
+_IMPORT_STORY_TOKENS = 16000
+_IMPORT_ATTEMPTS = 2
+_IMPORT_MAX_CONSECUTIVE_FAILURES = 3
+
+
+def _split_plan_by_epics(plan: str, epic_names: list[str]) -> dict[str, str]:
+    """Split the pasted plan into per-epic sections LOCALLY (no LLM), by matching each
+    epic name against the plan's markdown headings. Returns {epic_name: section_text}
+    for the epics whose heading was found; callers fall back to the full plan for any
+    epic that isn't matched.
+
+    This is the cost fix: pass 2 then sends each call only its epic's slice (a few KB)
+    instead of re-sending the entire plan per epic (input cost = epics × plan size).
+    """
+    def norm(s: str) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", s.lower()).strip()
+
+    headings = [(m.start(), m.group(0)) for m in re.finditer(r"(?m)^#{1,3} .+$", plan)]
+    if not headings:
+        return {}
+
+    # Locate the heading that introduces each epic (first heading whose text contains
+    # the epic name, or vice versa — tolerates "Epic 4 — MCP Protocol Module" etc.)
+    starts: list[tuple[int, str]] = []
+    for name in epic_names:
+        n = norm(name)
+        if not n:
+            continue
+        for pos, text in headings:
+            h = norm(text.lstrip("#"))
+            if n in h or (len(h) > 8 and h in n):
+                starts.append((pos, name))
+                break
+    if not starts:
+        return {}
+
+    # Slice from each epic's heading to the next epic's heading (plan order).
+    starts.sort()
+    sections: dict[str, str] = {}
+    for i, (pos, name) in enumerate(starts):
+        end = starts[i + 1][0] if i + 1 < len(starts) else len(plan)
+        sections[name] = plan[pos:end]
+    return sections
+
 _NORMALIZE_EPICS_PROMPT = """\
 Read this EXISTING, pre-written implementation plan and extract ONLY its EPIC list. You
 are RE-STRUCTURING an existing plan, not inventing one — preserve its epics/phases and
@@ -281,21 +332,21 @@ Respond ONLY with valid JSON (no markdown fences):
 """
 
 _NORMALIZE_STORIES_PROMPT = """\
-From this EXISTING implementation plan, extract and expand the stories of ONE epic into
-implementable form for an autonomous coding pipeline.
+From this section of an EXISTING implementation plan, extract and expand the stories of
+ONE epic into implementable form for an autonomous coding pipeline.
 
-PLAN:
-{plan}
-
-Focus ONLY on this epic:
 Epic: {epic_name} — {epic_desc}
 
-Find EVERY story/task in the plan that belongs to this epic and produce one story for
-each. Rules:
+PLAN SECTION for this epic:
+{plan}
+
+Find EVERY story/task in this section that belongs to the epic and produce one story
+for each. Rules:
 - The target repo is ALREADY scaffolded — OMIT pure setup/scaffolding stories.
 {no_stub}
 - Carry each story's concrete spec (schemas, endpoints, names, acceptance) FROM THE PLAN
   into its description so a coding agent can implement it without the original document.
+  Summarize long code listings into their essential requirements — do not copy every line.
 - Each story description MUST start with "repo: {default_repo}" on its own line.
 
 Respond ONLY with valid JSON (no markdown fences):
@@ -339,20 +390,37 @@ def normalize_plan(
         return _fallback(project_name, default_repo)
     log.info("import_epics_extracted", project=project_name, epics=len(epics))
 
-    # ── Pass 2: per epic, find + expand its stories from the plan (bounded out) ─
+    # Split the plan locally so each pass-2 call sends only its epic's section —
+    # not the whole plan × epics (the cost blowup). Unmatched epics fall back to
+    # the full plan for that one call.
+    sections = _split_plan_by_epics(plan, [e["name"] for e in epics])
+    log.info("import_plan_split", matched=len(sections), epics=len(epics))
+
+    # ── Pass 2: per epic, find + expand its stories (bounded input AND output) ──
     flat = []
+    consecutive_failures = 0
     for epic in epics:
+        section = sections.get(epic["name"]) or plan
         try:
             data = _complete_json(
                 [{"role": "system", "content": _SYSTEM},
                  {"role": "user", "content": _NORMALIZE_STORIES_PROMPT.format(
-                     plan=plan, epic_name=epic["name"], epic_desc=epic["description"],
+                     plan=section, epic_name=epic["name"], epic_desc=epic["description"],
                      no_stub=_NO_STUB, default_repo=default_repo)}],
-                max_tokens=8000, **call)
+                max_tokens=_IMPORT_STORY_TOKENS, timeout=_IMPORT_TIMEOUT,
+                attempts=_IMPORT_ATTEMPTS, **call)
             stories = data.get("stories", [])
+            consecutive_failures = 0
         except Exception as exc:
             log.warning("normalize_epic_stories_failed", epic=epic["name"], error=str(exc)[:120])
             stories = []
+            consecutive_failures += 1
+            if consecutive_failures >= _IMPORT_MAX_CONSECUTIVE_FAILURES:
+                # Spend guard: something systematic is wrong (provider down, plan shape
+                # the model can't emit) — stop burning calls on the remaining epics.
+                log.error("import_aborted_consecutive_failures",
+                          failures=consecutive_failures, done=len(flat))
+                break
         for s in stories:
             if s.get("title"):
                 flat.append({

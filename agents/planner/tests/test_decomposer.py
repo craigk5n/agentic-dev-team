@@ -143,11 +143,55 @@ class TestNormalizePlan:
         assert "find every story" in stories_prompt             # pass 2 self-discovers
 
     def test_one_bad_epic_does_not_sink_the_plan(self):
-        # If an epic's stories pass fails, its stories are skipped but others survive.
+        # If an epic's stories pass fails (both attempts), its stories are skipped
+        # but the other epics survive.
         with patch("planner_agent.decomposer.litellm.completion",
-                   side_effect=_seq(self._EPICS, "{bad json", self._STORIES_2)):
+                   side_effect=_seq(self._EPICS, "{bad json", "{bad json", self._STORIES_2)), \
+             patch("planner_agent.decomposer.time.sleep"):
             plan = normalize_plan("plan", model="m", default_repo="o/r")
         assert [s["title"] for s in plan["stories"]] == ["CRUD endpoints"]
+        assert plan["stories"][0]["epic"] == "Endpoints"
+
+    def test_pass2_sends_only_the_epics_section(self):
+        # The cost fix: with matching headings, each pass-2 call carries just that
+        # epic's slice of the plan — not the whole document.
+        plan_text = ("# Overview\nintro\n"
+                     "## Epic 1 — Data Model\nSECTION_A spec details\n"
+                     "## Epic 2 — Endpoints\nSECTION_B spec details\n")
+        with patch("planner_agent.decomposer.litellm.completion",
+                   side_effect=_seq(self._EPICS, self._STORIES_1, self._STORIES_2)) as mock:
+            normalize_plan(plan_text, model="m", default_repo="o/r")
+        p1 = mock.call_args_list[1][1]["messages"][1]["content"]
+        p2 = mock.call_args_list[2][1]["messages"][1]["content"]
+        assert "SECTION_A" in p1 and "SECTION_B" not in p1
+        assert "SECTION_B" in p2 and "SECTION_A" not in p2
+        # import stories calls get the long-output budget + timeout + 2 attempts
+        assert mock.call_args_list[1][1]["max_tokens"] == 16000
+        assert mock.call_args_list[1][1]["timeout"] == 300.0
+
+    def test_unmatched_epic_falls_back_to_full_plan(self):
+        plan_text = "no headings at all, just prose describing the work"
+        with patch("planner_agent.decomposer.litellm.completion",
+                   side_effect=_seq(self._EPICS, self._STORIES_1, self._STORIES_2)) as mock:
+            normalize_plan(plan_text, model="m", default_repo="o/r")
+        assert plan_text in mock.call_args_list[1][1]["messages"][1]["content"]
+
+    def test_import_aborts_after_consecutive_epic_failures(self):
+        # Spend guard: 4 epics, every stories call fails → abort after 3 failed
+        # epics (2 attempts each) instead of grinding through the 4th.
+        four = {"project_name": "P", "epics": [
+            {"name": f"E{i}", "description": "d"} for i in range(4)]}
+        calls = {"n": 0}
+        def flaky(**kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _mock_llm(json.dumps(four))
+            return _mock_llm("{bad json")
+        with patch("planner_agent.decomposer.litellm.completion", side_effect=flaky), \
+             patch("planner_agent.decomposer.time.sleep"):
+            plan = normalize_plan("plan", model="m", default_repo="o/r")
+        assert calls["n"] == 1 + 3 * 2      # epics pass + 3 epics × 2 attempts, 4th skipped
+        assert len(plan["stories"]) == 1     # fell back (nothing normalized)
 
     def test_fallback_when_epics_pass_fails(self):
         with patch("planner_agent.decomposer.litellm.completion", side_effect=_seq("{bad")):
