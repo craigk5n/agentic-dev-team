@@ -106,34 +106,49 @@ class TestTwoLevelPlan:
 
 
 class TestNormalizePlan:
-    _NORM = {"project_name": "Task API", "epics": [
-        {"name": "Data Model", "description": "models + storage"},
-        {"name": "Endpoints", "description": "REST"}],
-        "stories": [
-            {"title": "Task model", "epic": "Data Model", "description": "repo: o/r\nmodel", "priority": "high"},
-            {"title": "CRUD endpoints", "epic": "Endpoints", "description": "endpoints", "priority": "medium"},
-        ]}
+    # Pass 1 (epics + story titles), then one stories-pass per epic.
+    _EPICS = {"project_name": "Task API", "epics": [
+        {"name": "Data Model", "description": "models + storage", "story_titles": ["Task model"]},
+        {"name": "Endpoints", "description": "REST", "story_titles": ["CRUD endpoints"]}]}
+    _STORIES_1 = {"stories": [{"title": "Task model", "description": "repo: o/r\nmodel", "priority": "high"}]}
+    _STORIES_2 = {"stories": [{"title": "CRUD endpoints", "description": "endpoints", "priority": "medium"}]}
 
-    def test_maps_pasted_plan_to_epic_story_model(self):
+    def test_two_pass_maps_plan_to_epic_story_model(self):
         with patch("planner_agent.decomposer.litellm.completion",
-                   side_effect=_seq(self._NORM)):
+                   side_effect=_seq(self._EPICS, self._STORIES_1, self._STORIES_2)):
             plan = normalize_plan("## Epic 1 ...\n### Story ...", model="m", default_repo="o/r")
         assert plan["project_name"] == "Task API"
         assert [e["name"] for e in plan["epics"]] == ["Data Model", "Endpoints"]
         assert [s["title"] for s in plan["stories"]] == ["Task model", "CRUD endpoints"]
         assert plan["stories"][0]["epic"] == "Data Model"
-        # repo prefix enforced even when the model omits it
+        # repo prefix enforced even when the stories pass omits it
         assert plan["stories"][1]["description"].startswith("repo: o/r")
+        # epics carry no internal story_titles field into the persisted plan
+        assert "story_titles" not in plan["epics"][0]
 
-    def test_reconciliation_guidance_in_prompt(self):
+    def test_one_stories_call_per_epic(self):
         with patch("planner_agent.decomposer.litellm.completion",
-                   side_effect=_seq(self._NORM)) as mock:
-            normalize_plan("some plan text", model="m", default_repo="o/r")
-        prompt = mock.call_args[1]["messages"][1]["content"].lower()
-        assert "already scaffolded" in prompt          # drops setup stories
-        assert "re-structuring an existing plan" in prompt
+                   side_effect=_seq(self._EPICS, self._STORIES_1, self._STORIES_2)) as mock:
+            normalize_plan("plan", model="m", default_repo="o/r")
+        assert mock.call_count == 3          # 1 epics pass + 2 epics × 1 stories pass
 
-    def test_fallback_on_unparseable(self):
+    def test_reconciliation_guidance_in_stories_prompt(self):
+        with patch("planner_agent.decomposer.litellm.completion",
+                   side_effect=_seq(self._EPICS, self._STORIES_1, self._STORIES_2)) as mock:
+            normalize_plan("some plan text", model="m", default_repo="o/r")
+        epics_prompt = mock.call_args_list[0][1]["messages"][1]["content"].lower()
+        assert "re-structuring an existing plan" in epics_prompt
+        stories_prompt = mock.call_args_list[1][1]["messages"][1]["content"].lower()
+        assert "already scaffolded" in stories_prompt
+
+    def test_one_bad_epic_does_not_sink_the_plan(self):
+        # If an epic's stories pass fails, its stories are skipped but others survive.
+        with patch("planner_agent.decomposer.litellm.completion",
+                   side_effect=_seq(self._EPICS, "{bad json", self._STORIES_2)):
+            plan = normalize_plan("plan", model="m", default_repo="o/r")
+        assert [s["title"] for s in plan["stories"]] == ["CRUD endpoints"]
+
+    def test_fallback_when_epics_pass_fails(self):
         with patch("planner_agent.decomposer.litellm.completion", side_effect=_seq("{bad")):
             plan = normalize_plan("x" * 100, model="m", default_repo="devadmin/sandbox")
         assert len(plan["stories"]) == 1

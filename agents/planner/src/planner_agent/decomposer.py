@@ -107,13 +107,15 @@ def _style_block(sdlc_directive: str, best_practices: str) -> str:
     return ("\n" + "\n\n".join(parts) + "\n") if parts else ""
 
 
-def _complete_json(messages, *, model, api_key, stack, redis_conn):
+def _complete_json(messages, *, model, api_key, stack, redis_conn, max_tokens=None):
     """One LLM call returning parsed JSON, with a bounded timeout + retry. Raises the
     last error after _MAX_ATTEMPTS so callers can fall back."""
     kwargs: dict = {"model": model, "messages": messages, "temperature": 0.2,
                     "timeout": _CALL_TIMEOUT, "num_retries": 0}
     if api_key:
         kwargs["api_key"] = api_key
+    if max_tokens:
+        kwargs["max_tokens"] = max_tokens
     last_exc: Exception | None = None
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         try:
@@ -256,32 +258,48 @@ def _fallback(title: str, default_repo: str) -> dict:
     }
 
 
-_MAX_PLAN_CHARS = 120_000
+_MAX_PLAN_CHARS = 200_000   # fits a large PRD on a big-context model (Sonnet); free
+                            # models with smaller context degrade to the fallback
 
-_NORMALIZE_PROMPT = """\
-Convert this EXISTING, pre-written implementation plan into a normalized epic/story
-structure for an autonomous coding pipeline. You are RE-STRUCTURING an existing plan,
-not inventing one — preserve its epics, ordering, and technical specifics.
+_MAX_IMPORT_EPICS = 25   # backstop for a very large PRD
+
+_NORMALIZE_EPICS_PROMPT = """\
+Read this EXISTING, pre-written implementation plan and extract its EPIC structure. You
+are RE-STRUCTURING an existing plan, not inventing one — preserve its epics/phases and
+their order (if it has none, group related work into coherent epics, foundational-first).
 
 PLAN:
 {plan}
 
-Rules:
-- Preserve the plan's own epics/phases and their order. If it has none, group related
-  work into coherent epics, foundational-first (data model / core before features).
-- The target repo is ALREADY scaffolded (build files, test harness, CI). OMIT pure
-  setup/scaffolding steps ("create pyproject", "empty package skeleton", "git init").
-{no_stub}
-- Carry each story's concrete spec (schemas, endpoints, names, acceptance) into its
-  description so a coding agent can implement it without the original document.
-- Each story description MUST start with "repo: {default_repo}" on its own line.
-- Tag every story with the exact name of the epic it belongs to.
+For each epic, list the EXACT titles of the stories/tasks it contains (from the plan).
+OMIT pure setup/scaffolding steps ("create pyproject", "empty package skeleton", "git
+init") — the target repo is already scaffolded.
 
 Respond ONLY with valid JSON (no markdown fences):
 {{"project_name": "<name>",
-  "epics": [{{"name": "<epic>", "description": "<one sentence>"}}],
-  "stories": [{{"title": "<title>", "epic": "<epic name>", "description": "repo: {default_repo}\\n<spec>", "priority": "high"|"medium"|"low"}}]}}
-Order stories by epic, in the epics' order.
+  "epics": [{{"name": "<epic>", "description": "<one sentence>", "story_titles": ["<title>", "..."]}}]}}
+"""
+
+_NORMALIZE_STORIES_PROMPT = """\
+From this EXISTING implementation plan, expand the stories of ONE epic into implementable
+form for an autonomous coding pipeline.
+
+PLAN:
+{plan}
+
+Expand the stories of THIS epic only:
+Epic: {epic_name} — {epic_desc}
+Its stories (titles from the plan): {story_titles}
+
+Rules:
+- The target repo is ALREADY scaffolded — OMIT pure setup/scaffolding stories.
+{no_stub}
+- Carry each story's concrete spec (schemas, endpoints, names, acceptance) FROM THE PLAN
+  into its description so a coding agent can implement it without the original document.
+- Each story description MUST start with "repo: {default_repo}" on its own line.
+
+Respond ONLY with valid JSON (no markdown fences):
+{{"stories": [{{"title": "<title>", "description": "repo: {default_repo}\\n<full spec>", "priority": "high"|"medium"|"low"}}]}}
 """
 
 
@@ -294,44 +312,60 @@ def normalize_plan(
     stack: str = "",
     redis_conn=None,
 ) -> dict:
-    """Map an externally-authored plan (pasted PRD/markdown) onto our epic/story model,
-    reconciled with the execution rules (scaffolded repo, shippable+testable slices).
-    Returns the same shape as decompose_idea."""
+    """Map an externally-authored plan (pasted PRD/markdown) onto our epic/story model.
+
+    Chunked in two passes so a large (~100-story) plan can't overflow one response:
+    pass 1 extracts the epic structure (terse), pass 2 expands each epic's stories in
+    its own bounded call. Reconciled with the execution rules (scaffolded repo,
+    shippable+testable slices). Returns the same shape as decompose_idea.
+    """
     call = dict(model=model, api_key=api_key, stack=stack, redis_conn=redis_conn)
+    plan = (plan_text or "")[:_MAX_PLAN_CHARS]
+
+    # ── Pass 1: epic structure (with each epic's story titles) ───────────────
     try:
-        data = _complete_json(
+        top = _complete_json(
             [{"role": "system", "content": _SYSTEM},
-             {"role": "user", "content": _NORMALIZE_PROMPT.format(
-                 plan=(plan_text or "")[:_MAX_PLAN_CHARS], no_stub=_NO_STUB,
-                 default_repo=default_repo)}],
-            **call)
+             {"role": "user", "content": _NORMALIZE_EPICS_PROMPT.format(plan=plan)}],
+            max_tokens=8000, **call)
     except Exception as exc:
-        log.warning("normalize_plan_failed", error=str(exc)[:160])
+        log.warning("normalize_epics_failed", error=str(exc)[:160])
         return _fallback("Imported plan", default_repo)
 
-    project_name = (data.get("project_name") or "Imported plan")[:80]
-    epics = [{"name": e["name"], "description": e.get("description", "")}
-             for e in data.get("epics", []) if e.get("name")]
-    epic_names = {e["name"] for e in epics}
+    project_name = (top.get("project_name") or "Imported plan")[:80]
+    epics = [{"name": e["name"], "description": e.get("description", ""),
+              "story_titles": [str(t) for t in (e.get("story_titles") or [])]}
+             for e in top.get("epics", []) if e.get("name")][:_MAX_IMPORT_EPICS]
+    if not epics:
+        return _fallback(project_name, default_repo)
+
+    # ── Pass 2: expand each epic's stories (bounded output per call) ──────────
     flat = []
-    for s in data.get("stories", []):
-        if not s.get("title"):
-            continue
-        ep = s.get("epic") or (epics[0]["name"] if epics else "Plan")
-        if ep not in epic_names:                      # story references an unlisted epic
-            epics.append({"name": ep, "description": ""})
-            epic_names.add(ep)
-        flat.append({
-            "title": s["title"][:200],
-            "description": _ensure_repo_prefix(s.get("description", ""), default_repo),
-            "priority": s.get("priority", "medium"),
-            "epic": ep,
-        })
+    for epic in epics:
+        titles = ", ".join(epic["story_titles"][:40]) or "(infer from the plan)"
+        try:
+            data = _complete_json(
+                [{"role": "system", "content": _SYSTEM},
+                 {"role": "user", "content": _NORMALIZE_STORIES_PROMPT.format(
+                     plan=plan, epic_name=epic["name"], epic_desc=epic["description"],
+                     story_titles=titles, no_stub=_NO_STUB, default_repo=default_repo)}],
+                max_tokens=8000, **call)
+            stories = data.get("stories", [])
+        except Exception as exc:
+            log.warning("normalize_epic_stories_failed", epic=epic["name"], error=str(exc)[:120])
+            stories = []
+        for s in stories:
+            if s.get("title"):
+                flat.append({
+                    "title": s["title"][:200],
+                    "description": _ensure_repo_prefix(s.get("description", ""), default_repo),
+                    "priority": s.get("priority", "medium"),
+                    "epic": epic["name"],
+                })
+
     if not flat:
         return _fallback(project_name, default_repo)
-    # Keep stories grouped by epic order (the model may interleave).
-    order = {e["name"]: i for i, e in enumerate(epics)}
-    flat.sort(key=lambda s: order.get(s["epic"], 999))
-    log.info("plan_normalized", project=project_name, epics=len(epics), stories=len(flat))
+    clean_epics = [{"name": e["name"], "description": e["description"]} for e in epics]
+    log.info("plan_normalized", project=project_name, epics=len(clean_epics), stories=len(flat))
     return {"project_name": project_name, "module_name": project_name,
-            "epics": epics, "stories": flat}
+            "epics": clean_epics, "stories": flat}
