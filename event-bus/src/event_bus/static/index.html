@@ -502,9 +502,14 @@ button.secondary.free-browse-btn {
   margin-bottom: 6px;
   display: flex;
   align-items: center;
-  gap: 12px;
+  flex-wrap: wrap;
+  gap: 8px 12px;
 }
 .board-item:hover { border-color: var(--accent); }
+/* The pending-approval form (rationale + stack/SDLC pickers + style-guide checklist
+   + Approve/Reject) is too big to sit inline next to the title — give it its own
+   full-width row so nothing overlaps the buttons, at any screen width. */
+.approval-controls { flex-basis: 100%; margin-top: 4px; }
 .board-item-title {
   flex: 1;
   font-size: 13px;
@@ -579,7 +584,9 @@ button.approve-btn:hover { background: rgba(34,197,94,.25); }
 .guide-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 3px; }
 .guide-pickers { display: flex; flex-direction: column; gap: 2px; }
 .guide-opt { font-size: 11px; color: inherit; display: flex; align-items: center; gap: 5px; cursor: pointer; }
-.guide-opt input { margin: 0; }
+/* Checkboxes must keep their intrinsic size — the global `input {width:100%}` rule
+   would otherwise blow them into full-width boxes that shove the label to the edge. */
+.guide-opt input { margin: 0; width: auto; padding: 0; flex: 0 0 auto; }
 .stack-cost { margin-top: 16px; max-width: 420px; }
 .stack-cost-title { color: var(--muted); font-size: 12px; margin-bottom: 6px; text-transform: uppercase; letter-spacing: .04em; }
 button.reject-btn {
@@ -853,6 +860,26 @@ button.code-btn:hover { background: rgba(59,130,246,.25); }
   padding: 10px 12px;
   white-space: pre-wrap;
   word-break: break-all;
+}
+
+/* ── Responsive: tablets & phones (iPad portrait and narrower) ─────────────── */
+@media (max-width: 820px) {
+  main { padding: 16px 12px; }
+  nav { flex-wrap: wrap; }                 /* tabs wrap instead of overflowing */
+  /* Stack each board card vertically so the title, meta, and controls each get a
+     full row — no more overlap between the style-guide list and the buttons. */
+  .board-item { flex-direction: column; align-items: stretch; }
+  .board-item-title { flex: none; }
+  .board-item-meta { white-space: normal; }
+  .seq-badge { align-self: flex-start; }
+  .idea-chip { align-self: flex-start; }
+  .board-item-actions { flex-wrap: wrap; }
+  .stack-pickers { flex-direction: column; }   /* stack/SDLC dropdowns full-width */
+  /* Projects list rows stack too. */
+  .proj-row { flex-direction: column; align-items: stretch; }
+  .proj-actions { flex-wrap: wrap; }
+  /* Simple multi-column grids collapse to one column so they don't overflow. */
+  .row, .health-grid, .telem-summary, .role-grid { grid-template-columns: 1fr; }
 }
 </style>
 </head>
@@ -1826,10 +1853,10 @@ async function loadBoard() {
         const selGuides = (item.style_guides || '').split(',').filter(Boolean);
         const guidesBox = GUIDE_OPTS.length
           ? `<div class="guide-wrap" data-id="${item.id}"><div class="guide-label">Style guides</div>${guideChecklist(item.id, item.stack, selGuides)}</div>` : '';
-        actions = `${rationale}${stackSel}${guidesBox}<div class="board-item-actions">
+        actions = `<div class="approval-controls">${rationale}${stackSel}${guidesBox}<div class="board-item-actions">
           <button class="approve-btn" data-id="${item.id}">Approve</button>
           <button class="reject-btn" data-id="${item.id}">Reject</button>
-        </div>`;
+        </div></div>`;
       } else if (item.state === 'ready') {
         actions = `<div class="board-item-actions">
           <button class="code-btn" data-id="${item.id}">▶ Code</button>
