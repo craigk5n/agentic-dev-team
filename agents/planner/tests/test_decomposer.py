@@ -138,3 +138,44 @@ class TestNormalizePlan:
             plan = normalize_plan("x" * 100, model="m", default_repo="devadmin/sandbox")
         assert len(plan["stories"]) == 1
         assert plan["stories"][0]["description"].startswith("repo: devadmin/sandbox")
+
+
+class TestCallHardening:
+    def test_complete_json_sets_timeout_and_disables_internal_retry(self):
+        from planner_agent.decomposer import _complete_json
+        with patch("planner_agent.decomposer.litellm.completion",
+                   return_value=_mock_llm('{"ok": 1}')) as mock:
+            out = _complete_json([{"role": "user", "content": "x"}],
+                                 model="m", api_key="", stack="", redis_conn=None)
+        assert out == {"ok": 1}
+        assert mock.call_args[1]["timeout"] == 90.0
+        assert mock.call_args[1]["num_retries"] == 0
+
+    def test_complete_json_retries_transient_then_succeeds(self):
+        from planner_agent.decomposer import _complete_json
+        with patch("planner_agent.decomposer.litellm.completion",
+                   side_effect=[Exception("provider error"), _mock_llm('{"ok": 1}')]) as mock, \
+             patch("planner_agent.decomposer.time.sleep"):
+            out = _complete_json([{"role": "user", "content": "x"}],
+                                 model="m", api_key="", stack="", redis_conn=None)
+        assert out == {"ok": 1} and mock.call_count == 2
+
+    def test_complete_json_retries_empty_content(self):
+        from planner_agent.decomposer import _complete_json
+        with patch("planner_agent.decomposer.litellm.completion",
+                   side_effect=[_mock_llm(""), _mock_llm('{"ok": 1}')]) as mock, \
+             patch("planner_agent.decomposer.time.sleep"):
+            out = _complete_json([{"role": "user", "content": "x"}],
+                                 model="m", api_key="", stack="", redis_conn=None)
+        assert out == {"ok": 1} and mock.call_count == 2
+
+    def test_complete_json_raises_after_max_attempts(self):
+        import pytest
+        from planner_agent.decomposer import _complete_json
+        with patch("planner_agent.decomposer.litellm.completion",
+                   side_effect=Exception("down")) as mock, \
+             patch("planner_agent.decomposer.time.sleep"):
+            with pytest.raises(Exception):
+                _complete_json([{"role": "user", "content": "x"}],
+                               model="m", api_key="", stack="", redis_conn=None)
+        assert mock.call_count == 3   # initial + 2 retries

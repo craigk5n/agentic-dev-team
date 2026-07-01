@@ -11,11 +11,18 @@ plans scale with the real scope of the idea instead of a fixed 3–7 cap.
 from __future__ import annotations
 import json
 import re
+import time
 
 import litellm
 import structlog
 
 log = structlog.get_logger()
+
+# Fail fast instead of riding litellm's long default backoff, and retry the flaky
+# empty/error responses free models emit (finish_reason='error' → empty content).
+_CALL_TIMEOUT = 90.0    # seconds per attempt
+_MAX_ATTEMPTS = 3       # initial + 2 retries
+_RETRY_BACKOFF = 2.0    # seconds, ×attempt
 
 # Bounds — plan size scales with scope, but stays bounded.
 _MIN_EPICS, _MAX_EPICS = 3, 8
@@ -101,20 +108,33 @@ def _style_block(sdlc_directive: str, best_practices: str) -> str:
 
 
 def _complete_json(messages, *, model, api_key, stack, redis_conn):
-    kwargs: dict = {"model": model, "messages": messages, "temperature": 0.2}
+    """One LLM call returning parsed JSON, with a bounded timeout + retry. Raises the
+    last error after _MAX_ATTEMPTS so callers can fall back."""
+    kwargs: dict = {"model": model, "messages": messages, "temperature": 0.2,
+                    "timeout": _CALL_TIMEOUT, "num_retries": 0}
     if api_key:
         kwargs["api_key"] = api_key
-    resp = litellm.completion(**kwargs)
-    if redis_conn is not None:
+    last_exc: Exception | None = None
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
         try:
-            from reviewer.telemetry import record_usage
-            record_usage(redis_conn, "planner", model, resp, stack=stack)
-        except Exception:
-            pass
-    raw = resp.choices[0].message.content or ""
-    clean = re.sub(r"^```(?:json)?\s*", "", raw.strip(), flags=re.MULTILINE)
-    clean = re.sub(r"\s*```$", "", clean.strip(), flags=re.MULTILINE)
-    return json.loads(clean)
+            resp = litellm.completion(**kwargs)
+            if redis_conn is not None:
+                try:
+                    from reviewer.telemetry import record_usage
+                    record_usage(redis_conn, "planner", model, resp, stack=stack)
+                except Exception:
+                    pass
+            raw = resp.choices[0].message.content or ""
+            clean = re.sub(r"^```(?:json)?\s*", "", raw.strip(), flags=re.MULTILINE)
+            clean = re.sub(r"\s*```$", "", clean.strip(), flags=re.MULTILINE)
+            return json.loads(clean)   # empty/malformed → JSONDecodeError → retry
+        except Exception as exc:       # timeout, provider error, or bad JSON
+            last_exc = exc
+            log.warning("planner_llm_retry", attempt=attempt, max=_MAX_ATTEMPTS,
+                        error=str(exc)[:140])
+            if attempt < _MAX_ATTEMPTS:
+                time.sleep(_RETRY_BACKOFF * attempt)
+    raise last_exc
 
 
 def _ensure_repo_prefix(desc: str, default_repo: str) -> str:

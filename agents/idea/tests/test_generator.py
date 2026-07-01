@@ -83,3 +83,29 @@ class TestDescriptionToHtml:
     def test_empty_lines_skipped(self):
         html = description_to_html("## H\n\n- item")
         assert "<p></p>" not in html
+
+
+class TestExpandRetry:
+    _GOOD = {"title": "JWT Auth", "description": "## Overview\n\nBuild auth."}
+
+    def test_sets_timeout_and_disables_internal_retry(self):
+        with patch("idea_agent.generator.litellm.completion",
+                   return_value=_mock_llm(json.dumps(self._GOOD))) as mock:
+            expand_prompt("Add auth", model="m")
+        assert mock.call_args[1]["timeout"] == 90.0
+        assert mock.call_args[1]["num_retries"] == 0
+
+    def test_retries_empty_then_succeeds(self):
+        with patch("idea_agent.generator.litellm.completion",
+                   side_effect=[_mock_llm(""), _mock_llm(json.dumps(self._GOOD))]) as mock, \
+             patch("idea_agent.generator.time.sleep"):
+            result = expand_prompt("Add auth", model="m")
+        assert result["title"] == "JWT Auth" and mock.call_count == 2
+
+    def test_falls_back_after_all_attempts_fail(self):
+        with patch("idea_agent.generator.litellm.completion",
+                   side_effect=Exception("provider down")) as mock, \
+             patch("idea_agent.generator.time.sleep"):
+            result = expand_prompt("Add auth", model="m")
+        assert mock.call_count == 3                 # initial + 2 retries
+        assert result["title"] == "Add auth"        # graceful fallback

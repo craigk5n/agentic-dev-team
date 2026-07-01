@@ -3,11 +3,17 @@
 from __future__ import annotations
 import json
 import re
+import time
 
 import litellm
 import structlog
 
 log = structlog.get_logger()
+
+# Bounded timeout + retry so a slow/erroring provider can't hang idea expansion.
+_CALL_TIMEOUT = 90.0
+_MAX_ATTEMPTS = 3
+_RETRY_BACKOFF = 2.0
 
 _SYSTEM = (
     "You are a product manager writing clear, implementable feature proposals. "
@@ -98,31 +104,53 @@ def expand_prompt(prompt: str, *, model: str, api_key: str = "", redis_conn=None
             {"role": "user", "content": user_msg},
         ],
         "temperature": 0.3,
+        "timeout": _CALL_TIMEOUT,   # fail fast instead of litellm's long backoff
+        "num_retries": 0,
     }
     if api_key:
         kwargs["api_key"] = api_key
 
-    resp = litellm.completion(**kwargs)
-    if redis_conn is not None:
+    # Bounded retry — free models sometimes hang or return empty/error content.
+    raw = ""
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
         try:
-            from reviewer.telemetry import record_usage
-            record_usage(redis_conn, "idea", model, resp)
-        except Exception:
-            pass
-    raw = resp.choices[0].message.content or ""
-    return _parse(raw, prompt)
+            resp = litellm.completion(**kwargs)
+            if redis_conn is not None:
+                try:
+                    from reviewer.telemetry import record_usage
+                    record_usage(redis_conn, "idea", model, resp)
+                except Exception:
+                    pass
+            raw = resp.choices[0].message.content or ""
+            data = _try_parse(raw)
+            if data is not None:
+                return data
+            raise ValueError("empty or unparseable response")
+        except Exception as exc:
+            log.warning("idea_llm_retry", attempt=attempt, max=_MAX_ATTEMPTS, error=str(exc)[:140])
+            if attempt < _MAX_ATTEMPTS:
+                time.sleep(_RETRY_BACKOFF * attempt)
+    return _parse(raw, prompt)   # graceful fallback after retries
 
 
-def _parse(raw: str, fallback_prompt: str) -> dict:
+def _try_parse(raw: str) -> dict | None:
+    """Parse a valid proposal (title + description) or None."""
     clean = re.sub(r"^```(?:json)?\s*", "", raw.strip(), flags=re.MULTILINE)
     clean = re.sub(r"\s*```$", "", clean.strip(), flags=re.MULTILINE)
     try:
         data = json.loads(clean)
-        if "title" in data and "description" in data:
-            # Pass through proposal fields when present (caller validates against catalog).
+        if isinstance(data, dict) and data.get("title") and data.get("description"):
             return data
     except json.JSONDecodeError:
-        log.warning("idea_generator_json_error", raw=raw[:200])
+        pass
+    return None
+
+
+def _parse(raw: str, fallback_prompt: str) -> dict:
+    data = _try_parse(raw)
+    if data is not None:
+        return data
+    log.warning("idea_generator_json_error", raw=raw[:200])
     # Graceful fallback — use the raw prompt as title
     return {"title": fallback_prompt[:80], "description": raw or fallback_prompt}
 
