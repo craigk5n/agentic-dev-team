@@ -58,6 +58,37 @@ matching stack (Google Python won't show for a Go project).
   success does the story become `done` and the next story start. A failure returns it to a
   developer (with a capped automatic fix attempt).
 
+## Screenshots
+
+**The work board** — the coordination backbone. Every idea gets a stable, colorblind-safe
+accent color; each story card carries its parent idea's stripe and name chip, so multiple
+projects running at once stay legible. Status lanes (approved → backlog → in-review → done)
+show sequence numbers, stack badges, verdict pips (R/T/S), relative timestamps, and PR links.
+
+![The work board with three color-coded ideas](docs/images/board.png)
+
+**Focus a single idea** — click a chip in the legend bar to spotlight one project and dim the
+rest (the focus survives auto-refresh).
+
+![Focusing one idea dims the others](docs/images/board-focus.png)
+
+**Every item drills down** to its AI-generated proposal — overview, goals, acceptance
+criteria, out-of-scope — and the planner's decomposition into ordered, independently
+shippable stories.
+
+![Idea proposal and generated plan](docs/images/idea-drawer.png)
+
+**Cost telemetry** — spend, LLM calls, and token counts broken down per agent role and per
+tech stack, plus live concurrency and rate-limit counters.
+
+![Per-role and per-stack cost telemetry](docs/images/telemetry.png)
+
+**Control panel** — toggle the approval gates, route each role to a different model (free
+OpenRouter / local Ollama / paid), set per-role rate and concurrency limits, and cap daily
+spend as a hard bill backstop.
+
+![Approval gates, model routing, and limits](docs/images/config.png)
+
 ## Agents
 
 | Agent | Model | Trigger | Output |
