@@ -738,6 +738,21 @@ class TestHelperFunctions:
         assert _coder_slot_acquire() is True   # n=2 ≤ 2
         assert _coder_slot_acquire() is False  # n=3 > 2, decremented back to 2
 
+    def test_reconcile_coder_slots_clears_leaked_count(self, monkeypatch):
+        # A slot acquired before a crash/recreate is never released (its decrement
+        # lived in the killed asyncio task). Startup reconciliation must reset it to 0.
+        r = fakeredis.FakeRedis()
+        monkeypatch.setattr("event_bus.main._redis_conn", r)
+        from event_bus.main import _reconcile_coder_slots, _CODER_SLOT_KEY
+        r.set(_CODER_SLOT_KEY, 2)  # leaked
+        _reconcile_coder_slots()
+        assert int(r.get(_CODER_SLOT_KEY)) == 0
+
+    def test_reconcile_coder_slots_without_redis_is_noop(self, monkeypatch):
+        monkeypatch.setattr("event_bus.main._redis_conn", None)
+        from event_bus.main import _reconcile_coder_slots
+        _reconcile_coder_slots()  # must not raise
+
     def test_internal_recode_no_redis_returns_503(self, client, monkeypatch):
         story = {"id": "s-1", "title": "T", "state": "in-review",
                  "type": "story", "description": ""}

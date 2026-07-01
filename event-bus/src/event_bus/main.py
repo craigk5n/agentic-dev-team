@@ -74,6 +74,26 @@ def _coder_slot_acquire() -> bool:
     return True
 
 
+def _reconcile_coder_slots() -> None:
+    """Reset the in-flight coder counter to the truthful startup value: 0.
+
+    The counter tracks in-process coder asyncio tasks. A process crash or
+    ``--force-recreate`` kills every such task before it can decrement, so a slot
+    acquired beforehand stays consumed for the key's 24h TTL — permanently wasting
+    capacity until manually reset (see the coder-slot-leak-on-recreate note). A
+    fresh process has zero tracked coders, so reconcile to 0 on startup.
+    """
+    if not _redis_conn:
+        return
+    try:
+        prev = int(_redis_conn.get(_CODER_SLOT_KEY) or 0)
+    except (TypeError, ValueError):
+        prev = 0
+    _redis_conn.set(_CODER_SLOT_KEY, 0)
+    if prev:
+        log.warning("coder_slots_reconciled", leaked=prev)
+
+
 def _coder_slot_release_and_dispatch() -> None:
     """Release one coding slot, then trigger the next queued ready story if a slot is free."""
     if _redis_conn:
@@ -106,6 +126,7 @@ async def lifespan(app: FastAPI):
                     "to require login (anyone reaching the URL can drive LLM cost)")
     _redis_conn = redis.from_url(settings.redis_url, decode_responses=False)
     _queue = Queue("agent-jobs", connection=_redis_conn)
+    _reconcile_coder_slots()  # clear any slot leaked by a prior crash/recreate
     get_db()  # initialise SQLite schema
     log.info("event_bus_started", redis=settings.redis_url)
     yield
