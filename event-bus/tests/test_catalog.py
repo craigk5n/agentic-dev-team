@@ -98,7 +98,15 @@ class TestLoader:
 class TestDefaults:
     def test_default_stacks_present(self):
         ids = set(load_stacks().keys())
-        assert {"python", "node-ts", "go", "generic"} <= ids
+        assert {"python", "node-ts", "go", "generic", "rust"} <= ids
+
+    def test_rust_stack_shape(self):
+        rs = load_stacks()["rust"]
+        assert rs.display_name == "Rust"
+        assert rs.test_command == "cargo test"
+        assert "cargo test" in rs.ci_workflow
+        assert "Cargo.toml" in rs.scaffold and "src/lib.rs" in rs.scaffold
+        assert rs.coder_image == "dev-agents/coder-rust:latest"
 
     def test_default_sdlc_present(self):
         ids = set(load_sdlc().keys())

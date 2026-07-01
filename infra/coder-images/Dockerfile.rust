@@ -1,0 +1,24 @@
+# Per-stack image: Rust. Used both as the coder sandbox and the CI job container.
+# Base = the default coder image (+ git); adds the Rust toolchain and node (checkout).
+ARG BASE_IMAGE=dev-agents/event-bus:latest
+FROM ${BASE_IMAGE}
+
+# Rust toolchain via rustup-init (pinned), with rustfmt + clippy components. Installed
+# system-wide and world-writable so the unprivileged sandbox user can build/cache.
+ARG RUST_VERSION=1.79.0
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:${PATH}
+ADD https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init /tmp/rustup-init
+RUN chmod +x /tmp/rustup-init \
+    && /tmp/rustup-init -y --no-modify-path --default-toolchain ${RUST_VERSION} --profile minimal \
+    && rm /tmp/rustup-init \
+    && rustup component add rustfmt clippy \
+    && chmod -R a+w ${CARGO_HOME}
+
+# Node.js — required when this image is the CI job container (actions/checkout is JS).
+ARG NODE_VERSION=20.15.0
+ADD https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.gz /tmp/node.tgz
+RUN tar -C /usr/local --strip-components=1 -xzf /tmp/node.tgz && rm /tmp/node.tgz
+
+LABEL dev-agents.coder-stack="rust"

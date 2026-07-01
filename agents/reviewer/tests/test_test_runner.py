@@ -53,6 +53,10 @@ class TestDetectTestCommand:
         cmd = detect_test_command(str(tmp_path), stack="python")
         assert "pytest" in cmd
 
+    def test_stack_rust_uses_cargo(self, tmp_path):
+        cmd = detect_test_command(str(tmp_path), stack="rust")
+        assert cmd[:2] == ["cargo", "test"]
+
 
 class TestParsePytestOutput:
     def test_success(self):

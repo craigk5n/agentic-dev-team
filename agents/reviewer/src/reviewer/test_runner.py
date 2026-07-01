@@ -31,6 +31,8 @@ def detect_test_command(repo_dir: str, stack: str = "") -> list[str]:
         return ["go", "test", "./..."]
     if stack == "node-ts":
         return ["npm", "test", "--silent"]
+    if stack == "rust":
+        return ["cargo", "test"]
 
     if (p / "pytest.ini").exists():
         return ["python", "-m", "pytest", "--tb=short", "-q"]

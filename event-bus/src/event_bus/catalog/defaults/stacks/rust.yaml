@@ -1,0 +1,64 @@
+id: rust
+display_name: Rust
+ci_image: rust:1.79
+coder_image: dev-agents/coder-rust:latest
+default_sdlc: standard
+detect:
+  - Cargo.toml
+  - "*.rs"
+
+ci_workflow: |
+  name: CI
+  on:
+    push:
+    pull_request:
+
+  jobs:
+    test:
+      runs-on: ubuntu-latest
+      # Run CI inside the prebuilt Rust image (cargo + rustfmt + clippy + git + node
+      # for checkout baked in) — no per-run toolchain download.
+      container: dev-agents/coder-rust:latest
+      steps:
+        - uses: actions/checkout@v4
+        - name: Format check, lint, test
+          run: |
+            set -euo pipefail
+            cargo fmt --all -- --check
+            cargo clippy --all-targets 2>&1 || true   # advisory — never blocks the gate
+            cargo test
+
+scaffold:
+  Cargo.toml: |
+    [package]
+    name = "project"
+    version = "0.1.0"
+    edition = "2021"
+
+    [dependencies]
+  src/lib.rs: |
+    //! project library crate.
+
+    /// Adds two integers — placeholder proving the toolchain wires up end to end.
+    pub fn add(a: i64, b: i64) -> i64 {
+        a + b
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn smoke() {
+            assert_eq!(add(1, 1), 2);
+        }
+    }
+
+test_command: "cargo test"
+
+best_practices_prompt: |
+  Write idiomatic, safe Rust (2021 edition). Prefer returning Result/Option over
+  panicking — avoid unwrap()/expect() outside tests — and use the ? operator to
+  propagate errors. Derive Debug/Clone where useful and keep functions small. Put
+  unit tests in a #[cfg(test)] module. Always run `cargo fmt` (CI checks formatting)
+  and keep `cargo clippy` clean.

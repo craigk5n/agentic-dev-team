@@ -20,7 +20,7 @@ The catalog is **config-driven** — adding a stack or SDLC style needs no core-
 
 ```
 event-bus/src/event_bus/catalog/defaults/
-├── stacks/   python.yaml  node-ts.yaml  go.yaml  generic.yaml
+├── stacks/   python.yaml  node-ts.yaml  go.yaml  rust.yaml  generic.yaml
 └── sdlc/     standard.yaml  tdd.yaml  spec-first.yaml
 ```
 
@@ -75,60 +75,32 @@ coder_directive: |               # appended to the coder prompt
 story_ordering: tests-first      # informational
 ```
 
-## Worked example — add a Rust stack
+## Adding a stack
 
-1. Create `event-bus/src/event_bus/catalog/defaults/stacks/rust.yaml` (or drop it in your
-   mounted `CATALOG_DIR`):
+Rust ships as a built-in default (`stacks/rust.yaml` + `infra/coder-images/Dockerfile.rust`) —
+use it as the reference when adding your own. The steps for a new stack, e.g. `elixir`:
 
-   ```yaml
-   id: rust
-   display_name: Rust
-   ci_image: rust:1.79
-   coder_image: dev-agents/coder-rust:latest
-   default_sdlc: standard
-   detect: ["Cargo.toml", "*.rs"]
-   ci_workflow: |
-     name: CI
-     on: { push: , pull_request: }
-     jobs:
-       test:
-         runs-on: ubuntu-latest
-         steps:
-           - uses: actions/checkout@v4
-           - name: Install Rust, build, test
-             run: |
-               curl -sSf https://sh.rustup.rs | sh -s -- -y
-               . "$HOME/.cargo/env"
-               cargo fmt --check
-               cargo test
-   scaffold:
-     Cargo.toml: |
-       [package]
-       name = "project"
-       version = "0.1.0"
-       edition = "2021"
-     src/lib.rs: |
-       pub fn add(a: i64, b: i64) -> i64 { a + b }
+1. Create `event-bus/src/event_bus/catalog/defaults/stacks/elixir.yaml` (or drop it in your
+   mounted `CATALOG_DIR`). Required fields: `id`, `display_name`, `ci_image`, `coder_image`,
+   `ci_workflow`; plus `scaffold`, `test_command`, `install_command`, `detect`, and
+   `best_practices_prompt`. Model it on `rust.yaml` — the CI job runs inside the prebuilt
+   per-stack container (`container: dev-agents/coder-elixir:latest`) so `actions/checkout`
+   and the toolchain are already present.
 
-       #[cfg(test)]
-       mod tests {
-           use super::*;
-           #[test]
-           fn smoke() { assert_eq!(add(1, 1), 2); }
-       }
-   best_practices_prompt: |
-     Write idiomatic Rust: prefer ownership over cloning, handle errors with Result
-     and the ? operator, avoid unwrap() outside tests, run cargo fmt and clippy clean.
-   ```
+2. Add `infra/coder-images/Dockerfile.elixir` (base `dev-agents/event-bus:latest` + the
+   toolchain + node for checkout) and build it: `./infra/coder-images/build.sh elixir`.
 
-2. Reload: `curl -u admin:$BOARD_AUTH_PASSWORD -X POST localhost:8090/api/catalog/reload`
+3. Reload: `curl -u admin:$BOARD_AUTH_PASSWORD -X POST localhost:8090/api/catalog/reload`
    (or restart the event-bus). Confirm with `GET /api/stacks`.
 
-3. (Optional) Build the coder image — see `infra/coder-images/`. Until it's built, the
-   coder runs in the default image; everything else (CI, scaffold, prompts) already works.
+Only one core-code touch-point exists: the in-worker tester (`agents/reviewer/test_runner.py`
+`detect_test_command`) has a per-stack branch so triage runs the right command (`cargo test`,
+`go test`, …) instead of the pytest fallback. Add a branch for your stack there; without it the
+tester still degrades safely to a `warn` that defers to CI. Everything else — provisioning,
+planning, coder prompts, approval dropdowns — is fully config-driven.
 
-That's it — no core-code change. The new stack appears in the approval dropdowns and flows
-through provisioning, planning, coding, and review.
+Until a coder image is built the coder falls back to the default image (CI, scaffold, and
+prompts still work), but the container-based CI needs the image, so build it before real runs.
 
 ## Notes on the current CI workflows
 
