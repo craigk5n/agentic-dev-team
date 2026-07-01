@@ -553,6 +553,28 @@ button.approve-btn:hover { background: rgba(34,197,94,.25); }
   white-space: nowrap; max-width: 150px; overflow: hidden; text-overflow: ellipsis;
 }
 .idea-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+
+/* Focus/legend bar: click an idea to spotlight its cards and dim the rest
+   (focus + context). Chips double as a legend mapping each color to its idea. */
+.board-legend { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 14px; }
+.board-legend:empty { margin: 0; }
+.legend-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; padding: 4px 12px; border-radius: 999px;
+  background: var(--surface); color: var(--muted);
+  border: 1px solid var(--border); cursor: pointer; transition: all .12s;
+}
+.legend-chip:hover { color: var(--text); border-color: var(--text); }
+.legend-chip.active {
+  color: var(--text); font-weight: 600;
+  border-color: var(--c, var(--accent));
+  box-shadow: inset 0 0 0 1px var(--c, var(--accent));
+}
+.legend-chip .legend-count { font-size: 10px; color: var(--muted); }
+.legend-chip.all-chip { font-weight: 600; }
+.board-item { transition: opacity .15s; }
+.board-item.dimmed { opacity: .28; }
+.board-item.dimmed:hover { opacity: .55; }
 .guide-wrap { margin-bottom: 6px; }
 .guide-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 3px; }
 .guide-pickers { display: flex; flex-direction: column; gap: 2px; }
@@ -1018,6 +1040,7 @@ button.code-btn:hover { background: rgba(59,130,246,.25); }
     <button class="secondary" id="refresh-board-btn">↻ Refresh</button>
     <span class="ts" id="board-ts"></span>
   </div>
+  <div id="board-legend" class="board-legend"></div>
   <div id="board-items">
     <div class="board-empty">Loading…</div>
   </div>
@@ -1657,6 +1680,9 @@ function verdictPip(label, status) {
 // Okabe-Ito qualitative palette (colorblind-safe); recycled if more ideas than hues.
 const IDEA_PALETTE = ['#E69F00', '#56B4E9', '#009E73', '#F0E442', '#0072B2', '#D55E00', '#CC79A7'];
 
+// Currently focused idea id (null = show all). Kept across re-renders/auto-refresh.
+let boardFocus = null;
+
 // A compact, human-readable label for an idea's chip: the first words of its title,
 // capped so cards stay tidy.
 function shortIdeaLabel(title) {
@@ -1665,6 +1691,46 @@ function shortIdeaLabel(title) {
   let s = words[0];
   for (let k = 1; k < words.length && (s + ' ' + words[k]).length <= 16; k++) s += ' ' + words[k];
   return s.length > 20 ? s.slice(0, 19) + '…' : s;
+}
+
+// Render the focus/legend bar: an "All" chip plus one chip per idea. Clicking an
+// idea spotlights it (dims the rest); clicking it again — or "All" — clears focus.
+// Only shown when 2+ ideas are on the board (with one, there's nothing to separate).
+function renderBoardLegend(ideas, ideaMeta) {
+  const bar = document.getElementById('board-legend');
+  if (!bar) return;
+  if (ideas.length < 2) { bar.innerHTML = ''; return; }
+  const allActive = boardFocus ? '' : ' active';
+  let html = `<button class="legend-chip all-chip${allActive}" data-idea="">All ideas</button>`;
+  for (const idea of ideas) {
+    const m = ideaMeta[idea.id];
+    const active = boardFocus === idea.id ? ' active' : '';
+    html += `<button class="legend-chip${active}" data-idea="${idea.id}" style="--c:${m.color}" title="${escHtml(idea.title)}">
+      <span class="idea-dot" style="background:${m.color}"></span>${escHtml(m.name)}
+    </button>`;
+  }
+  bar.innerHTML = html;
+  bar.querySelectorAll('.legend-chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+      const id = chip.dataset.idea;
+      // Toggle: re-clicking the focused idea clears focus back to "all".
+      boardFocus = (!id || boardFocus === id) ? null : id;
+      applyBoardFocus();
+    });
+  });
+}
+
+// Apply the current focus in-place (no refetch): highlight matching cards, dim the
+// rest, and sync the legend chips' active state.
+function applyBoardFocus() {
+  document.querySelectorAll('#board-legend .legend-chip').forEach(chip => {
+    const id = chip.dataset.idea;
+    chip.classList.toggle('active', boardFocus ? id === boardFocus : !id);
+  });
+  document.querySelectorAll('#board-items .board-item').forEach(card => {
+    const idea = card.dataset.idea;
+    card.classList.toggle('dimmed', !!boardFocus && idea !== boardFocus);
+  });
 }
 
 async function loadBoard() {
@@ -1690,6 +1756,10 @@ async function loadBoard() {
   ideas.forEach((idea, i) => {
     ideaMeta[idea.id] = { color: IDEA_PALETTE[i % IDEA_PALETTE.length], name: shortIdeaLabel(idea.title) };
   });
+  // Drop a stale focus if its idea is no longer on the board, then render the
+  // legend/focus bar (only worth showing when 2+ ideas are present).
+  if (boardFocus && !ideaMeta[boardFocus]) boardFocus = null;
+  renderBoardLegend(ideas, ideaMeta);
 
   if (!d.total) {
     container.innerHTML = '<div class="board-empty">No work items yet — submit an idea to get started.</div>';
@@ -1748,12 +1818,14 @@ async function loadBoard() {
         </div>` : '';
       // Per-idea accent: colored left stripe on every card (idea + its stories),
       // plus a name chip on story cards tying them back to their parent idea.
-      const im = ideaMeta[item.type === 'idea' ? item.id : item.parent_id];
+      const cardIdeaId = item.type === 'idea' ? item.id : item.parent_id;
+      const im = ideaMeta[cardIdeaId];
       const accentStyle = im ? ` style="border-left:3px solid ${im.color}"` : '';
       const ideaChip = (im && item.type !== 'idea')
         ? `<span class="idea-chip" style="color:${im.color}" title="Idea: ${escHtml(im.name)}"><span class="idea-dot" style="background:${im.color}"></span>${escHtml(im.name)}</span>`
         : '';
-      html += `<div class="board-item${backlogClass}" data-id="${item.id}"${accentStyle}>
+      const dimClass = (boardFocus && cardIdeaId !== boardFocus) ? ' dimmed' : '';
+      html += `<div class="board-item${backlogClass}${dimClass}" data-id="${item.id}" data-idea="${cardIdeaId || ''}"${accentStyle}>
         ${seqBadge}
         <div class="board-item-title" data-id="${item.id}">${escHtml(item.title)}</div>
         ${ideaChip}
