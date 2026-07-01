@@ -264,34 +264,34 @@ _MAX_PLAN_CHARS = 200_000   # fits a large PRD on a big-context model (Sonnet); 
 _MAX_IMPORT_EPICS = 25   # backstop for a very large PRD
 
 _NORMALIZE_EPICS_PROMPT = """\
-Read this EXISTING, pre-written implementation plan and extract its EPIC structure. You
+Read this EXISTING, pre-written implementation plan and extract ONLY its EPIC list. You
 are RE-STRUCTURING an existing plan, not inventing one — preserve its epics/phases and
 their order (if it has none, group related work into coherent epics, foundational-first).
 
 PLAN:
 {plan}
 
-For each epic, list the EXACT titles of the stories/tasks it contains (from the plan).
-OMIT pure setup/scaffolding steps ("create pyproject", "empty package skeleton", "git
-init") — the target repo is already scaffolded.
+Return just the epic names + a one-sentence description each. Do NOT list individual
+stories/tasks — those come next. OMIT any pure setup/scaffolding phase ("project
+skeleton", "bootstrap pyproject") — the target repo is already scaffolded.
 
 Respond ONLY with valid JSON (no markdown fences):
 {{"project_name": "<name>",
-  "epics": [{{"name": "<epic>", "description": "<one sentence>", "story_titles": ["<title>", "..."]}}]}}
+  "epics": [{{"name": "<epic>", "description": "<one sentence>"}}]}}
 """
 
 _NORMALIZE_STORIES_PROMPT = """\
-From this EXISTING implementation plan, expand the stories of ONE epic into implementable
-form for an autonomous coding pipeline.
+From this EXISTING implementation plan, extract and expand the stories of ONE epic into
+implementable form for an autonomous coding pipeline.
 
 PLAN:
 {plan}
 
-Expand the stories of THIS epic only:
+Focus ONLY on this epic:
 Epic: {epic_name} — {epic_desc}
-Its stories (titles from the plan): {story_titles}
 
-Rules:
+Find EVERY story/task in the plan that belongs to this epic and produce one story for
+each. Rules:
 - The target repo is ALREADY scaffolded — OMIT pure setup/scaffolding stories.
 {no_stub}
 - Carry each story's concrete spec (schemas, endpoints, names, acceptance) FROM THE PLAN
@@ -322,33 +322,32 @@ def normalize_plan(
     call = dict(model=model, api_key=api_key, stack=stack, redis_conn=redis_conn)
     plan = (plan_text or "")[:_MAX_PLAN_CHARS]
 
-    # ── Pass 1: epic structure (with each epic's story titles) ───────────────
+    # ── Pass 1: epic list only (names + descriptions) — tiny, truncation-proof ──
     try:
         top = _complete_json(
             [{"role": "system", "content": _SYSTEM},
              {"role": "user", "content": _NORMALIZE_EPICS_PROMPT.format(plan=plan)}],
-            max_tokens=8000, **call)
+            max_tokens=2000, **call)
     except Exception as exc:
         log.warning("normalize_epics_failed", error=str(exc)[:160])
         return _fallback("Imported plan", default_repo)
 
     project_name = (top.get("project_name") or "Imported plan")[:80]
-    epics = [{"name": e["name"], "description": e.get("description", ""),
-              "story_titles": [str(t) for t in (e.get("story_titles") or [])]}
+    epics = [{"name": e["name"], "description": e.get("description", "")}
              for e in top.get("epics", []) if e.get("name")][:_MAX_IMPORT_EPICS]
     if not epics:
         return _fallback(project_name, default_repo)
+    log.info("import_epics_extracted", project=project_name, epics=len(epics))
 
-    # ── Pass 2: expand each epic's stories (bounded output per call) ──────────
+    # ── Pass 2: per epic, find + expand its stories from the plan (bounded out) ─
     flat = []
     for epic in epics:
-        titles = ", ".join(epic["story_titles"][:40]) or "(infer from the plan)"
         try:
             data = _complete_json(
                 [{"role": "system", "content": _SYSTEM},
                  {"role": "user", "content": _NORMALIZE_STORIES_PROMPT.format(
                      plan=plan, epic_name=epic["name"], epic_desc=epic["description"],
-                     story_titles=titles, no_stub=_NO_STUB, default_repo=default_repo)}],
+                     no_stub=_NO_STUB, default_repo=default_repo)}],
                 max_tokens=8000, **call)
             stories = data.get("stories", [])
         except Exception as exc:
@@ -365,7 +364,6 @@ def normalize_plan(
 
     if not flat:
         return _fallback(project_name, default_repo)
-    clean_epics = [{"name": e["name"], "description": e["description"]} for e in epics]
-    log.info("plan_normalized", project=project_name, epics=len(clean_epics), stories=len(flat))
+    log.info("plan_normalized", project=project_name, epics=len(epics), stories=len(flat))
     return {"project_name": project_name, "module_name": project_name,
-            "epics": clean_epics, "stories": flat}
+            "epics": epics, "stories": flat}

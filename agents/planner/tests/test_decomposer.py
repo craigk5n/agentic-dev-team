@@ -106,10 +106,10 @@ class TestTwoLevelPlan:
 
 
 class TestNormalizePlan:
-    # Pass 1 (epics + story titles), then one stories-pass per epic.
+    # Pass 1 returns epic names only (no story titles); pass 2 discovers stories per epic.
     _EPICS = {"project_name": "Task API", "epics": [
-        {"name": "Data Model", "description": "models + storage", "story_titles": ["Task model"]},
-        {"name": "Endpoints", "description": "REST", "story_titles": ["CRUD endpoints"]}]}
+        {"name": "Data Model", "description": "models + storage"},
+        {"name": "Endpoints", "description": "REST"}]}
     _STORIES_1 = {"stories": [{"title": "Task model", "description": "repo: o/r\nmodel", "priority": "high"}]}
     _STORIES_2 = {"stories": [{"title": "CRUD endpoints", "description": "endpoints", "priority": "medium"}]}
 
@@ -123,8 +123,6 @@ class TestNormalizePlan:
         assert plan["stories"][0]["epic"] == "Data Model"
         # repo prefix enforced even when the stories pass omits it
         assert plan["stories"][1]["description"].startswith("repo: o/r")
-        # epics carry no internal story_titles field into the persisted plan
-        assert "story_titles" not in plan["epics"][0]
 
     def test_one_stories_call_per_epic(self):
         with patch("planner_agent.decomposer.litellm.completion",
@@ -132,14 +130,17 @@ class TestNormalizePlan:
             normalize_plan("plan", model="m", default_repo="o/r")
         assert mock.call_count == 3          # 1 epics pass + 2 epics × 1 stories pass
 
-    def test_reconciliation_guidance_in_stories_prompt(self):
+    def test_pass1_epics_only_pass2_discovers_stories(self):
         with patch("planner_agent.decomposer.litellm.completion",
                    side_effect=_seq(self._EPICS, self._STORIES_1, self._STORIES_2)) as mock:
             normalize_plan("some plan text", model="m", default_repo="o/r")
         epics_prompt = mock.call_args_list[0][1]["messages"][1]["content"].lower()
         assert "re-structuring an existing plan" in epics_prompt
+        assert "do not list individual" in epics_prompt        # pass 1 stays tiny
+        assert mock.call_args_list[0][1]["max_tokens"] == 2000
         stories_prompt = mock.call_args_list[1][1]["messages"][1]["content"].lower()
         assert "already scaffolded" in stories_prompt
+        assert "find every story" in stories_prompt             # pass 2 self-discovers
 
     def test_one_bad_epic_does_not_sink_the_plan(self):
         # If an epic's stories pass fails, its stories are skipped but others survive.
