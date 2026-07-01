@@ -3,6 +3,11 @@
 ARG BASE_IMAGE=dev-agents/event-bus:latest
 FROM ${BASE_IMAGE}
 
+# A C linker (cc) + libc headers — rustc shells out to `cc` to link every binary and
+# test, and the rustup minimal profile / base image ship neither.
+RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 # Rust toolchain via rustup-init (pinned), with rustfmt + clippy components. Installed
 # system-wide and world-writable so the unprivileged sandbox user can build/cache.
 ARG RUST_VERSION=1.79.0
