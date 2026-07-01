@@ -81,7 +81,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     # Migrate existing DBs that pre-date optional columns
     for col, definition in [("pr_url", "TEXT"), ("sequence", "INTEGER"), ("repo", "TEXT"),
                             ("stack", "TEXT"), ("sdlc", "TEXT"), ("stack_rationale", "TEXT"),
-                            ("style_guides", "TEXT"), ("archived_at", "TEXT")]:
+                            ("style_guides", "TEXT"), ("archived_at", "TEXT"),
+                            ("epic", "TEXT")]:
         try:
             conn.execute(f"ALTER TABLE work_items ADD COLUMN {col} {definition}")
             conn.commit()
@@ -104,6 +105,7 @@ def create_item(
     sdlc: str = "",
     stack_rationale: str = "",
     style_guides: Optional[list[str]] = None,
+    epic: str = "",
     item_id: Optional[str] = None,
     created_at: Optional[str] = None,
 ) -> dict:
@@ -115,12 +117,12 @@ def create_item(
         db.execute(
             """INSERT INTO work_items
                (id, type, title, prompt, description, state, parent_id, sequence,
-                model_used, repo, stack, sdlc, stack_rationale, style_guides,
+                model_used, repo, stack, sdlc, stack_rationale, style_guides, epic,
                 created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (item_id, item_type, title, prompt, description, state, parent_id,
              sequence, model_used, repo or None, stack or None, sdlc or None,
-             stack_rationale or None, guides_csv, now, now),
+             stack_rationale or None, guides_csv, epic or None, now, now),
         )
         db.commit()
     return get_item(item_id)

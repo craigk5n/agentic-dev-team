@@ -310,6 +310,42 @@ class TestRecoveryControls:
         assert resp.status_code == 409
 
 
+class TestPlanApproval:
+    _idea = {"id": "idea-1", "title": "P", "state": "approved", "type": "idea",
+             "description": "d", "pr_url": None}
+    _backlog = [
+        {"id": "s1", "parent_id": "idea-1", "type": "story", "state": "backlog",
+         "sequence": 1, "title": "One", "description": "d"},
+        {"id": "s2", "parent_id": "idea-1", "type": "story", "state": "backlog", "sequence": 2},
+    ]
+
+    def test_approve_plan_starts_first_story(self, client, monkeypatch):
+        monkeypatch.setattr("event_bus.main._redis_conn", fakeredis.FakeRedis())
+        with patch("event_bus.main.get_item", return_value=self._idea), \
+             patch("event_bus.main.list_items", return_value=self._backlog), \
+             patch("event_bus.main.update_state") as upd, \
+             patch("event_bus.main.get_prompt", return_value=""), \
+             patch("event_bus.main._run_coding_agent", new_callable=AsyncMock) as coder:
+            resp = client.post("/api/items/idea-1/approve-plan")
+        assert resp.status_code == 202
+        assert resp.json()["first_story"] == "s1"
+        upd.assert_any_call("s1", "in-progress")   # lowest-sequence story dispatched
+        coder.assert_called_once()
+
+    def test_approve_plan_already_started_is_409(self, client):
+        started = [{**self._backlog[0], "state": "in-progress"}, self._backlog[1]]
+        with patch("event_bus.main.get_item", return_value=self._idea), \
+             patch("event_bus.main.list_items", return_value=started):
+            resp = client.post("/api/items/idea-1/approve-plan")
+        assert resp.status_code == 409
+
+    def test_approve_plan_no_stories_is_409(self, client):
+        with patch("event_bus.main.get_item", return_value=self._idea), \
+             patch("event_bus.main.list_items", return_value=[]):
+            resp = client.post("/api/items/idea-1/approve-plan")
+        assert resp.status_code == 409
+
+
 class TestProjectLifecycle:
     _idea = {"id": "idea-1", "title": "Auth", "state": "approved", "type": "idea",
              "repo": "dev/app", "description": "d", "pr_url": None}

@@ -626,7 +626,18 @@ button.code-btn:hover { background: rgba(59,130,246,.25); }
 }
 .recov-btn:hover { color: var(--text); border-color: var(--text); }
 .recov-btn.abandon-btn:hover, .recov-btn.cancel-btn:hover { color: var(--red); border-color: var(--red); }
+.recov-btn.start-plan-btn {
+  color: #22c55e; border-color: rgba(34,197,94,.5); font-weight: 600;
+  background: rgba(34,197,94,.10);
+}
+.recov-btn.start-plan-btn:hover { background: rgba(34,197,94,.2); color: #22c55e; border-color: #22c55e; }
 .recov-btn:disabled { opacity: .5; cursor: default; }
+/* Epic tag on story cards — which feature area a story belongs to. */
+.epic-badge {
+  display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 999px;
+  background: rgba(148,163,184,.14); color: var(--muted);
+  border: 1px solid var(--border); vertical-align: middle;
+}
 /* Projects view */
 .proj-row {
   display: flex; align-items: center; gap: 12px; padding: 10px 14px; margin-bottom: 6px;
@@ -804,6 +815,9 @@ button.code-btn:hover { background: rgba(59,130,246,.25); }
 .md-body pre code { background:none; padding:0; }
 .md-body strong { color:var(--text); font-weight:600; }
 .plan-story-list { display:flex; flex-direction:column; gap:6px; }
+.plan-epic-header { font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.06em;
+  color:var(--accent); margin:12px 0 2px; }
+.plan-epic-header:first-child { margin-top:0; }
 .plan-story-row { display:flex; align-items:flex-start; gap:8px; padding:8px 10px; background:var(--surface2); border-radius:6px; }
 .plan-story-row:hover { background:var(--surface3,#2a2d3a); }
 .plan-seq { font-size:11px; color:var(--muted); min-width:18px; padding-top:2px; }
@@ -936,6 +950,16 @@ button.code-btn:hover { background: rgba(59,130,246,.25); }
       </div>
       <label class="toggle">
         <input type="checkbox" checked disabled>
+        <span class="slider"></span>
+      </label>
+    </div>
+    <div class="toggle-row">
+      <div class="toggle-info">
+        <div class="name">Plan Approval</div>
+        <div class="desc">Hold the plan after decomposition — review the epics/stories on the board and start it, so a large plan doesn't run automatically.</div>
+      </div>
+      <label class="toggle">
+        <input type="checkbox" id="gate-plan-approval" checked>
         <span class="slider"></span>
       </label>
     </div>
@@ -1450,6 +1474,7 @@ async function loadConfig() {
   try {
     const data = await api('/api/config');
     buildConfigForms();
+    document.getElementById('gate-plan-approval').checked = data.gates.plan_approval !== false;
     document.getElementById('gate-pr-merge').checked = data.gates.pr_merge_approval;
     document.getElementById('gate-security').checked = data.gates.security_signoff;
     document.getElementById('gate-free-models').checked = data.gates.free_models_only || false;
@@ -1476,6 +1501,7 @@ document.getElementById('save-config-btn').addEventListener('click', async () =>
   btn.textContent = 'Saving…';
 
   const gates = {
+    plan_approval: document.getElementById('gate-plan-approval').checked,
     pr_merge_approval: document.getElementById('gate-pr-merge').checked,
     security_signoff: document.getElementById('gate-security').checked,
     free_models_only: document.getElementById('gate-free-models').checked,
@@ -1814,12 +1840,22 @@ async function loadBoard() {
   ideas.forEach((idea, i) => {
     ideaMeta[idea.id] = { color: IDEA_PALETTE[i % IDEA_PALETTE.length], name: shortIdeaLabel(idea.title) };
   });
-  // Derive each idea's repo browser URL from a story's PR URL (public host).
-  const ideaRepoUrl = {};
+  // Derive each idea's repo URL (from a story's PR URL) and detect plans held by the
+  // plan-approval gate (all stories still in backlog → awaiting the operator's start).
+  const ideaRepoUrl = {}, storiesByIdea = {};
   for (const it of d.groups.flatMap(g => g.items)) {
-    if (it.parent_id && it.pr_url && !ideaRepoUrl[it.parent_id]) {
+    if (!it.parent_id) continue;
+    (storiesByIdea[it.parent_id] = storiesByIdea[it.parent_id] || []).push(it);
+    if (it.pr_url && !ideaRepoUrl[it.parent_id]) {
       const m = it.pr_url.match(/^(.*)\/pulls\/\d+/);
       if (m) ideaRepoUrl[it.parent_id] = m[1];
+    }
+  }
+  const planPending = {};  // idea id -> {stories, epics} when the plan is held
+  for (const idea of ideas) {
+    const kids = storiesByIdea[idea.id] || [];
+    if (kids.length && kids.every(s => s.state === 'backlog')) {
+      planPending[idea.id] = { stories: kids.length, epics: new Set(kids.map(s => s.epic).filter(Boolean)).size };
     }
   }
   // Drop a stale focus if its idea is no longer on the board, then render the
@@ -1882,8 +1918,11 @@ async function loadBoard() {
       } else if (item.type === 'idea' && item.state === 'approved') {
         const repoLink = ideaRepoUrl[item.id]
           ? `<a class="pr-link" href="${escHtml(ideaRepoUrl[item.id])}" target="_blank" title="Open repo (main branch)">↗ repo</a>` : '';
+        const pp = planPending[item.id];
+        const startPlan = pp
+          ? `<button class="recov-btn start-plan-btn" data-id="${item.id}" title="Review done — start running the plan">▶ Start plan (${pp.epics ? pp.epics + ' epics · ' : ''}${pp.stories} stories)</button>` : '';
         recovery = `<div class="board-item-actions recov">
-          ${repoLink}
+          ${startPlan}${repoLink}
           <button class="recov-btn replan-btn" data-id="${item.id}" title="Re-run the planner for this project">↻ Re-plan</button>
           <button class="recov-btn cancel-btn" data-id="${item.id}" title="Stop this project and abandon its stories">✕ Cancel</button>
           <button class="recov-btn arch-proj" data-id="${item.id}" title="Archive this project (hide from the board, keep history)">🗄 Archive</button>
@@ -1896,6 +1935,7 @@ async function loadBoard() {
       const sdlcSuffix = (item.sdlc && item.sdlc !== 'standard') ? '·' + escHtml(item.sdlc) : '';
       const stackBadge = (item.stack && item.state !== 'pending-approval')
         ? `<span class="stack-badge" title="tech stack / SDLC">${escHtml(item.stack)}${sdlcSuffix}</span>` : '';
+      const epicBadge = item.epic ? `<span class="epic-badge" title="epic">${escHtml(item.epic)}</span>` : '';
       const backlogClass = item.state === 'backlog' ? ' backlog' : '';
       // An idea is a "proposal" until approved, a "project" thereafter (UI relabel only).
       const typeLabel = item.type === 'idea'
@@ -1918,7 +1958,7 @@ async function loadBoard() {
         ${seqBadge}
         <div class="board-item-title" data-id="${item.id}">${escHtml(item.title)}</div>
         ${ideaChip}
-        <div class="board-item-meta">${typeLabel}${tsSpan ? ' · ' + tsSpan : ''}${stackBadge ? ' ' + stackBadge : ''}</div>
+        <div class="board-item-meta">${typeLabel}${tsSpan ? ' · ' + tsSpan : ''}${epicBadge ? ' ' + epicBadge : ''}${stackBadge ? ' ' + stackBadge : ''}</div>
         ${verdictRow}
         ${actions}
         ${recovery}
@@ -1993,6 +2033,7 @@ async function loadBoard() {
 
   // Operator recovery buttons (retry / reset / abandon / re-plan / cancel)
   const RECOVERY = {
+    'start-plan-btn': { path: 'approve-plan', toast: 'Plan started' },
     'retry-btn':   { path: 'retry',   toast: 'Retrying…' },
     'reset-btn':   { path: 'reset',   toast: 'Reset — restarting coder' },
     'abandon-btn': { path: 'abandon', toast: 'Story abandoned', confirm: 'Abandon this story and unlock the next?' },
@@ -2143,9 +2184,18 @@ async function openDrawer(id) {
       const children = board.groups.flatMap(g => g.items.filter(i => i.parent_id === item.id))
         .sort((a, b) => (a.sequence || 0) - (b.sequence || 0));
       if (children.length) {
-        body += `<div style="color:var(--muted);font-size:12px;margin:16px 0 8px">Plan (${children.length} stories)</div>`;
+        const epicCount = new Set(children.map(s => s.epic).filter(Boolean)).size;
+        const doneCount = children.filter(s => s.state === 'done').length;
+        const allBacklog = children.every(s => s.state === 'backlog');
+        body += `<div style="color:var(--muted);font-size:12px;margin:16px 0 8px">Plan · ${epicCount ? epicCount + ' epics · ' : ''}${children.length} stories · ${doneCount} done${allBacklog ? ' · <span style="color:#22c55e">awaiting start</span>' : ''}</div>`;
         body += `<div class="plan-story-list">`;
+        let curEpic = null;
         for (const s of children) {
+          const ep = s.epic || '';
+          if (ep !== curEpic) {          // epic subheading whenever the epic changes
+            curEpic = ep;
+            if (ep) body += `<div class="plan-epic-header">${escHtml(ep)}</div>`;
+          }
           const stateColor = {'ready':'#22c55e','in-progress':'#f59e0b','in-review':'#a78bfa',
             'merged':'#60a5fa','done':'#60a5fa','backlog':'#6b7280','approved':'#22c55e'}[s.state] || '#6b7280';
           const desc = (s.description || '').replace(/^repo:[^\n]*\n?/, '').split('\n')[0].trim();

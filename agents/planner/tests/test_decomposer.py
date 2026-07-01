@@ -1,95 +1,97 @@
-"""Tests for the idea decomposer."""
+"""Tests for the two-level idea decomposer (epics → stories → critic)."""
 
 import json
 from unittest.mock import MagicMock, patch
 
-import pytest
-
-from planner_agent.decomposer import decompose_idea, _parse
+from planner_agent.decomposer import decompose_idea
 
 
 def _mock_llm(text: str):
-    msg = MagicMock()
-    msg.content = text
-    choice = MagicMock()
-    choice.message = msg
-    resp = MagicMock()
-    resp.choices = [choice]
+    msg = MagicMock(); msg.content = text
+    choice = MagicMock(); choice.message = msg
+    resp = MagicMock(); resp.choices = [choice]
     return resp
 
 
-_VALID = {
-    "module_name": "Auth Module",
-    "module_description": "Full authentication system",
-    "stories": [
-        {"title": "Password hashing", "description": "repo: dev/app\nHash passwords.", "priority": "high"},
-        {"title": "JWT tokens", "description": "repo: dev/app\nIssue JWTs.", "priority": "medium"},
-    ],
-}
+def _seq(*payloads):
+    """A side_effect list of mock LLM responses, one per expected call."""
+    return [_mock_llm(json.dumps(p) if not isinstance(p, str) else p) for p in payloads]
 
 
-class TestDecomposeIdea:
-    def test_returns_structured_plan(self):
-        with patch("planner_agent.decomposer.litellm.completion", return_value=_mock_llm(json.dumps(_VALID))):
-            result = decompose_idea("Auth", "Build auth", model="m")
-        assert result["module_name"] == "Auth Module"
-        assert len(result["stories"]) == 2
+_EPICS = {"project_name": "Auth Module", "epics": [
+    {"name": "Password hashing", "description": "Securely hash + verify passwords."},
+    {"name": "Tokens", "description": "Issue and validate JWTs."},
+]}
+_STORIES_A = {"stories": [{"title": "Hash on signup", "description": "repo: dev/app\nHash.", "priority": "high"}]}
+_STORIES_B = {"stories": [{"title": "Issue JWT", "description": "repo: dev/app\nJWT.", "priority": "medium"}]}
+_NO_MISSING = {"missing": []}
 
-    def test_passes_api_key(self):
-        with patch("planner_agent.decomposer.litellm.completion", return_value=_mock_llm(json.dumps(_VALID))) as mock:
+
+class TestTwoLevelPlan:
+    def test_epics_then_stories_flattened_and_tagged(self):
+        with patch("planner_agent.decomposer.litellm.completion",
+                   side_effect=_seq(_EPICS, _STORIES_A, _STORIES_B, _NO_MISSING)):
+            plan = decompose_idea("Auth", "Build auth", model="m")
+        assert plan["project_name"] == "Auth Module"
+        assert [e["name"] for e in plan["epics"]] == ["Password hashing", "Tokens"]
+        # stories are flattened epic-by-epic and tagged with their epic
+        assert [s["title"] for s in plan["stories"]] == ["Hash on signup", "Issue JWT"]
+        assert plan["stories"][0]["epic"] == "Password hashing"
+        assert plan["stories"][1]["epic"] == "Tokens"
+
+    def test_completeness_critic_adds_missing_stories(self):
+        crit = {"missing": [{"epic": "Tokens", "title": "Refresh tokens",
+                             "description": "repo: dev/app\nRotate.", "priority": "high"}]}
+        with patch("planner_agent.decomposer.litellm.completion",
+                   side_effect=_seq(_EPICS, _STORIES_A, _STORIES_B, crit)):
+            plan = decompose_idea("Auth", "Build auth", model="m")
+        titles = [s["title"] for s in plan["stories"]]
+        assert "Refresh tokens" in titles
+        # appended under its epic
+        assert next(s for s in plan["stories"] if s["title"] == "Refresh tokens")["epic"] == "Tokens"
+
+    def test_critic_can_introduce_a_new_epic(self):
+        crit = {"missing": [{"epic": "Accessibility", "title": "Keyboard nav",
+                             "description": "repo: dev/app\nA11y.", "priority": "low"}]}
+        with patch("planner_agent.decomposer.litellm.completion",
+                   side_effect=_seq(_EPICS, _STORIES_A, _STORIES_B, crit)):
+            plan = decompose_idea("Auth", "Build auth", model="m")
+        assert "Accessibility" in [e["name"] for e in plan["epics"]]
+
+    def test_epics_prompt_orders_foundational_first_and_scopes(self):
+        with patch("planner_agent.decomposer.litellm.completion",
+                   side_effect=_seq(_EPICS, _STORIES_A, _STORIES_B, _NO_MISSING)) as mock:
+            decompose_idea("Auth", "Build auth", model="m")
+        epics_prompt = mock.call_args_list[0][1]["messages"][1]["content"].lower()
+        assert "foundational-first" in epics_prompt
+        assert "cover the full scope" in epics_prompt
+
+    def test_stories_prompt_forbids_stubs_and_pins_repo(self):
+        with patch("planner_agent.decomposer.litellm.completion",
+                   side_effect=_seq(_EPICS, _STORIES_A, _STORIES_B, _NO_MISSING)) as mock:
+            decompose_idea("Auth", "Build auth", model="m", default_repo="alice/backend")
+        stories_prompt = mock.call_args_list[1][1]["messages"][1]["content"].lower()
+        assert "already scaffolded" in stories_prompt
+        assert "signature" in stories_prompt
+        assert "alice/backend" in stories_prompt
+
+    def test_repo_prefix_enforced_on_stories(self):
+        no_prefix = {"stories": [{"title": "X", "description": "do the thing", "priority": "low"}]}
+        with patch("planner_agent.decomposer.litellm.completion",
+                   side_effect=_seq(_EPICS, no_prefix, _STORIES_B, _NO_MISSING)):
+            plan = decompose_idea("Auth", "Build auth", model="m", default_repo="o/r")
+        assert plan["stories"][0]["description"].startswith("repo: o/r")
+
+    def test_api_key_passed_through(self):
+        with patch("planner_agent.decomposer.litellm.completion",
+                   side_effect=_seq(_EPICS, _STORIES_A, _STORIES_B, _NO_MISSING)) as mock:
             decompose_idea("T", "D", model="m", api_key="sk-test")
-        assert mock.call_args[1]["api_key"] == "sk-test"
+        assert mock.call_args_list[0][1]["api_key"] == "sk-test"
 
-    def test_no_api_key_not_passed(self):
-        with patch("planner_agent.decomposer.litellm.completion", return_value=_mock_llm(json.dumps(_VALID))) as mock:
-            decompose_idea("T", "D", model="m")
-        assert "api_key" not in mock.call_args[1]
-
-    def test_default_repo_in_prompt(self):
-        with patch("planner_agent.decomposer.litellm.completion", return_value=_mock_llm(json.dumps(_VALID))) as mock:
-            decompose_idea("T", "D", model="m", default_repo="alice/backend")
-        prompt_content = mock.call_args[1]["messages"][1]["content"]
-        assert "alice/backend" in prompt_content
-
-    def test_prompt_forbids_stub_only_stories(self):
-        # The repo is already scaffolded at provisioning; the planner must not emit
-        # signature-only / setup-only first stories (they can't pass review — the
-        # function is unimplemented — and churn the recode loop until it's parked).
-        with patch("planner_agent.decomposer.litellm.completion", return_value=_mock_llm(json.dumps(_VALID))) as mock:
-            decompose_idea("T", "D", model="m")
-        prompt = mock.call_args[1]["messages"][1]["content"].lower()
-        assert "already scaffolded" in prompt
-        assert "signature" in prompt  # explicit no-signature-only rule
-
-    def test_tolerates_markdown_fences(self):
-        raw = f"```json\n{json.dumps(_VALID)}\n```"
-        with patch("planner_agent.decomposer.litellm.completion", return_value=_mock_llm(raw)):
-            result = decompose_idea("T", "D", model="m")
-        assert result["module_name"] == "Auth Module"
-
-    def test_description_truncated(self):
-        long_desc = "x" * 5000
-        with patch("planner_agent.decomposer.litellm.completion", return_value=_mock_llm(json.dumps(_VALID))) as mock:
-            decompose_idea("T", long_desc, model="m")
-        prompt = mock.call_args[1]["messages"][1]["content"]
-        # The 5000-char description must be truncated to 4000 chars in the prompt.
-        # Verify no run of 4001+ consecutive x's exists.
-        assert "x" * 4001 not in prompt
-
-
-class TestParse:
-    def test_valid_json(self):
-        raw = json.dumps(_VALID)
-        result = _parse(raw, "title", "repo")
-        assert result["module_name"] == "Auth Module"
-
-    def test_missing_fields_falls_back(self):
-        raw = '{"only_module": "M"}'
-        result = _parse(raw, "My Feature", "devadmin/sandbox")
-        assert result["module_name"] == "My Feature"
-        assert len(result["stories"]) == 1
-
-    def test_json_error_falls_back(self):
-        result = _parse("{bad json", "My Feature", "devadmin/sandbox")
-        assert "My Feature" in result["module_name"]
-        assert "devadmin/sandbox" in result["stories"][0]["description"]
+    def test_fallback_when_epics_pass_fails(self):
+        with patch("planner_agent.decomposer.litellm.completion",
+                   side_effect=_seq("{bad json")):
+            plan = decompose_idea("My Feature", "D", model="m", default_repo="devadmin/sandbox")
+        assert plan["module_name"].startswith("My Feature")
+        assert len(plan["stories"]) == 1
+        assert plan["stories"][0]["description"].startswith("repo: devadmin/sandbox")

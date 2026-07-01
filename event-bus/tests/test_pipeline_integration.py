@@ -68,10 +68,15 @@ class TestPipelineLifecycle:
             {"title": "Story one", "description": "do one"},
             {"title": "Story two", "description": "do two"},
         ]}
+        # Disable the plan-approval gate here — this test targets the execution
+        # lifecycle (auto-dispatch); the gate has its own unit tests.
+        from event_bus.config_store import RuntimeConfig, GateConfig
+        no_plan_gate = RuntimeConfig(gates=GateConfig(plan_approval=False))
         coder = AsyncMock()
         with patch("event_bus.main._provision_project_repo", return_value="dev/thing"), \
              patch("planner_agent.main.run_planner", return_value=plan), \
              patch("event_bus.main._run_coding_agent", coder), \
+             patch("event_bus.main.get_config", return_value=no_plan_gate), \
              patch("event_bus.main.get_prompt", return_value=""):
             _run(m._run_planner(idea_id, idea["title"], idea["description"]))
 

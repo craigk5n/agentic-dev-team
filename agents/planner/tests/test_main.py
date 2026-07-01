@@ -64,7 +64,7 @@ class TestSdlcAwarePlanning:
         block = _style_block("write failing tests first", "use type hints")
         assert "write failing tests first" in block
         assert "use type hints" in block
-        assert "ORDERING" in block
+        assert "follow strictly" in block
 
     def test_style_block_empty_when_none(self):
         from planner_agent.decomposer import _style_block
@@ -73,16 +73,18 @@ class TestSdlcAwarePlanning:
     def test_decompose_injects_directive_into_prompt(self):
         from unittest.mock import MagicMock
         import planner_agent.decomposer as dec
-        captured = {}
 
-        def fake_completion(**kwargs):
-            captured["content"] = kwargs["messages"][1]["content"]
-            r = MagicMock()
-            r.choices[0].message.content = '{"module_name":"M","module_description":"d","stories":[]}'
-            return r
-
-        with patch.object(dec.litellm, "completion", side_effect=fake_completion):
+        def _r(text):
+            m = MagicMock(); m.choices[0].message.content = text; return m
+        # epics → per-epic stories → critic; the style block rides on the stories pass.
+        seq = [
+            _r('{"project_name":"P","epics":[{"name":"E","description":"d"}]}'),
+            _r('{"stories":[{"title":"s","description":"repo: o/r\\nx","priority":"low"}]}'),
+            _r('{"missing":[]}'),
+        ]
+        with patch.object(dec.litellm, "completion", side_effect=seq) as mock:
             dec.decompose_idea("T", "D", model="m", sdlc_directive="TDD_DIRECTIVE",
                                best_practices="GO_CONV")
-        assert "TDD_DIRECTIVE" in captured["content"]
-        assert "GO_CONV" in captured["content"]
+        stories_prompt = mock.call_args_list[1][1]["messages"][1]["content"]
+        assert "TDD_DIRECTIVE" in stories_prompt
+        assert "GO_CONV" in stories_prompt

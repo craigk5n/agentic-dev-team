@@ -670,10 +670,12 @@ async def _run_planner(item_id: str, title: str, description: str) -> None:
 
     stories = plan.get("stories", [])
     idea_guides = [g for g in (item.get("style_guides") or "").split(",") if g]
+    # Plan-approval gate: when ON, every story is parked in backlog until the operator
+    # approves the plan; when OFF, the first story starts immediately (legacy behavior).
+    plan_gate = cfg.gates.plan_approval
     first_story: dict = {}
     for i, story in enumerate(stories):
-        # Only the first story starts ready; the rest are backlog until their predecessor merges
-        state = "ready" if i == 0 else "backlog"
+        state = "backlog" if (plan_gate or i > 0) else "ready"
         story_item = create_item(
             item_type="story",
             title=story["title"],
@@ -686,27 +688,32 @@ async def _run_planner(item_id: str, title: str, description: str) -> None:
             stack=stack.id,
             sdlc=sdlc.id,
             style_guides=idea_guides,
+            epic=story.get("epic", ""),
         )
         log.info("story_created", id=story_item["id"], seq=i + 1, state=state,
-                 title=story_item["title"], repo=repo_full)
+                 epic=story.get("epic", ""), title=story_item["title"], repo=repo_full)
         if i == 0:
             first_story = story_item
 
     log.info(
         "planner_complete",
         idea_id=item_id,
-        module=plan.get("module_name"),
-        story_count=len(plan.get("stories", [])),
+        module=plan.get("project_name") or plan.get("module_name"),
+        epics=len(plan.get("epics", [])),
+        story_count=len(stories),
         repo=repo_full,
     )
 
-    if stories:
+    if stories and not plan_gate:
         update_state(first_story["id"], "in-progress")
         story_prompt = get_prompt(_redis_conn, "coder.story")
         asyncio.create_task(_run_coding_agent(
             first_story["id"], first_story["title"], first_story["description"] or "", story_prompt,
         ))
         log.info("coding_agent_auto_triggered", story_id=first_story["id"])
+    elif stories:
+        log.info("plan_awaiting_approval", idea_id=item_id,
+                 epics=len(plan.get("epics", [])), stories=len(stories))
 
 
 @app.post("/api/items/{item_id}/code", status_code=status.HTTP_202_ACCEPTED)
@@ -1278,6 +1285,28 @@ async def plan_item(item_id: str):
         raise HTTPException(status_code=409, detail="only ideas can be planned")
     asyncio.create_task(_run_planner(item_id, item["title"], item["description"] or ""))
     return {"status": "planning_started", "id": item_id}
+
+
+@app.post("/api/items/{item_id}/approve-plan", status_code=status.HTTP_202_ACCEPTED)
+async def approve_plan(item_id: str):
+    """Release a plan held by the plan-approval gate: start the first story running."""
+    item = get_item(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="item not found")
+    if item["type"] != "idea":
+        raise HTTPException(status_code=409, detail="only projects have a plan to approve")
+    stories = [s for s in list_items(item_type="story") if s.get("parent_id") == item_id]
+    if not stories:
+        raise HTTPException(status_code=409, detail="no plan to start — run the planner first")
+    if any(s["state"] != "backlog" for s in stories):
+        raise HTTPException(status_code=409, detail="plan already started")
+    first = min(stories, key=lambda s: s.get("sequence") or 999)
+    update_state(first["id"], "in-progress")
+    story_prompt = get_prompt(_redis_or_503(), "coder.story")
+    asyncio.create_task(_run_coding_agent(
+        first["id"], first["title"], first.get("description") or "", story_prompt))
+    log.info("plan_approved", idea_id=item_id, stories=len(stories), first=first["id"])
+    return {"status": "plan_started", "id": item_id, "first_story": first["id"]}
 
 
 @app.post("/api/items/{item_id}/reject", status_code=status.HTTP_200_OK)

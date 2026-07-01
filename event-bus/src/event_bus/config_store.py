@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     import redis
 
 _KEY = "runtime_config"
-_GATE_FIELDS = {"pr_merge_approval", "security_signoff", "free_models_only"}  # idea_approval is always ON
+_GATE_FIELDS = {"pr_merge_approval", "security_signoff", "free_models_only", "plan_approval"}  # idea_approval is always ON
 _MODEL_ROLES = {"idea", "planner", "coder", "reviewer", "tester", "security"}
 
 
@@ -25,6 +25,7 @@ class GateConfig:
     pr_merge_approval: bool = False
     security_signoff: bool = True
     free_models_only: bool = False  # advisory flag: restrict roles to free/local models
+    plan_approval: bool = True    # ON — hold the plan for operator review before stories run
 
 
 @dataclass
@@ -97,6 +98,7 @@ def _load(r: "redis.Redis") -> RuntimeConfig:
             pr_merge_approval=g.get("pr_merge_approval", False),
             security_signoff=g.get("security_signoff", True),
             free_models_only=g.get("free_models_only", False),
+            plan_approval=g.get("plan_approval", True),
         )
         models = ModelConfig(
             **{k: m.get(k, "") for k in ModelConfig.__dataclass_fields__}
