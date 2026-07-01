@@ -378,6 +378,64 @@ class TestProjectLifecycle:
         assert resp.json()["projects"][0]["stories_done"] == 4
 
 
+class TestSandboxResilience:
+    def test_read_container_json_from_archive(self):
+        import io, tarfile
+        payload = json.dumps({"status": "success", "pr_url": "x"}).encode()
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tar:
+            info = tarfile.TarInfo(name="result.json"); info.size = len(payload)
+            tar.addfile(info, io.BytesIO(payload))
+        container = MagicMock()
+        container.get_archive.return_value = (iter([buf.getvalue()]), {})
+        from event_bus.main import _read_container_json
+        assert _read_container_json(container, "/output/result.json") == {"status": "success", "pr_url": "x"}
+
+    def test_read_container_json_missing_returns_none(self):
+        container = MagicMock()
+        container.get_archive.side_effect = Exception("not found")
+        from event_bus.main import _read_container_json
+        assert _read_container_json(container, "/x") is None
+
+    def test_reconcile_orphaned_stories_resets_and_dispatches(self, monkeypatch):
+        monkeypatch.setattr(settings, "max_coding_agents", 2)
+        stories = [{"id": "s1", "state": "in-progress", "type": "story"}]
+        with patch("event_bus.main.list_items", return_value=stories), \
+             patch("event_bus.main.update_state") as upd, \
+             patch("event_bus.main._dispatch_next_ready") as disp:
+            from event_bus.main import _reconcile_orphaned_stories
+            _reconcile_orphaned_stories()
+        upd.assert_any_call("s1", "ready")
+        assert disp.call_count == 2  # fills both coder slots
+
+    def test_reconcile_orphaned_stories_noop_when_none(self, monkeypatch):
+        with patch("event_bus.main.list_items", return_value=[]), \
+             patch("event_bus.main._dispatch_next_ready") as disp:
+            from event_bus.main import _reconcile_orphaned_stories
+            _reconcile_orphaned_stories()
+        disp.assert_not_called()
+
+    def test_reap_orphan_sandboxes_process_mode_noop(self, monkeypatch):
+        monkeypatch.setattr(settings, "sandbox_mode", "process")
+        from event_bus.main import _reap_orphan_coder_sandboxes
+        assert _reap_orphan_coder_sandboxes() == 0
+
+    def test_reap_orphan_sandboxes_removes_labeled(self, monkeypatch):
+        import sys
+        monkeypatch.setattr(settings, "sandbox_mode", "docker")
+        c1, c2 = MagicMock(), MagicMock()
+        fake_client = MagicMock()
+        fake_client.containers.list.return_value = [c1, c2]
+        fake_docker = MagicMock()
+        fake_docker.from_env.return_value = fake_client
+        monkeypatch.setitem(sys.modules, "docker", fake_docker)
+        from event_bus.main import _reap_orphan_coder_sandboxes
+        assert _reap_orphan_coder_sandboxes() == 2
+        c1.remove.assert_called_once_with(force=True)
+        # only the coder-labeled containers are targeted
+        assert fake_client.containers.list.call_args[1]["filters"] == {"label": "dev-agents.sandbox=true"}
+
+
 # ── /api/prompts endpoints ────────────────────────────────────────────────────
 
 class TestPromptsApi:

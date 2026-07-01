@@ -95,6 +95,44 @@ def _reconcile_coder_slots() -> None:
         log.warning("coder_slots_reconciled", leaked=prev)
 
 
+def _reap_orphan_coder_sandboxes() -> int:
+    """Remove leftover coder containers from before a restart. A fresh web process has
+    spawned none, so any container labeled dev-agents.sandbox is a zombie whose thread
+    died — kill it so a reclaimed story's new coder can't race it. (Tester/reviewer
+    sandboxes are unlabeled + auto-remove, so they're untouched.)"""
+    if settings.sandbox_mode != "docker":
+        return 0
+    try:
+        import docker as _docker_sdk
+        client = _docker_sdk.from_env()
+        orphans = client.containers.list(all=True, filters={"label": "dev-agents.sandbox=true"})
+        for c in orphans:
+            try:
+                c.remove(force=True)
+            except Exception:
+                pass
+        if orphans:
+            log.warning("orphan_coder_sandboxes_reaped", count=len(orphans))
+        return len(orphans)
+    except Exception as exc:  # noqa: BLE001 — best-effort cleanup, never block startup
+        log.warning("reap_orphan_sandboxes_failed", error=str(exc)[:120])
+        return 0
+
+
+def _reconcile_orphaned_stories() -> None:
+    """A restart kills in-flight coder asyncio tasks, stranding their stories in
+    'in-progress' forever. On startup, return them to 'ready' and re-dispatch to fill
+    the free slots — the automatic sibling of the operator Reset button."""
+    orphaned = list_items(state="in-progress", item_type="story")
+    if not orphaned:
+        return
+    for s in orphaned:
+        update_state(s["id"], "ready")
+    log.warning("orphaned_stories_reclaimed", count=len(orphaned))
+    for _ in range(settings.max_coding_agents):
+        _dispatch_next_ready()
+
+
 def _dispatch_next_ready() -> None:
     """Claim + dispatch the next queued ready story (does NOT touch the slot counter)."""
     ready = [s for s in list_items(state="ready", item_type="story")]
@@ -155,6 +193,8 @@ async def lifespan(app: FastAPI):
     _queue = Queue("agent-jobs", connection=_redis_conn)
     _reconcile_coder_slots()  # clear any slot leaked by a prior crash/recreate
     get_db()  # initialise SQLite schema
+    _reap_orphan_coder_sandboxes()   # kill zombie coder containers from before restart
+    _reconcile_orphaned_stories()    # resume stories stranded in-progress by the restart
     log.info("event_bus_started", redis=settings.redis_url)
     yield
     if _redis_conn:
@@ -716,6 +756,30 @@ def _augment_coder_prompt(story_prompt: str, stack, sdlc, guides=()) -> str:
     return (story_prompt or "").rstrip() + "\n\n" + "\n\n".join(extra)
 
 
+def _read_container_json(container, path: str) -> dict | None:
+    """Read + parse a JSON file out of a (stopped, not-yet-removed) container via the
+    Docker archive API — no shared volume needed. Returns None if absent/unparseable."""
+    import io
+    import tarfile
+    try:
+        stream, _ = container.get_archive(path)
+    except Exception:
+        return None
+    try:
+        buf = io.BytesIO()
+        for chunk in stream:
+            buf.write(chunk)
+        buf.seek(0)
+        with tarfile.open(fileobj=buf) as tar:
+            member = tar.next()
+            if member is None:
+                return None
+            data = tar.extractfile(member).read()
+        return _json.loads(data.decode("utf-8"))
+    except Exception:
+        return None
+
+
 def _run_coding_agent_sandboxed_sync(
     item_id: str,
     title: str,
@@ -784,12 +848,20 @@ def _run_coding_agent_sandboxed_sync(
         exit_info = container.wait()
         exit_code = exit_info.get("StatusCode", -1)
 
+        # Authoritative: the result file written inside the container (read while it
+        # still exists, before remove()). Falls back to the stdout sentinel, then to
+        # a diagnosed error — so interleaved logs / OOM can't be mistaken for success.
+        file_result = _read_container_json(container, "/output/result.json")
+        if file_result is not None:
+            return file_result
         if result_json is not None:
             return result_json
+        if exit_info.get("OOMKilled"):
+            return {"status": "error", "item_id": item_id, "error": "sandbox out of memory (OOM)"}
         if exit_code != 0:
             return {"status": "error", "item_id": item_id,
                     "error": f"sandbox exited with code {exit_code}"}
-        return {"status": "no_changes", "item_id": item_id, "error": "no result sentinel"}
+        return {"status": "no_changes", "item_id": item_id, "error": "no result produced"}
     finally:
         try:
             container.remove(force=True)
