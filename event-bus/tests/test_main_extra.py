@@ -310,6 +310,74 @@ class TestRecoveryControls:
         assert resp.status_code == 409
 
 
+class TestProjectLifecycle:
+    _idea = {"id": "idea-1", "title": "Auth", "state": "approved", "type": "idea",
+             "repo": "dev/app", "description": "d", "pr_url": None}
+    _done = [{"id": "s1", "parent_id": "idea-1", "type": "story", "state": "done"}]
+    _busy = [{"id": "s1", "parent_id": "idea-1", "type": "story", "state": "in-review"}]
+
+    def test_archive_settled_project(self, client):
+        with patch("event_bus.main.get_item", return_value=self._idea), \
+             patch("event_bus.main.list_items", return_value=self._done), \
+             patch("event_bus.main.set_archived", return_value=2) as arch:
+            resp = client.post("/api/items/idea-1/archive")
+        assert resp.status_code == 200 and resp.json()["status"] == "archived"
+        arch.assert_called_once_with("idea-1", True)
+
+    def test_archive_blocked_while_in_flight(self, client):
+        with patch("event_bus.main.get_item", return_value=self._idea), \
+             patch("event_bus.main.list_items", return_value=self._busy):
+            resp = client.post("/api/items/idea-1/archive")
+        assert resp.status_code == 409
+
+    def test_archive_non_idea_is_409(self, client):
+        story = {"id": "s1", "type": "story", "state": "done"}
+        with patch("event_bus.main.get_item", return_value=story):
+            resp = client.post("/api/items/s1/archive")
+        assert resp.status_code == 409
+
+    def test_unarchive(self, client):
+        with patch("event_bus.main.get_item", return_value=self._idea), \
+             patch("event_bus.main.set_archived", return_value=2) as arch:
+            resp = client.post("/api/items/idea-1/unarchive")
+        assert resp.status_code == 200 and resp.json()["status"] == "restored"
+        arch.assert_called_once_with("idea-1", False)
+
+    def test_delete_items_only_keeps_repo(self, client):
+        with patch("event_bus.main.get_item", return_value=self._idea), \
+             patch("event_bus.main.list_items", return_value=self._done), \
+             patch("event_bus.main.delete_item_tree", return_value=2) as dele, \
+             patch("event_bus.main._delete_forgejo_repo") as delrepo:
+            resp = client.delete("/api/items/idea-1")
+        assert resp.status_code == 200
+        assert resp.json()["repo_deleted"] is None
+        dele.assert_called_once_with("idea-1")
+        delrepo.assert_not_called()
+
+    def test_delete_with_repo(self, client):
+        with patch("event_bus.main.get_item", return_value=self._idea), \
+             patch("event_bus.main.list_items", return_value=self._done), \
+             patch("event_bus.main.delete_item_tree", return_value=2), \
+             patch("event_bus.main._delete_forgejo_repo", return_value=True) as delrepo:
+            resp = client.delete("/api/items/idea-1?delete_repo=true")
+        assert resp.status_code == 200 and resp.json()["repo_deleted"] is True
+        delrepo.assert_called_once_with("dev/app")
+
+    def test_delete_blocked_while_in_flight(self, client):
+        with patch("event_bus.main.get_item", return_value=self._idea), \
+             patch("event_bus.main.list_items", return_value=self._busy):
+            resp = client.delete("/api/items/idea-1")
+        assert resp.status_code == 409
+
+    def test_list_projects_endpoint(self, client):
+        projects = [{"id": "idea-1", "title": "Auth", "story_count": 4,
+                     "stories_done": 4, "archived": False}]
+        with patch("event_bus.main.list_projects", return_value=projects):
+            resp = client.get("/api/projects")
+        assert resp.status_code == 200
+        assert resp.json()["projects"][0]["stories_done"] == 4
+
+
 # ── /api/prompts endpoints ────────────────────────────────────────────────────
 
 class TestPromptsApi:

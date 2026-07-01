@@ -620,6 +620,17 @@ button.code-btn:hover { background: rgba(59,130,246,.25); }
 .recov-btn:hover { color: var(--text); border-color: var(--text); }
 .recov-btn.abandon-btn:hover, .recov-btn.cancel-btn:hover { color: var(--red); border-color: var(--red); }
 .recov-btn:disabled { opacity: .5; cursor: default; }
+/* Projects view */
+.proj-row {
+  display: flex; align-items: center; gap: 12px; padding: 10px 14px; margin-bottom: 6px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+}
+.proj-main { flex: 1; min-width: 0; }
+.proj-title { font-size: 13px; font-weight: 500; color: var(--text); }
+.proj-meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.proj-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.proj-arch-toggle { font-size: 12px; color: var(--muted); cursor: pointer; margin: 14px 0 6px; user-select: none; }
+.proj-arch-toggle:hover { color: var(--text); }
 .pr-link {
   font-size: 12px;
   color: var(--accent);
@@ -851,7 +862,7 @@ button.code-btn:hover { background: rgba(59,130,246,.25); }
   <h1><span>dev</span>-agents</h1>
   <nav>
     <button class="tab active" data-tab="board">Board</button>
-    <button class="tab" data-tab="ideas">Ideas</button>
+    <button class="tab" data-tab="ideas">Projects</button>
     <button class="tab" data-tab="config">Config</button>
     <button class="tab" data-tab="prompts">Prompts</button>
     <button class="tab" data-tab="telemetry">Telemetry</button>
@@ -863,7 +874,7 @@ button.code-btn:hover { background: rgba(59,130,246,.25); }
 
 <!-- ── Ideas ──────────────────────────────────────────────── -->
 <section id="ideas" class="tab-panel">
-  <h2>Submit Idea</h2>
+  <h2>New Project</h2>
   <div class="card">
     <form id="idea-form">
       <div class="field">
@@ -879,6 +890,9 @@ button.code-btn:hover { background: rgba(59,130,246,.25); }
     </form>
     <div id="idea-result" class="result"></div>
   </div>
+
+  <h2 style="margin-top:28px">Projects</h2>
+  <div id="projects-list"><div class="board-empty">Loading…</div></div>
 </section>
 
 <!-- ── Config ─────────────────────────────────────────────── -->
@@ -1173,6 +1187,7 @@ function showTab(name) {
   if (name === 'telemetry') loadTelemetry();
   if (name === 'health') loadHealth();
   if (name === 'board') loadBoard();
+  if (name === 'ideas') loadProjects();
 }
 
 // ── Toast ─────────────────────────────────────────────────────────────────────
@@ -1772,6 +1787,14 @@ async function loadBoard() {
   ideas.forEach((idea, i) => {
     ideaMeta[idea.id] = { color: IDEA_PALETTE[i % IDEA_PALETTE.length], name: shortIdeaLabel(idea.title) };
   });
+  // Derive each idea's repo browser URL from a story's PR URL (public host).
+  const ideaRepoUrl = {};
+  for (const it of d.groups.flatMap(g => g.items)) {
+    if (it.parent_id && it.pr_url && !ideaRepoUrl[it.parent_id]) {
+      const m = it.pr_url.match(/^(.*)\/pulls\/\d+/);
+      if (m) ideaRepoUrl[it.parent_id] = m[1];
+    }
+  }
   // Drop a stale focus if its idea is no longer on the board, then render the
   // legend/focus bar (only worth showing when 2+ ideas are present).
   if (boardFocus && !ideaMeta[boardFocus]) boardFocus = null;
@@ -1830,9 +1853,14 @@ async function loadBoard() {
         b.push(`<button class="recov-btn abandon-btn" data-id="${item.id}" title="Give up on this story; unlock the next">✕ Abandon</button>`);
         recovery = `<div class="board-item-actions recov">${b.join('')}</div>`;
       } else if (item.type === 'idea' && item.state === 'approved') {
+        const repoLink = ideaRepoUrl[item.id]
+          ? `<a class="pr-link" href="${escHtml(ideaRepoUrl[item.id])}" target="_blank" title="Open repo (main branch)">⤳ code</a>` : '';
         recovery = `<div class="board-item-actions recov">
-          <button class="recov-btn replan-btn" data-id="${item.id}" title="Re-run the planner for this idea">↻ Re-plan</button>
-          <button class="recov-btn cancel-btn" data-id="${item.id}" title="Stop this idea and abandon its stories">✕ Cancel</button>
+          ${repoLink}
+          <button class="recov-btn replan-btn" data-id="${item.id}" title="Re-run the planner for this project">↻ Re-plan</button>
+          <button class="recov-btn cancel-btn" data-id="${item.id}" title="Stop this project and abandon its stories">✕ Cancel</button>
+          <button class="recov-btn arch-proj" data-id="${item.id}" title="Archive this project (hide from the board, keep history)">🗄 Archive</button>
+          <button class="recov-btn del-proj abandon-btn" data-id="${item.id}" data-hasrepo="${item.repo ? 1 : 0}" title="Delete this project">✕ Delete</button>
         </div>`;
       }
       const seqBadge = item.sequence ? `<span class="seq-badge">${item.sequence}</span>` : '';
@@ -1842,6 +1870,9 @@ async function loadBoard() {
       const stackBadge = (item.stack && item.state !== 'pending-approval')
         ? `<span class="stack-badge" title="tech stack / SDLC">${escHtml(item.stack)}${sdlcSuffix}</span>` : '';
       const backlogClass = item.state === 'backlog' ? ' backlog' : '';
+      // An idea is a "proposal" until approved, a "project" thereafter (UI relabel only).
+      const typeLabel = item.type === 'idea'
+        ? (item.state === 'pending-approval' ? 'proposal' : 'project') : item.type;
       const v = item.verdicts || {};
       const verdictRow = (v.reviewer || v.tester || v.security) ? `
         <div class="verdict-row">
@@ -1860,7 +1891,7 @@ async function loadBoard() {
         ${seqBadge}
         <div class="board-item-title" data-id="${item.id}">${escHtml(item.title)}</div>
         ${ideaChip}
-        <div class="board-item-meta">${item.type}${tsSpan ? ' · ' + tsSpan : ''}${stackBadge ? ' ' + stackBadge : ''}</div>
+        <div class="board-item-meta">${typeLabel}${tsSpan ? ' · ' + tsSpan : ''}${stackBadge ? ' ' + stackBadge : ''}</div>
         ${verdictRow}
         ${actions}
         ${recovery}
@@ -1958,10 +1989,94 @@ async function loadBoard() {
     });
   }
 
+  // Archive / Delete on board project cards
+  wireProjectActions(container);
+
   // Click title to open drawer
   container.querySelectorAll('.board-item-title[data-id]').forEach(el => {
     el.addEventListener('click', () => openDrawer(el.dataset.id));
   });
+}
+
+// ── Projects view (archive / restore / delete + repo links) ────────────────────
+
+async function loadProjects() {
+  const el = document.getElementById('projects-list');
+  if (!el) return;
+  let d;
+  try { d = await api('/api/projects'); }
+  catch (e) { el.innerHTML = `<div class="board-empty" style="color:var(--red)">${e.message || 'Failed to load'}</div>`; return; }
+  const projects = d.projects || [];
+  if (!projects.length) { el.innerHTML = '<div class="board-empty">No projects yet — create one above.</div>'; return; }
+  const active = projects.filter(p => !p.archived);
+  const archived = projects.filter(p => p.archived);
+  let html = active.length ? active.map(p => projectRow(p, false)).join('') : '<div class="board-empty">No active projects.</div>';
+  if (archived.length) {
+    html += `<div class="proj-arch-toggle" id="proj-arch-toggle">▸ Archived (${archived.length})</div>
+      <div id="proj-archived" style="display:none">${archived.map(p => projectRow(p, true)).join('')}</div>`;
+  }
+  el.innerHTML = html;
+  const tgl = document.getElementById('proj-arch-toggle');
+  if (tgl) tgl.addEventListener('click', () => {
+    const box = document.getElementById('proj-archived');
+    const open = box.style.display !== 'none';
+    box.style.display = open ? 'none' : 'block';
+    tgl.textContent = `${open ? '▸' : '▾'} Archived (${archived.length})`;
+  });
+  wireProjectActions(el);
+}
+
+function projectRow(p, isArchived) {
+  const label = p.state === 'pending-approval' ? 'proposal' : 'project';
+  const prog = p.story_count ? `${p.stories_done}/${p.story_count} done` : 'no stories';
+  const stack = p.stack ? `<span class="stack-badge">${escHtml(p.stack)}</span>` : '';
+  const repo = p.repo_url ? `<a class="pr-link" href="${escHtml(p.repo_url)}" target="_blank" title="Open repo (main branch)">⤳ code</a>` : '';
+  const hasRepo = p.repo ? 1 : 0;
+  const actions = isArchived
+    ? `<button class="recov-btn restore-proj" data-id="${p.id}">↺ Restore</button>
+       <button class="recov-btn del-proj abandon-btn" data-id="${p.id}" data-hasrepo="${hasRepo}">✕ Delete</button>`
+    : `<button class="recov-btn arch-proj" data-id="${p.id}">🗄 Archive</button>
+       <button class="recov-btn del-proj abandon-btn" data-id="${p.id}" data-hasrepo="${hasRepo}">✕ Delete</button>`;
+  return `<div class="proj-row">
+    <div class="proj-main">
+      <div class="proj-title">${escHtml(p.title)}</div>
+      <div class="proj-meta">${label} · ${escHtml((p.state || '').replace(/-/g, ' '))} · ${prog} ${stack}</div>
+    </div>
+    <div class="proj-actions">${repo}${actions}</div>
+  </div>`;
+}
+
+// Wire archive/restore/delete buttons within a scope (board cards or projects list).
+function wireProjectActions(scope) {
+  const refresh = () => { loadProjects(); loadBoard(); };
+  scope.querySelectorAll('.arch-proj').forEach(b => b.addEventListener('click', e => {
+    e.stopPropagation(); projectPost(b, `/api/items/${b.dataset.id}/archive`, 'Archived', refresh);
+  }));
+  scope.querySelectorAll('.restore-proj').forEach(b => b.addEventListener('click', e => {
+    e.stopPropagation(); projectPost(b, `/api/items/${b.dataset.id}/unarchive`, 'Restored', refresh);
+  }));
+  scope.querySelectorAll('.del-proj').forEach(b => b.addEventListener('click', e => {
+    e.stopPropagation(); deleteProject(b, refresh);
+  }));
+}
+
+async function projectPost(btn, url, okMsg, done) {
+  btn.disabled = true;
+  const r = await fetch(url, { method: 'POST' });
+  if (r.ok) { toast(okMsg); done(); }
+  else { const e = await r.json().catch(() => ({})); toast(e.detail || 'Action failed', 'error'); btn.disabled = false; }
+}
+
+async function deleteProject(btn, done) {
+  if (!confirm('Permanently delete this project from the board? This cannot be undone.')) return;
+  let delRepo = false;
+  if (btn.dataset.hasrepo === '1') {
+    delRepo = confirm('Also permanently delete the Git repository?\n\nOK = delete the repo too (irreversible)\nCancel = keep the repo, remove only the board record');
+  }
+  btn.disabled = true;
+  const r = await fetch(`/api/items/${btn.dataset.id}?delete_repo=${delRepo}`, { method: 'DELETE' });
+  if (r.ok) { const d = await r.json(); toast(`Project deleted${d.repo_deleted ? ' (+ repo)' : ''}`); done(); }
+  else { const e = await r.json().catch(() => ({})); toast(e.detail || 'Delete failed', 'error'); btn.disabled = false; }
 }
 
 // ── Item drawer ───────────────────────────────────────────────────────────────

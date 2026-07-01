@@ -44,6 +44,7 @@ from event_bus.work_store import (
     create_item, get_item, grouped_items, list_items, update_state, set_pr_url, set_repo,
     unlock_next_story, find_item_by_pr_url, get_repo_for_story, set_stack_sdlc,
     get_stack_sdlc_for_story, set_style_guides, get_style_guides_for_story,
+    set_archived, delete_item_tree, list_projects,
     STATE_COLORS, get_db
 )
 from event_bus.telemetry import get_telemetry_summary, render_prometheus
@@ -1320,6 +1321,94 @@ async def cancel_idea(item_id: str):
     updated = update_state(item_id, "abandoned")
     log.info("operator_cancel_idea", id=item_id, stories_stopped=stopped)
     return updated
+
+
+# ── Project lifecycle: archive / restore / delete ───────────────────────────
+# A project may be archived or deleted only once it's settled — no story is still
+# in-flight. That both keeps the board honest and, for repo deletion, guarantees CI
+# has drained so deleting the Forgejo repo can't wedge the runner.
+
+_IN_FLIGHT = ("in-progress", "in-review", "changes-requested", "merged")
+
+
+def _project_has_in_flight(idea_id: str) -> bool:
+    return any(s.get("parent_id") == idea_id and s["state"] in _IN_FLIGHT
+              for s in list_items(item_type="story"))
+
+
+def _delete_forgejo_repo(repo_full_name: str) -> bool:
+    """Delete a Forgejo repo via the admin API (internal URL). Returns True on success
+    or if it's already gone."""
+    import httpx
+    from coding_agent.config import settings as cs
+    try:
+        owner, repo = repo_full_name.split("/", 1)
+    except ValueError:
+        return False
+    try:
+        with httpx.Client(timeout=15) as c:
+            r = c.delete(f"{cs.forgejo_base_url}/api/v1/repos/{owner}/{repo}",
+                         headers={"Authorization": f"token {cs.forgejo_api_token}"})
+        log.info("forgejo_repo_deleted", repo=repo_full_name, status=r.status_code)
+        return r.status_code in (204, 404)
+    except Exception as exc:  # noqa: BLE001
+        log.error("forgejo_repo_delete_failed", repo=repo_full_name, error=str(exc))
+        return False
+
+
+def _require_settled_project(item_id: str) -> dict:
+    item = get_item(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="item not found")
+    if item["type"] != "idea":
+        raise HTTPException(status_code=409, detail="only projects can be archived/deleted")
+    if _project_has_in_flight(item_id):
+        raise HTTPException(status_code=409,
+                            detail="project has active work — cancel it first, then archive/delete")
+    return item
+
+
+@app.get("/api/projects")
+async def list_projects_endpoint():
+    """All projects (active + archived) with a story-progress summary."""
+    return {"projects": list_projects()}
+
+
+@app.post("/api/items/{item_id}/archive", status_code=status.HTTP_200_OK)
+async def archive_project(item_id: str):
+    """Hide a settled project (and its stories) from the board; reversible via restore."""
+    _require_settled_project(item_id)
+    n = set_archived(item_id, True)
+    log.info("project_archived", id=item_id, items=n)
+    return {"status": "archived", "id": item_id, "items": n}
+
+
+@app.post("/api/items/{item_id}/unarchive", status_code=status.HTTP_200_OK)
+async def unarchive_project(item_id: str):
+    """Restore an archived project back onto the board."""
+    item = get_item(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="item not found")
+    if item["type"] != "idea":
+        raise HTTPException(status_code=409, detail="only projects can be restored")
+    n = set_archived(item_id, False)
+    log.info("project_restored", id=item_id, items=n)
+    return {"status": "restored", "id": item_id, "items": n}
+
+
+@app.delete("/api/items/{item_id}", status_code=status.HTTP_200_OK)
+async def delete_project(item_id: str, delete_repo: bool = False):
+    """Permanently delete a settled project (idea + stories). With delete_repo=true,
+    also delete its Forgejo repo (safe: settled ⇒ CI has drained)."""
+    item = _require_settled_project(item_id)
+    repo_deleted = None
+    repo = item.get("repo")
+    if delete_repo and repo:
+        repo_deleted = _delete_forgejo_repo(repo)
+    n = delete_item_tree(item_id)
+    log.info("project_deleted", id=item_id, items=n, repo=repo if delete_repo else None,
+             repo_deleted=repo_deleted)
+    return {"status": "deleted", "id": item_id, "items_deleted": n, "repo_deleted": repo_deleted}
 
 
 @app.post("/api/items/{item_id}/merged", status_code=status.HTTP_200_OK)

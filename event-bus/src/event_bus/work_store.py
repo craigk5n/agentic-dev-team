@@ -81,7 +81,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     # Migrate existing DBs that pre-date optional columns
     for col, definition in [("pr_url", "TEXT"), ("sequence", "INTEGER"), ("repo", "TEXT"),
                             ("stack", "TEXT"), ("sdlc", "TEXT"), ("stack_rationale", "TEXT"),
-                            ("style_guides", "TEXT")]:
+                            ("style_guides", "TEXT"), ("archived_at", "TEXT")]:
         try:
             conn.execute(f"ALTER TABLE work_items ADD COLUMN {col} {definition}")
             conn.commit()
@@ -301,8 +301,8 @@ def set_pr_url(item_id: str, pr_url: str) -> dict | None:
 
 
 def grouped_items() -> dict[str, list[dict]]:
-    """Return all items grouped by state, in workflow order."""
-    all_items = list_items()
+    """Return active (non-archived) items grouped by state, in workflow order."""
+    all_items = [i for i in list_items() if not i.get("archived_at")]
     groups: dict[str, list[dict]] = {s: [] for s in STATE_ORDER}
     for item in all_items:
         s = item["state"]
@@ -310,3 +310,61 @@ def grouped_items() -> dict[str, list[dict]]:
             groups[s] = []
         groups[s].append(item)
     return {k: v for k, v in groups.items() if v}
+
+
+def set_archived(idea_id: str, archived: bool) -> int:
+    """Archive/restore a project: stamp (or clear) archived_at on the idea AND all its
+    stories so the whole tree drops off / returns to the board. Returns rows touched."""
+    stamp = _now() if archived else None
+    with _lock:
+        db = get_db()
+        cur = db.execute(
+            "UPDATE work_items SET archived_at=?, updated_at=? WHERE id=? OR parent_id=?",
+            (stamp, _now(), idea_id, idea_id),
+        )
+        db.commit()
+        return cur.rowcount
+
+
+def delete_item_tree(idea_id: str) -> int:
+    """Permanently delete a project: the idea and all its stories. Returns rows deleted."""
+    with _lock:
+        db = get_db()
+        cur = db.execute(
+            "DELETE FROM work_items WHERE id=? OR parent_id=?", (idea_id, idea_id)
+        )
+        db.commit()
+        return cur.rowcount
+
+
+def list_projects() -> list[dict]:
+    """All ideas (active + archived) with a rolled-up story summary, newest first —
+    powers the Projects view."""
+    items = list_items()
+    stories_by_parent: dict[str, list[dict]] = {}
+    for it in items:
+        if it.get("type") == "story" and it.get("parent_id"):
+            stories_by_parent.setdefault(it["parent_id"], []).append(it)
+    import re
+    projects = []
+    for idea in items:
+        if idea.get("type") != "idea":
+            continue
+        kids = stories_by_parent.get(idea["id"], [])
+        done = sum(1 for s in kids if s["state"] == "done")
+        # Derive the repo's browser URL from a story's PR URL (carries the public host).
+        repo_url = None
+        for s in kids:
+            m = re.match(r"^(.*)/pulls/\d+", s.get("pr_url") or "")
+            if m:
+                repo_url = m.group(1)
+                break
+        projects.append({
+            **idea,
+            "story_count": len(kids),
+            "stories_done": done,
+            "archived": bool(idea.get("archived_at")),
+            "repo_url": repo_url,
+        })
+    projects.sort(key=lambda p: p.get("created_at") or "", reverse=True)
+    return projects

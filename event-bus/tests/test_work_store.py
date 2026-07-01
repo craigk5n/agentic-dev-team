@@ -335,3 +335,32 @@ class TestStyleGuidesStore:
         it = create_item(item_type="idea", title="I", style_guides=["human-voice"])
         set_style_guides(it["id"], ["google-python", "conventional-commits"])
         assert _parse_guides(get_item(it["id"])["style_guides"]) == ["google-python", "conventional-commits"]
+
+
+class TestProjectLifecycle:
+    def test_archive_hides_and_restore_returns_tree(self):
+        idea = ws.create_item(item_type="idea", title="P", state="approved")
+        s1 = ws.create_item(item_type="story", title="s1", parent_id=idea["id"], sequence=1, state="done")
+        assert ws.set_archived(idea["id"], True) == 2  # idea + 1 story
+        flat = [it for items in ws.grouped_items().values() for it in items]
+        assert all(it["id"] not in (idea["id"], s1["id"]) for it in flat)  # off the board
+        ws.set_archived(idea["id"], False)
+        flat2 = [it for items in ws.grouped_items().values() for it in items]
+        assert any(it["id"] == idea["id"] for it in flat2)  # restored
+
+    def test_delete_item_tree_removes_idea_and_stories(self):
+        idea = ws.create_item(item_type="idea", title="P", state="approved")
+        ws.create_item(item_type="story", title="s1", parent_id=idea["id"], sequence=1, state="done")
+        ws.create_item(item_type="story", title="s2", parent_id=idea["id"], sequence=2, state="done")
+        assert ws.delete_item_tree(idea["id"]) == 3
+        assert ws.get_item(idea["id"]) is None
+        assert ws.list_items() == []
+
+    def test_list_projects_rolls_up_story_progress(self):
+        idea = ws.create_item(item_type="idea", title="P", state="approved")
+        ws.create_item(item_type="story", title="s1", parent_id=idea["id"], sequence=1, state="done")
+        ws.create_item(item_type="story", title="s2", parent_id=idea["id"], sequence=2, state="ready")
+        p = ws.list_projects()[0]
+        assert p["story_count"] == 2 and p["stories_done"] == 1 and p["archived"] is False
+        ws.set_archived(idea["id"], True)
+        assert ws.list_projects()[0]["archived"] is True
