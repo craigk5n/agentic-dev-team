@@ -886,7 +886,7 @@ button.code-btn:hover { background: rgba(59,130,246,.25); }
         <input id="model_override" name="model_override" list="model-list"
                placeholder="uses runtime config / env default">
       </div>
-      <button type="submit" id="idea-btn">Submit Idea →</button>
+      <button type="submit" id="idea-btn">Create Project →</button>
     </form>
     <div id="idea-result" class="result"></div>
   </div>
@@ -1273,7 +1273,7 @@ document.getElementById('idea-form').addEventListener('submit', async e => {
     toast(err.message, 'error');
   } finally {
     btn.disabled = false;
-    btn.textContent = 'Submit Idea →';
+    btn.textContent = 'Create Project →';
   }
 });
 
@@ -1854,7 +1854,7 @@ async function loadBoard() {
         recovery = `<div class="board-item-actions recov">${b.join('')}</div>`;
       } else if (item.type === 'idea' && item.state === 'approved') {
         const repoLink = ideaRepoUrl[item.id]
-          ? `<a class="pr-link" href="${escHtml(ideaRepoUrl[item.id])}" target="_blank" title="Open repo (main branch)">⤳ code</a>` : '';
+          ? `<a class="pr-link" href="${escHtml(ideaRepoUrl[item.id])}" target="_blank" title="Open repo (main branch)">↗ repo</a>` : '';
         recovery = `<div class="board-item-actions recov">
           ${repoLink}
           <button class="recov-btn replan-btn" data-id="${item.id}" title="Re-run the planner for this project">↻ Re-plan</button>
@@ -2030,7 +2030,7 @@ function projectRow(p, isArchived) {
   const label = p.state === 'pending-approval' ? 'proposal' : 'project';
   const prog = p.story_count ? `${p.stories_done}/${p.story_count} done` : 'no stories';
   const stack = p.stack ? `<span class="stack-badge">${escHtml(p.stack)}</span>` : '';
-  const repo = p.repo_url ? `<a class="pr-link" href="${escHtml(p.repo_url)}" target="_blank" title="Open repo (main branch)">⤳ code</a>` : '';
+  const repo = p.repo_url ? `<a class="pr-link" href="${escHtml(p.repo_url)}" target="_blank" title="Open repo (main branch)">↗ repo</a>` : '';
   const hasRepo = p.repo ? 1 : 0;
   const actions = isArchived
     ? `<button class="recov-btn restore-proj" data-id="${p.id}">↺ Restore</button>
