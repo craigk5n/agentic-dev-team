@@ -543,6 +543,16 @@ button.approve-btn:hover { background: rgba(34,197,94,.25); }
   background: rgba(99,102,241,.18); color: #a5b4fc;
   border: 1px solid rgba(99,102,241,.35); vertical-align: middle;
 }
+/* Per-idea identity: a colored left stripe + a name chip tie every story card back
+   to its parent idea, so concurrent ideas are distinguishable at a glance. Color is
+   never the only cue (WCAG 1.4.1) — the chip repeats the idea name as text. */
+.idea-chip {
+  display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0;
+  font-size: 10px; padding: 1px 8px; border-radius: 999px;
+  border: 1px solid currentColor; background: transparent;
+  white-space: nowrap; max-width: 150px; overflow: hidden; text-overflow: ellipsis;
+}
+.idea-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
 .guide-wrap { margin-bottom: 6px; }
 .guide-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 3px; }
 .guide-pickers { display: flex; flex-direction: column; gap: 2px; }
@@ -1644,6 +1654,19 @@ function verdictPip(label, status) {
   return `<span class="verdict-pip ${cls}" title="${title}">${label}</span>`;
 }
 
+// Okabe-Ito qualitative palette (colorblind-safe); recycled if more ideas than hues.
+const IDEA_PALETTE = ['#E69F00', '#56B4E9', '#009E73', '#F0E442', '#0072B2', '#D55E00', '#CC79A7'];
+
+// A compact, human-readable label for an idea's chip: the first words of its title,
+// capped so cards stay tidy.
+function shortIdeaLabel(title) {
+  if (!title) return 'idea';
+  const words = title.trim().split(/\s+/);
+  let s = words[0];
+  for (let k = 1; k < words.length && (s + ' ' + words[k]).length <= 16; k++) s += ' ' + words[k];
+  return s.length > 20 ? s.slice(0, 19) + '…' : s;
+}
+
 async function loadBoard() {
   const container = document.getElementById('board-items');
   container.innerHTML = '<div class="board-empty">Loading…</div>';
@@ -1657,6 +1680,16 @@ async function loadBoard() {
   const d = await r.json();
   await loadCatalogOptions();
   document.getElementById('board-ts').textContent = 'Updated ' + new Date().toLocaleTimeString();
+
+  // Assign each idea a stable, distinct accent color (Okabe-Ito colorblind-safe
+  // palette). Ordering by created_at keeps colors stable across refreshes and
+  // guarantees distinct hues for the first N concurrent ideas before recycling.
+  const ideas = d.groups.flatMap(g => g.items).filter(i => i.type === 'idea');
+  ideas.sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+  const ideaMeta = {};
+  ideas.forEach((idea, i) => {
+    ideaMeta[idea.id] = { color: IDEA_PALETTE[i % IDEA_PALETTE.length], name: shortIdeaLabel(idea.title) };
+  });
 
   if (!d.total) {
     container.innerHTML = '<div class="board-empty">No work items yet — submit an idea to get started.</div>';
@@ -1713,9 +1746,17 @@ async function loadBoard() {
         <div class="verdict-row">
           ${verdictPip('R', v.reviewer)}${verdictPip('T', v.tester)}${verdictPip('S', v.security)}
         </div>` : '';
-      html += `<div class="board-item${backlogClass}" data-id="${item.id}">
+      // Per-idea accent: colored left stripe on every card (idea + its stories),
+      // plus a name chip on story cards tying them back to their parent idea.
+      const im = ideaMeta[item.type === 'idea' ? item.id : item.parent_id];
+      const accentStyle = im ? ` style="border-left:3px solid ${im.color}"` : '';
+      const ideaChip = (im && item.type !== 'idea')
+        ? `<span class="idea-chip" style="color:${im.color}" title="Idea: ${escHtml(im.name)}"><span class="idea-dot" style="background:${im.color}"></span>${escHtml(im.name)}</span>`
+        : '';
+      html += `<div class="board-item${backlogClass}" data-id="${item.id}"${accentStyle}>
         ${seqBadge}
         <div class="board-item-title" data-id="${item.id}">${escHtml(item.title)}</div>
+        ${ideaChip}
         <div class="board-item-meta">${item.type}${tsSpan ? ' · ' + tsSpan : ''}${stackBadge ? ' ' + stackBadge : ''}</div>
         ${verdictRow}
         ${actions}
