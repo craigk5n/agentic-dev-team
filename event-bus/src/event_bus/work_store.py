@@ -35,6 +35,7 @@ STATE_COLORS: dict[str, str] = {
     "merged":             "#22c55e",
     "done":               "#46a758",
     "rejected":           "#6b7280",
+    "abandoned":          "#6b7280",
 }
 
 STATE_ORDER = list(STATE_COLORS.keys())

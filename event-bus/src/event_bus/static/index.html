@@ -604,6 +604,22 @@ button.code-btn {
   cursor: pointer;
 }
 button.code-btn:hover { background: rgba(59,130,246,.25); }
+/* Operator recovery actions — muted secondary buttons, kept visually quiet so they
+   don't compete with the primary flow, but always available on active cards. */
+.board-item-actions.recov { gap: 4px; }
+.recov-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 5px;
+  padding: 2px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: color .12s, border-color .12s;
+}
+.recov-btn:hover { color: var(--text); border-color: var(--text); }
+.recov-btn.abandon-btn:hover, .recov-btn.cancel-btn:hover { color: var(--red); border-color: var(--red); }
+.recov-btn:disabled { opacity: .5; cursor: default; }
 .pr-link {
   font-size: 12px;
   color: var(--accent);
@@ -1804,6 +1820,21 @@ async function loadBoard() {
           <a class="pr-link" href="${escHtml(item.pr_url)}" target="_blank">${prLabel(item.pr_url)}</a>
         </div>`;
       }
+      // Operator recovery actions — un-stick work without touching SQLite/Redis.
+      let recovery = '';
+      if (item.type === 'story' && ['in-progress', 'in-review', 'changes-requested'].includes(item.state)) {
+        const b = [];
+        if (item.pr_url && item.state !== 'in-progress')
+          b.push(`<button class="recov-btn retry-btn" data-id="${item.id}" title="Clear caps & re-run review/tests/CI on the PR head">↻ Retry</button>`);
+        b.push(`<button class="recov-btn reset-btn" data-id="${item.id}" title="Reset to a fresh coding run (for a wedged coder)">⤺ Reset</button>`);
+        b.push(`<button class="recov-btn abandon-btn" data-id="${item.id}" title="Give up on this story; unlock the next">✕ Abandon</button>`);
+        recovery = `<div class="board-item-actions recov">${b.join('')}</div>`;
+      } else if (item.type === 'idea' && item.state === 'approved') {
+        recovery = `<div class="board-item-actions recov">
+          <button class="recov-btn replan-btn" data-id="${item.id}" title="Re-run the planner for this idea">↻ Re-plan</button>
+          <button class="recov-btn cancel-btn" data-id="${item.id}" title="Stop this idea and abandon its stories">✕ Cancel</button>
+        </div>`;
+      }
       const seqBadge = item.sequence ? `<span class="seq-badge">${item.sequence}</span>` : '';
       const tsSpan = item.created_at ? `<span class="rel-ts" data-ts="${item.created_at}">${timeAgo(item.created_at)}</span>` : '';
       // Stack/SDLC badge (omit on pending-approval cards — they show editable dropdowns)
@@ -1832,6 +1863,7 @@ async function loadBoard() {
         <div class="board-item-meta">${item.type}${tsSpan ? ' · ' + tsSpan : ''}${stackBadge ? ' ' + stackBadge : ''}</div>
         ${verdictRow}
         ${actions}
+        ${recovery}
       </div>`;
     }
   }
@@ -1900,6 +1932,31 @@ async function loadBoard() {
       }
     });
   });
+
+  // Operator recovery buttons (retry / reset / abandon / re-plan / cancel)
+  const RECOVERY = {
+    'retry-btn':   { path: 'retry',   toast: 'Retrying…' },
+    'reset-btn':   { path: 'reset',   toast: 'Reset — restarting coder' },
+    'abandon-btn': { path: 'abandon', toast: 'Story abandoned', confirm: 'Abandon this story and unlock the next?' },
+    'replan-btn':  { path: 'plan',    toast: 'Re-planning…' },
+    'cancel-btn':  { path: 'cancel',  toast: 'Idea cancelled', confirm: 'Cancel this idea and abandon its stories?' },
+  };
+  for (const [cls, cfg] of Object.entries(RECOVERY)) {
+    container.querySelectorAll('.' + cls).forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (cfg.confirm && !confirm(cfg.confirm)) return;
+        btn.disabled = true;
+        const r = await fetch(`/api/items/${btn.dataset.id}/${cfg.path}`, { method: 'POST' });
+        if (r.ok) { toast(cfg.toast); loadBoard(); }
+        else {
+          const err = await r.json().catch(() => ({}));
+          toast(err.detail || 'Action failed', 'error');
+          btn.disabled = false;
+        }
+      });
+    });
+  }
 
   // Click title to open drawer
   container.querySelectorAll('.board-item-title[data-id]').forEach(el => {

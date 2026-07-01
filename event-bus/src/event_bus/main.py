@@ -94,11 +94,8 @@ def _reconcile_coder_slots() -> None:
         log.warning("coder_slots_reconciled", leaked=prev)
 
 
-def _coder_slot_release_and_dispatch() -> None:
-    """Release one coding slot, then trigger the next queued ready story if a slot is free."""
-    if _redis_conn:
-        _redis_conn.decr(_CODER_SLOT_KEY)
-        _redis_conn.expire(_CODER_SLOT_KEY, 86_400)
+def _dispatch_next_ready() -> None:
+    """Claim + dispatch the next queued ready story (does NOT touch the slot counter)."""
     ready = [s for s in list_items(state="ready", item_type="story")]
     if not ready:
         return
@@ -112,6 +109,35 @@ def _coder_slot_release_and_dispatch() -> None:
         candidate["id"], candidate["title"], candidate.get("description") or "", sp,
     ))
     log.info("coder_dequeued", story_id=candidate["id"])
+
+
+def _coder_slot_release_and_dispatch() -> None:
+    """Release one coding slot, then trigger the next queued ready story if a slot is free."""
+    if _redis_conn:
+        _redis_conn.decr(_CODER_SLOT_KEY)
+        _redis_conn.expire(_CODER_SLOT_KEY, 86_400)
+    _dispatch_next_ready()
+
+
+def _pr_url_parts(pr_url: str) -> tuple[str, int] | None:
+    """(repo_full_name, pr_number) from a Forgejo PR URL (…/owner/repo/pulls/N)."""
+    from urllib.parse import urlparse
+    parts = urlparse(pr_url or "").path.strip("/").split("/")
+    if len(parts) >= 4 and parts[-2] == "pulls" and parts[-1].isdigit():
+        return f"{parts[-4]}/{parts[-3]}", int(parts[-1])
+    return None
+
+
+def _clear_recovery_keys(item: dict) -> None:
+    """Clear the Redis caps/counters that gate a story so a retry starts clean:
+    the post-merge fix cap, the stale agent log, and (if it has a PR) the recode cap."""
+    if not _redis_conn:
+        return
+    _redis_conn.delete(f"post_merge_fix:{item['id']}")
+    _redis_conn.delete(f"agent_log:{item['id']}")
+    parts = _pr_url_parts(item.get("pr_url") or "")
+    if parts:
+        _redis_conn.delete(f"recode_retries:{parts[0]}:{parts[1]}")
 
 
 @asynccontextmanager
@@ -1190,6 +1216,109 @@ async def reject_item(item_id: str):
         raise HTTPException(status_code=409, detail=f"item is '{item['state']}', not pending-approval")
     updated = update_state(item_id, "rejected")
     log.info("idea_rejected", id=item_id, title=item["title"])
+    return updated
+
+
+# ── Operator recovery controls ──────────────────────────────────────────────
+# Guarded actions to un-stick work without hand-editing SQLite/Redis: retry a
+# parked PR, reset a wedged coder, abandon a story, or cancel a whole idea.
+
+_RETRYABLE = ("changes-requested", "in-review")
+_RESETTABLE = ("in-progress", "in-review", "changes-requested")
+
+
+@app.post("/api/items/{item_id}/retry", status_code=status.HTTP_202_ACCEPTED)
+async def retry_item(item_id: str):
+    """Parked story → clear the recode/CI caps and re-run review+tests+CI on the PR's
+    current head (a failing verdict then recodes with a fresh cap)."""
+    item = get_item(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="item not found")
+    if item["type"] != "story":
+        raise HTTPException(status_code=409, detail="only stories can be retried")
+    if item["state"] not in _RETRYABLE:
+        raise HTTPException(status_code=409, detail=f"story is '{item['state']}', not retryable")
+    parts = _pr_url_parts(item.get("pr_url") or "")
+    if not parts:
+        raise HTTPException(status_code=409, detail="story has no PR to retry; use reset instead")
+    repo_full_name, pr_number = parts
+    owner, repo_name = repo_full_name.split("/", 1)
+    _clear_recovery_keys(item)
+    try:
+        from coding_agent.forgejo_client import ForgejoClient as CFJ
+        from coding_agent.config import settings as cs
+        with CFJ(cs.forgejo_base_url, cs.forgejo_api_token) as fg:
+            pr = fg.get(f"/repos/{owner}/{repo_name}/pulls/{pr_number}")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"could not fetch PR: {exc}")
+    head = pr.get("head") or {}
+    from event_bus.jobs.handlers import handle_pr_event
+    _queue_or_503().enqueue(
+        handle_pr_event, repo_full_name=repo_full_name, pr_number=pr_number,
+        head_sha=head.get("sha", ""), action="synchronized",
+        head_ref=head.get("ref", ""), base_ref=(pr.get("base") or {}).get("ref", "main"),
+    )
+    update_state(item_id, "in-review")
+    _post_pr_comment(repo_full_name, pr_number,
+                     "🔁 **Operator retry** — caps cleared; re-running review, tests, and CI on the current head.")
+    log.info("operator_retry", id=item_id, repo=repo_full_name, pr=pr_number)
+    return {"status": "retry_requeued", "id": item_id}
+
+
+@app.post("/api/items/{item_id}/reset", status_code=status.HTTP_202_ACCEPTED)
+async def reset_item(item_id: str):
+    """Wedged story (e.g. its coder task died on a restart) → back to a fresh coding
+    run: clear caps, claim it, and re-dispatch the Coding Agent."""
+    item = get_item(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="item not found")
+    if item["type"] != "story":
+        raise HTTPException(status_code=409, detail="only stories can be reset")
+    if item["state"] not in _RESETTABLE:
+        raise HTTPException(status_code=409, detail=f"story is '{item['state']}', not resettable")
+    _clear_recovery_keys(item)
+    update_state(item_id, "in-progress")
+    story_prompt = get_prompt(_redis_or_503(), "coder.story")
+    asyncio.create_task(_run_coding_agent(item_id, item["title"], item.get("description") or "", story_prompt))
+    log.info("operator_reset", id=item_id, prev=item["state"])
+    return {"status": "reset_and_coding", "id": item_id}
+
+
+@app.post("/api/items/{item_id}/abandon", status_code=status.HTTP_200_OK)
+async def abandon_item(item_id: str):
+    """Give up on a story: mark it abandoned and unlock the next so the rest of the
+    project isn't blocked."""
+    item = get_item(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="item not found")
+    if item["type"] != "story":
+        raise HTTPException(status_code=409, detail="only stories can be abandoned")
+    if item["state"] in ("done", "abandoned"):
+        raise HTTPException(status_code=409, detail=f"story is already '{item['state']}'")
+    _clear_recovery_keys(item)
+    updated = update_state(item_id, "abandoned")
+    unlock_next_story(item_id)
+    _dispatch_next_ready()
+    log.info("operator_abandon_story", id=item_id, title=item["title"])
+    return updated
+
+
+@app.post("/api/items/{item_id}/cancel", status_code=status.HTTP_200_OK)
+async def cancel_idea(item_id: str):
+    """Stop a whole idea: abandon its non-terminal stories and mark the idea abandoned."""
+    item = get_item(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="item not found")
+    if item["type"] != "idea":
+        raise HTTPException(status_code=409, detail="only ideas can be cancelled")
+    stopped = 0
+    for child in list_items(item_type="story"):
+        if child.get("parent_id") == item_id and child["state"] not in ("done", "abandoned", "rejected"):
+            _clear_recovery_keys(child)
+            update_state(child["id"], "abandoned")
+            stopped += 1
+    updated = update_state(item_id, "abandoned")
+    log.info("operator_cancel_idea", id=item_id, stories_stopped=stopped)
     return updated
 
 

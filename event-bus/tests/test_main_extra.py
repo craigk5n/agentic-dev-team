@@ -216,6 +216,100 @@ class TestWorkItemsApi:
         assert resp.status_code == 404
 
 
+# ── Operator recovery controls ────────────────────────────────────────────────
+
+class TestRecoveryControls:
+    _story_cr = {"id": "story-1", "title": "Add login", "state": "changes-requested",
+                 "type": "story", "description": "desc", "repo": "dev/app",
+                 "pr_url": "http://forge/dev/app/pulls/7"}
+    _story_ip = {"id": "story-2", "title": "Add logout", "state": "in-progress",
+                 "type": "story", "description": "desc", "pr_url": None}
+    _idea = {"id": "idea-1", "title": "Auth", "state": "approved", "type": "idea",
+             "description": "d", "pr_url": None}
+
+    def test_retry_requeues_checks_and_clears_caps(self, client, mock_queue, monkeypatch):
+        r = fakeredis.FakeRedis()
+        r.set("recode_retries:dev/app:7", "3")
+        r.set("post_merge_fix:story-1", "2")
+        monkeypatch.setattr("event_bus.main._redis_conn", r)
+        pr = {"head": {"sha": "sha1", "ref": "story/login"}, "base": {"ref": "main"}}
+        fake_fg = MagicMock()
+        fake_fg.__enter__ = lambda s: s
+        fake_fg.__exit__ = MagicMock(return_value=False)
+        fake_fg.get.return_value = pr
+        with patch("event_bus.main.get_item", return_value=self._story_cr), \
+             patch("event_bus.main.update_state", return_value={**self._story_cr, "state": "in-review"}), \
+             patch("event_bus.main._post_pr_comment"), \
+             patch("coding_agent.forgejo_client.ForgejoClient", return_value=fake_fg):
+            resp = client.post("/api/items/story-1/retry")
+        assert resp.status_code == 202
+        assert resp.json()["status"] == "retry_requeued"
+        # caps cleared and the PR-review job re-enqueued
+        assert r.get("recode_retries:dev/app:7") is None
+        assert r.get("post_merge_fix:story-1") is None
+        assert mock_queue.enqueue.called  # PR-review job re-enqueued
+
+    def test_retry_without_pr_is_409(self, client):
+        no_pr = {**self._story_cr, "pr_url": None}
+        with patch("event_bus.main.get_item", return_value=no_pr):
+            resp = client.post("/api/items/story-1/retry")
+        assert resp.status_code == 409
+
+    def test_reset_restarts_coder(self, client, monkeypatch):
+        monkeypatch.setattr("event_bus.main._redis_conn", fakeredis.FakeRedis())
+        with patch("event_bus.main.get_item", return_value=self._story_ip), \
+             patch("event_bus.main.update_state", return_value={**self._story_ip, "state": "in-progress"}), \
+             patch("event_bus.main.get_prompt", return_value=""), \
+             patch("event_bus.main._run_coding_agent", new_callable=AsyncMock) as coder:
+            resp = client.post("/api/items/story-2/reset")
+        assert resp.status_code == 202
+        assert resp.json()["status"] == "reset_and_coding"
+        coder.assert_called_once()
+
+    def test_abandon_marks_and_unlocks_next(self, client, monkeypatch):
+        monkeypatch.setattr("event_bus.main._redis_conn", fakeredis.FakeRedis())
+        with patch("event_bus.main.get_item", return_value=self._story_cr), \
+             patch("event_bus.main.update_state", return_value={**self._story_cr, "state": "abandoned"}) as upd, \
+             patch("event_bus.main.unlock_next_story") as unlock, \
+             patch("event_bus.main._dispatch_next_ready"):
+            resp = client.post("/api/items/story-1/abandon")
+        assert resp.status_code == 200
+        assert resp.json()["state"] == "abandoned"
+        upd.assert_any_call("story-1", "abandoned")
+        unlock.assert_called_once_with("story-1")
+
+    def test_abandon_already_terminal_is_409(self, client):
+        with patch("event_bus.main.get_item", return_value={**self._story_cr, "state": "done"}):
+            resp = client.post("/api/items/story-1/abandon")
+        assert resp.status_code == 409
+
+    def test_cancel_idea_abandons_open_stories(self, client, monkeypatch):
+        monkeypatch.setattr("event_bus.main._redis_conn", fakeredis.FakeRedis())
+        children = [
+            {"id": "s1", "parent_id": "idea-1", "type": "story", "state": "in-review", "pr_url": None},
+            {"id": "s2", "parent_id": "idea-1", "type": "story", "state": "done", "pr_url": None},
+            {"id": "s3", "parent_id": "other", "type": "story", "state": "ready", "pr_url": None},
+        ]
+        calls = []
+        def _upd(item_id, state):
+            calls.append((item_id, state)); return {**self._idea, "state": state}
+        with patch("event_bus.main.get_item", return_value=self._idea), \
+             patch("event_bus.main.list_items", return_value=children), \
+             patch("event_bus.main.update_state", side_effect=_upd):
+            resp = client.post("/api/items/idea-1/cancel")
+        assert resp.status_code == 200
+        # only the open child of THIS idea is abandoned; done child + other idea untouched
+        assert ("s1", "abandoned") in calls
+        assert ("s2", "abandoned") not in calls
+        assert ("s3", "abandoned") not in calls
+        assert ("idea-1", "abandoned") in calls
+
+    def test_cancel_non_idea_is_409(self, client):
+        with patch("event_bus.main.get_item", return_value=self._story_cr):
+            resp = client.post("/api/items/story-1/cancel")
+        assert resp.status_code == 409
+
+
 # ── /api/prompts endpoints ────────────────────────────────────────────────────
 
 class TestPromptsApi:
