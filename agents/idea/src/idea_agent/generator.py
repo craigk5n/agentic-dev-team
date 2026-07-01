@@ -33,6 +33,18 @@ _STACK_FIELDS = (
     '\n  "stack_rationale": "<one sentence on why this stack fits>"'
 )
 _STYLE_FIELD = ',\n  "proposed_style_guides": ["<zero or more style-guide ids from the list>"]'
+_DECISIONS_FIELD = (
+    ',\n  "design_decisions": [{{"question": "<a key design choice for THIS project>", '
+    '"recommended": "<your recommended option>", "rationale": "<one sentence why>", '
+    '"alternatives": ["<other viable option>", "<another>"]}}]'
+)
+_DECISIONS_GUIDANCE = (
+    "\nAlso surface 4 to 7 DESIGN DECISIONS a human should confirm before building — "
+    "the choices that most shape the implementation (architecture, storage/DB, auth, "
+    "key libraries, sync vs async, scope boundaries). For each, give your RECOMMENDED "
+    "option, a one-sentence rationale, and 2-3 concrete alternatives. Make them specific "
+    "to THIS project, not generic."
+)
 
 
 def _stack_guidance(stack_options: list[dict], sdlc_options: list[dict]) -> str:
@@ -71,11 +83,13 @@ def expand_prompt(prompt: str, *, model: str, api_key: str = "", redis_conn=None
     stack_options = stack_options or []
     sdlc_options = sdlc_options or []
     style_guide_options = style_guide_options or []
-    stack_fields = (_STACK_FIELDS if stack_options else "") + (_STYLE_FIELD if style_guide_options else "")
+    stack_fields = ((_STACK_FIELDS if stack_options else "")
+                    + (_STYLE_FIELD if style_guide_options else "") + _DECISIONS_FIELD)
     user_msg = _PROMPT.format(
         prompt=prompt,
         stack_fields=stack_fields,
-        stack_guidance=_stack_guidance(stack_options, sdlc_options) + _style_guidance(style_guide_options),
+        stack_guidance=(_stack_guidance(stack_options, sdlc_options)
+                        + _style_guidance(style_guide_options) + _DECISIONS_GUIDANCE),
     )
     kwargs: dict = {
         "model": model,

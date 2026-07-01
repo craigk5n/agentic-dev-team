@@ -44,7 +44,7 @@ from event_bus.work_store import (
     create_item, get_item, grouped_items, list_items, update_state, set_pr_url, set_repo,
     unlock_next_story, find_item_by_pr_url, get_repo_for_story, set_stack_sdlc,
     get_stack_sdlc_for_story, set_style_guides, get_style_guides_for_story,
-    set_archived, delete_item_tree, list_projects,
+    set_archived, delete_item_tree, list_projects, set_planning_inputs,
     STATE_COLORS, get_db
 )
 from event_bus.telemetry import get_telemetry_summary, render_prometheus
@@ -355,6 +355,37 @@ async def forgejo_webhook(
 
 # ── Ideas API ─────────────────────────────────────────────────────────────────
 
+def _normalize_decisions(raw) -> list[dict]:
+    """Clean the idea agent's design decisions into a stable, bounded shape. `chosen`
+    starts unset — the operator fills it (or the recommendation is auto-accepted)."""
+    out = []
+    for i, d in enumerate((raw or [])[:7]):
+        if not isinstance(d, dict) or not d.get("question"):
+            continue
+        alts = [str(a) for a in (d.get("alternatives") or []) if a][:4]
+        out.append({
+            "id": f"d{i}",
+            "question": str(d["question"])[:200],
+            "recommended": str(d.get("recommended") or "")[:200],
+            "rationale": str(d.get("rationale") or "")[:300],
+            "alternatives": alts,
+            "chosen": None,
+        })
+    return out
+
+
+def _format_decisions(decisions_json: str | None) -> str:
+    """Render the operator's answered design decisions as a constraints block for the
+    planner. Empty when there are none."""
+    try:
+        decisions = _json.loads(decisions_json or "[]")
+    except Exception:
+        return ""
+    lines = [f"- {d['question']} → {d['chosen']}" for d in decisions if d.get("chosen")]
+    return ("The operator has LOCKED these design decisions — the plan MUST honor them:\n"
+            + "\n".join(lines)) if lines else ""
+
+
 @app.post("/api/ideas", status_code=status.HTTP_202_ACCEPTED)
 async def submit_idea(request: Request):
     """
@@ -401,6 +432,7 @@ async def submit_idea(request: Request):
     # Keep proposed guides that exist AND apply to the chosen stack.
     applicable = {g.id for g in cat.style_guides_for_stack(stack)}
     guides = [g for g in (proposal.get("proposed_style_guides") or []) if g in applicable]
+    decisions = _normalize_decisions(proposal.get("design_decisions"))
 
     item = create_item(
         item_type="idea",
@@ -413,6 +445,7 @@ async def submit_idea(request: Request):
         sdlc=sdlc,
         stack_rationale=(proposal.get("stack_rationale") or "")[:500],
         style_guides=guides,
+        design_decisions=_json.dumps(decisions) if decisions else "",
     )
     log.info("idea_submitted", id=item["id"], title=item["title"], stack=stack, sdlc=sdlc,
              guides=guides)
@@ -514,6 +547,22 @@ async def approve_item(item_id: str, request: Request):
         )
     if new_guides is not None:
         set_style_guides(item_id, new_guides)
+
+    # Design decisions: merge the operator's answers into the stored decisions
+    # (unanswered ones auto-accept the recommendation). Plus an optional planner model.
+    answers = body.get("design_answers") or {}
+    planner_model = (body.get("planner_model") or "").strip()
+    try:
+        decisions = _json.loads(item.get("design_decisions") or "[]")
+    except Exception:
+        decisions = []
+    for d in decisions:
+        d["chosen"] = (answers.get(d["id"]) or d.get("recommended") or "").strip()
+    set_planning_inputs(
+        item_id,
+        design_decisions=_json.dumps(decisions) if decisions else None,
+        planner_model=planner_model or None,
+    )
 
     updated = update_state(item_id, "approved")
     final = get_item(item_id) or item
@@ -637,13 +686,15 @@ async def _run_planner(item_id: str, title: str, description: str) -> None:
     if over_budget(_redis_conn, cfg.limits.max_cost_usd_daily):
         log.warning("planner_skipped_cost_cap", id=item_id)
         return
-    model = cfg.models.planner
 
     # Resolve the stack chosen at approval (falls back to generic/standard).
     item = get_item(item_id) or {}
     cat = get_catalog()
     stack = cat.get_stack(item.get("stack"))
     sdlc = cat.get_sdlc(item.get("sdlc"))
+    # Operator's per-project planning model (chosen at approval) overrides the config.
+    model = (item.get("planner_model") or "").strip() or cfg.models.planner
+    decisions_block = _format_decisions(item.get("design_decisions"))
 
     # Provision a dedicated Forgejo repo for this project before decomposing.
     repo_full = await asyncio.to_thread(_provision_project_repo, item_id, title, stack.id)
@@ -659,6 +710,7 @@ async def _run_planner(item_id: str, title: str, description: str) -> None:
             sdlc_directive=sdlc.planner_directive,
             best_practices=stack.best_practices_prompt,
             stack=stack.id,
+            decisions=decisions_block,
             redis_conn=_redis_conn,
         )
     except ImportError:

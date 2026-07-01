@@ -310,6 +310,52 @@ class TestRecoveryControls:
         assert resp.status_code == 409
 
 
+class TestDesignDecisions:
+    def test_normalize_decisions_shapes_and_caps(self):
+        from event_bus.main import _normalize_decisions
+        raw = [{"question": f"Q{i}", "recommended": "A", "rationale": "r",
+                "alternatives": ["B", "C"]} for i in range(9)]
+        raw.append({"no_question": True})  # dropped
+        out = _normalize_decisions(raw)
+        assert len(out) == 7                     # capped
+        assert out[0] == {"id": "d0", "question": "Q0", "recommended": "A",
+                          "rationale": "r", "alternatives": ["B", "C"], "chosen": None}
+
+    def test_format_decisions_renders_chosen(self):
+        from event_bus.main import _format_decisions
+        import json as _j
+        decisions = _j.dumps([
+            {"id": "d0", "question": "Storage?", "chosen": "Postgres"},
+            {"id": "d1", "question": "Auth?", "chosen": ""},   # unanswered → skipped
+        ])
+        block = _format_decisions(decisions)
+        assert "LOCKED" in block and "Storage? → Postgres" in block and "Auth?" not in block
+
+    def test_approve_merges_answers_and_model(self, client, monkeypatch):
+        import json as _j
+        monkeypatch.setattr("event_bus.main._redis_conn", fakeredis.FakeRedis())
+        idea = {"id": "idea-1", "title": "P", "state": "pending-approval", "type": "idea",
+                "description": "d", "stack": "python", "sdlc": "standard",
+                "design_decisions": _j.dumps([
+                    {"id": "d0", "question": "Storage?", "recommended": "SQLite",
+                     "alternatives": ["Postgres"], "chosen": None},
+                    {"id": "d1", "question": "Auth?", "recommended": "JWT",
+                     "alternatives": [], "chosen": None}])}
+        with patch("event_bus.main.get_item", return_value=idea), \
+             patch("event_bus.main.update_state", return_value={**idea, "state": "approved"}), \
+             patch("event_bus.main.set_planning_inputs") as spi, \
+             patch("event_bus.main._run_planner", new_callable=AsyncMock):
+            resp = client.post("/api/items/idea-1/approve", json={
+                "design_answers": {"d0": "Postgres"},        # d1 left to auto-accept
+                "planner_model": "openrouter/anthropic/claude-sonnet-4-6"})
+        assert resp.status_code == 200
+        kw = spi.call_args.kwargs
+        merged = _j.loads(kw["design_decisions"])
+        assert merged[0]["chosen"] == "Postgres"      # operator's answer
+        assert merged[1]["chosen"] == "JWT"           # unanswered → recommendation
+        assert kw["planner_model"] == "openrouter/anthropic/claude-sonnet-4-6"
+
+
 class TestPlanApproval:
     _idea = {"id": "idea-1", "title": "P", "state": "approved", "type": "idea",
              "description": "d", "pr_url": None}

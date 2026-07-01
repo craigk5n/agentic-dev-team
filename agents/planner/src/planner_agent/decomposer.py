@@ -134,12 +134,16 @@ def decompose_idea(
     sdlc_directive: str = "",
     best_practices: str = "",
     stack: str = "",
+    decisions: str = "",
     redis_conn=None,
 ) -> dict:
     """Return {project_name, module_name, epics, stories}. `stories` is the flat,
-    globally-ordered list (epic by epic), each tagged with its `epic` name."""
+    globally-ordered list (epic by epic), each tagged with its `epic` name.
+    `decisions`: operator-locked design decisions the whole plan must honor."""
     call = dict(model=model, api_key=api_key, stack=stack, redis_conn=redis_conn)
     desc = (description or "")[:4000]
+    if decisions:
+        desc = f"{desc}\n\n{decisions}"   # ride along on every planning prompt's context
 
     # ── Pass 1: epics (breadth, foundational-first) ──────────────────────────
     try:

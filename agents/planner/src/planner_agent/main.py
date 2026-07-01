@@ -18,6 +18,7 @@ def run_planner(
     sdlc_directive: str = "",
     best_practices: str = "",
     stack: str = "",
+    decisions: str = "",
     redis_conn=None,
 ) -> dict:
     """
@@ -27,6 +28,7 @@ def run_planner(
     falls back to settings.default_repo so existing behaviour is unchanged.
     sdlc_directive / best_practices: stack & SDLC guidance that shape decomposition.
     stack: stack id, recorded with telemetry so spend is attributed per stack.
+    decisions: operator-locked design decisions injected as planning constraints.
     """
     log.info("planner_start", item_id=item_id, repo=repo_full_name or settings.default_repo)
 
@@ -39,6 +41,7 @@ def run_planner(
         sdlc_directive=sdlc_directive,
         best_practices=best_practices,
         stack=stack,
+        decisions=decisions,
         redis_conn=redis_conn,
     )
 

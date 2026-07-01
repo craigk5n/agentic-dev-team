@@ -82,7 +82,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     for col, definition in [("pr_url", "TEXT"), ("sequence", "INTEGER"), ("repo", "TEXT"),
                             ("stack", "TEXT"), ("sdlc", "TEXT"), ("stack_rationale", "TEXT"),
                             ("style_guides", "TEXT"), ("archived_at", "TEXT"),
-                            ("epic", "TEXT")]:
+                            ("epic", "TEXT"), ("design_decisions", "TEXT"),
+                            ("planner_model", "TEXT")]:
         try:
             conn.execute(f"ALTER TABLE work_items ADD COLUMN {col} {definition}")
             conn.commit()
@@ -106,6 +107,8 @@ def create_item(
     stack_rationale: str = "",
     style_guides: Optional[list[str]] = None,
     epic: str = "",
+    design_decisions: str = "",
+    planner_model: str = "",
     item_id: Optional[str] = None,
     created_at: Optional[str] = None,
 ) -> dict:
@@ -118,11 +121,12 @@ def create_item(
             """INSERT INTO work_items
                (id, type, title, prompt, description, state, parent_id, sequence,
                 model_used, repo, stack, sdlc, stack_rationale, style_guides, epic,
-                created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                design_decisions, planner_model, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (item_id, item_type, title, prompt, description, state, parent_id,
              sequence, model_used, repo or None, stack or None, sdlc or None,
-             stack_rationale or None, guides_csv, epic or None, now, now),
+             stack_rationale or None, guides_csv, epic or None,
+             design_decisions or None, planner_model or None, now, now),
         )
         db.commit()
     return get_item(item_id)
@@ -289,6 +293,25 @@ def unlock_next_story(item_id: str) -> dict | None:
     if not row:
         return None
     return update_state(row["id"], "ready")
+
+
+def set_planning_inputs(item_id: str, design_decisions: str | None = None,
+                        planner_model: str | None = None) -> dict | None:
+    """Persist the operator's answered design decisions (JSON) and chosen planner
+    model on an idea at approval, so the planner can use them."""
+    sets, vals = [], []
+    if design_decisions is not None:
+        sets.append("design_decisions=?"); vals.append(design_decisions or None)
+    if planner_model is not None:
+        sets.append("planner_model=?"); vals.append(planner_model or None)
+    if not sets:
+        return get_item(item_id)
+    with _lock:
+        db = get_db()
+        db.execute(f"UPDATE work_items SET {', '.join(sets)}, updated_at=? WHERE id=?",
+                   (*vals, _now(), item_id))
+        db.commit()
+    return get_item(item_id)
 
 
 def set_pr_url(item_id: str, pr_url: str) -> dict | None:

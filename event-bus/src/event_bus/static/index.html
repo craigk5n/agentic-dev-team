@@ -587,6 +587,20 @@ button.approve-btn:hover { background: rgba(34,197,94,.25); }
 /* Checkboxes must keep their intrinsic size — the global `input {width:100%}` rule
    would otherwise blow them into full-width boxes that shove the label to the edge. */
 .guide-opt input { margin: 0; width: auto; padding: 0; flex: 0 0 auto; }
+/* Design decisions on the approval card — question + recommended/alternatives radios. */
+.dec-wrap { margin-bottom: 8px; }
+.dec-card { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px;
+  padding: 8px 10px; margin-bottom: 6px; }
+.dec-q { font-size: 12px; font-weight: 600; color: var(--text); margin-bottom: 2px; }
+.dec-why { font-size: 11px; color: var(--muted); margin-bottom: 6px; line-height: 1.4; }
+.dec-opt { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text);
+  cursor: pointer; padding: 2px 0; flex-wrap: wrap; }
+.dec-opt input[type="radio"] { margin: 0; width: auto; padding: 0; flex: 0 0 auto; }
+.dec-rec { font-size: 10px; color: #22c55e; font-weight: 600; }
+.dec-other { flex: 1; min-width: 120px; font-size: 12px; padding: 2px 6px; }
+.apr-model { margin-bottom: 8px; }
+.apr-model select { font-size: 12px; padding: 3px 6px; background: var(--bg, #1a1a1a);
+  color: inherit; border: 1px solid rgba(255,255,255,.15); border-radius: 4px; }
 .stack-cost { margin-top: 16px; max-width: 420px; }
 .stack-cost-title { color: var(--muted); font-size: 12px; margin-bottom: 6px; text-transform: uppercase; letter-spacing: .04em; }
 button.reject-btn {
@@ -1220,6 +1234,41 @@ function guideChecklist(itemId, stackId, selected) {
   return `<div class="guide-pickers" data-id="${itemId}">` + guides.map(g =>
     `<label class="guide-opt"><input type="checkbox" class="apr-guide" data-id="${itemId}" value="${g.id}"${sel.has(g.id) ? ' checked' : ''}> ${escHtml(g.display_name)}</label>`
   ).join('') + `</div>`;
+}
+
+// Design decisions the operator confirms before planning — each with a recommended
+// option (pre-selected) + alternatives + a custom "Other". Untouched = recommendation.
+function designDecisions(item) {
+  let decisions = [];
+  try { decisions = JSON.parse(item.design_decisions || '[]'); } catch (e) {}
+  if (!decisions.length) return '';
+  const rows = decisions.map(d => {
+    const name = `apr-dec-${item.id}-${d.id}`;
+    const seen = new Set();
+    const opts = [d.recommended, ...(d.alternatives || [])].filter(o => o && !seen.has(o) && seen.add(o));
+    const radios = opts.map(o => {
+      const rec = o === d.recommended;
+      return `<label class="dec-opt"><input type="radio" name="${name}" value="${escHtml(o)}"${rec ? ' checked' : ''}> ${escHtml(o)}${rec ? ' <span class="dec-rec">★ recommended</span>' : ''}</label>`;
+    }).join('');
+    return `<div class="dec-card" data-dec="${d.id}">
+      <div class="dec-q">${escHtml(d.question)}</div>
+      ${d.rationale ? `<div class="dec-why">${escHtml(d.rationale)}</div>` : ''}
+      ${radios}
+      <label class="dec-opt"><input type="radio" name="${name}" value="__other__"> Other: <input type="text" class="dec-other" placeholder="custom answer"></label>
+    </div>`;
+  }).join('');
+  return `<div class="dec-wrap" data-id="${item.id}"><div class="guide-label">Design decisions</div>${rows}</div>`;
+}
+
+const PLANNER_MODELS = [
+  { value: '', label: 'Default (config model)' },
+  { value: 'openrouter/anthropic/claude-sonnet-4-6', label: 'Claude Sonnet — paid, recommended' },
+  { value: 'openrouter/anthropic/claude-opus-4-8', label: 'Claude Opus — paid, best reasoning' },
+];
+function plannerModelPicker(itemId) {
+  const opts = PLANNER_MODELS.map(m => `<option value="${escHtml(m.value)}">${escHtml(m.label)}</option>`).join('');
+  return `<div class="apr-model" data-id="${itemId}"><div class="guide-label">Planning model</div>
+    <select class="apr-planner-model">${opts}</select></div>`;
 }
 
 // ── Tab routing ───────────────────────────────────────────────────────────────
@@ -1889,7 +1938,9 @@ async function loadBoard() {
         const selGuides = (item.style_guides || '').split(',').filter(Boolean);
         const guidesBox = GUIDE_OPTS.length
           ? `<div class="guide-wrap" data-id="${item.id}"><div class="guide-label">Style guides</div>${guideChecklist(item.id, item.stack, selGuides)}</div>` : '';
-        actions = `<div class="approval-controls">${rationale}${stackSel}${guidesBox}<div class="board-item-actions">
+        const decisionsBox = designDecisions(item);
+        const modelBox = plannerModelPicker(item.id);
+        actions = `<div class="approval-controls">${rationale}${stackSel}${guidesBox}${decisionsBox}${modelBox}<div class="board-item-actions">
           <button class="approve-btn" data-id="${item.id}">Approve</button>
           <button class="reject-btn" data-id="${item.id}">Reject</button>
         </div></div>`;
@@ -1993,6 +2044,22 @@ async function loadBoard() {
       if (GUIDE_OPTS.length) {
         body.style_guides = [...container.querySelectorAll(`.apr-guide[data-id="${id}"]:checked`)].map(c => c.value);
       }
+      // Design-decision answers (untouched → recommendation, since it's pre-checked).
+      const decWrap = container.querySelector(`.dec-wrap[data-id="${id}"]`);
+      if (decWrap) {
+        const answers = {};
+        decWrap.querySelectorAll('.dec-card').forEach(card => {
+          const checked = card.querySelector('input[type="radio"]:checked');
+          if (!checked) return;
+          const val = checked.value === '__other__'
+            ? (card.querySelector('.dec-other')?.value || '').trim()
+            : checked.value;
+          if (val) answers[card.dataset.dec] = val;
+        });
+        body.design_answers = answers;
+      }
+      const modelSel = container.querySelector(`.apr-model[data-id="${id}"] .apr-planner-model`);
+      if (modelSel && modelSel.value) body.planner_model = modelSel.value;
       const r = await fetch(`/api/items/${id}/approve`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

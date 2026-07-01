@@ -88,6 +88,14 @@ class TestTwoLevelPlan:
             decompose_idea("T", "D", model="m", api_key="sk-test")
         assert mock.call_args_list[0][1]["api_key"] == "sk-test"
 
+    def test_locked_decisions_injected_into_prompts(self):
+        with patch("planner_agent.decomposer.litellm.completion",
+                   side_effect=_seq(_EPICS, _STORIES_A, _STORIES_B, _NO_MISSING)) as mock:
+            decompose_idea("Auth", "Build auth", model="m",
+                           decisions="LOCKED: storage=Postgres; auth=JWT")
+        for call in mock.call_args_list:                 # rides on every planning prompt
+            assert "storage=Postgres" in call[1]["messages"][1]["content"]
+
     def test_fallback_when_epics_pass_fails(self):
         with patch("planner_agent.decomposer.litellm.completion",
                    side_effect=_seq("{bad json")):
