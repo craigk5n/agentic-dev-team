@@ -280,15 +280,20 @@ def find_item_by_pr_url(pr_url: str) -> dict | None:
 
 
 def unlock_next_story(item_id: str) -> dict | None:
-    """Transition the next sequenced backlog story to ready after item_id completes."""
+    """Transition the next backlog story to ready after item_id completes.
+
+    Gap-tolerant: picks the lowest-sequence backlog story AFTER this one, not strictly
+    sequence+1 — so a deleted/renumbered story (e.g. a de-duplicated plan) can't leave a
+    hole that halts the whole chain.
+    """
     item = get_item(item_id)
     if not item or item.get("sequence") is None or not item.get("parent_id"):
         return None
-    next_seq = item["sequence"] + 1
     with _lock:
         row = get_db().execute(
-            "SELECT id FROM work_items WHERE parent_id=? AND sequence=? AND state='backlog'",
-            (item["parent_id"], next_seq),
+            "SELECT id FROM work_items WHERE parent_id=? AND sequence > ? "
+            "AND type='story' AND state='backlog' ORDER BY sequence ASC LIMIT 1",
+            (item["parent_id"], item["sequence"]),
         ).fetchone()
     if not row:
         return None

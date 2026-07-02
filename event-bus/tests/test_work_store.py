@@ -214,6 +214,15 @@ class TestUnlockNextStory:
         result = ws.unlock_next_story(s1["id"])
         assert result is None
 
+    def test_gap_tolerant_skips_deleted_sequences(self):
+        # A deleted/renumbered plan leaves a hole (e.g. seq 2-7 removed); the unlock must
+        # jump to the next EXISTING backlog story, not stall looking for sequence+1.
+        idea = ws.create_item(item_type="idea", title="Idea")
+        s1 = ws.create_item(item_type="story", title="S1", parent_id=idea["id"], sequence=1, state="in-review")
+        s8 = ws.create_item(item_type="story", title="S8", parent_id=idea["id"], sequence=8, state="backlog")
+        result = ws.unlock_next_story(s1["id"])
+        assert result is not None and result["id"] == s8["id"] and result["state"] == "ready"
+
 
 # ── set_pr_url ────────────────────────────────────────────────────────────────
 
