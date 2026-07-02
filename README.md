@@ -151,6 +151,25 @@ A ~110-story reimplementation PRD was imported end-to-end with **planner = `clau
 | Coding agent | opencode (model-agnostic, supports Ollama) |
 | Agent isolation | Ephemeral Docker containers per coding run |
 
+## Requirements
+
+**Software**
+
+- **Docker Engine + Docker Compose v2** — the whole stack (Forgejo, the event bus, Redis, and every agent sandbox) runs in containers.
+- A **Linux host** (or Docker Desktop on macOS/Windows). Agent sandboxes are Linux containers; `SANDBOX_MODE=docker` needs access to the Docker socket.
+- **~2 vCPUs** minimum; more helps when several agents run in parallel.
+- At least one model credential: an `OPENROUTER_API_KEY` (free models work out of the box) or `ANTHROPIC_API_KEY`, and optionally a Claude Code subscription token for planning. See [Choosing models per role](#choosing-models-per-role).
+
+**Hardware — this is a "single modest server" workload.** The always-on services rest at **~0.4 GB RAM**; the variable cost is ephemeral agent sandboxes (each capped at `SANDBOX_MEMORY`, default 2 GB) that spin up per coder/reviewer/tester/security run, plus one coder image per language stack you use (~1–1.8 GB disk each).
+
+| Tier | RAM | Disk | Good for |
+|---|---|---|---|
+| Minimum | **4 GB** | **8 GB** | One stack, one agent at a time. Tight — a full PR verdict fan-out can OOM. |
+| **Recommended** | **8 GB** | **20 GB** | One language stack, comfortable concurrency (coder + 3 parallel verdicts + CI), room for build cache and history. |
+| Headroom | **16 GB** | **40–50 GB** | Several stacks and/or concurrent projects, long-retained CI history. |
+
+Two knobs if you're tight on RAM: lower `SANDBOX_MEMORY` (2 GB → 1 GB is fine for most stories) and build coder images only for the language stacks you actually use. Disk grows mainly with the number of stacks (coder images), CI artifacts, and Forgejo/Postgres history; a periodic `docker system prune` reclaims spent build cache and dead per-run layers.
+
 ## Quick start
 
 ```bash
