@@ -37,6 +37,31 @@ class TestComplete:
         call_kwargs = mock.call_args[1]
         assert "api_key" not in call_kwargs
 
+    def test_structured_sends_response_format_when_supported(self):
+        with patch("reviewer.llm.litellm.completion", return_value=_mock_completion("{}")) as mock, \
+             patch("reviewer.llm._supports_structured", return_value=True):
+            complete("m", [{"role": "user", "content": "q"}], structured=True)
+        assert mock.call_args[1].get("response_format") == {"type": "json_object"}
+
+    def test_structured_skipped_when_model_unsupported(self):
+        with patch("reviewer.llm.litellm.completion", return_value=_mock_completion("{}")) as mock, \
+             patch("reviewer.llm._supports_structured", return_value=False):
+            complete("m", [{"role": "user", "content": "q"}], structured=True)
+        assert "response_format" not in mock.call_args[1]
+
+    def test_no_response_format_when_structured_false(self):
+        with patch("reviewer.llm.litellm.completion", return_value=_mock_completion("x")) as mock, \
+             patch("reviewer.llm._supports_structured", return_value=True):
+            complete("m", [{"role": "user", "content": "q"}])   # structured defaults False
+        assert "response_format" not in mock.call_args[1]
+
+    def test_review_diff_requests_structured(self):
+        with patch("reviewer.llm.litellm.completion",
+                   return_value=_mock_completion('{"status":"pass","summary":"ok","findings":[]}')) as mock, \
+             patch("reviewer.llm._supports_structured", return_value=True):
+            review_diff("some diff", model="m")
+        assert mock.call_args[1].get("response_format") == {"type": "json_object"}
+
 
 class TestReviewDiff:
     def test_returns_parsed_verdict(self):

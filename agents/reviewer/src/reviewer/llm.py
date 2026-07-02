@@ -22,6 +22,19 @@ log = structlog.get_logger()
 _MAX_DIFF_CHARS = 24_000
 
 
+def _supports_structured(model: str) -> bool:
+    """Whether the model advertises structured-output support (from the shared model-meta
+    cache). Guarded — safe no-op if the event_bus package / cache isn't available."""
+    try:
+        from reviewer.config import settings
+        import redis as _redis
+        from event_bus.models_catalog import supports_structured
+        r = _redis.from_url(settings.redis_url, decode_responses=False)
+        return bool(supports_structured(r, model))
+    except Exception:
+        return False
+
+
 def complete(
     model: str,
     messages: list[dict],
@@ -30,12 +43,17 @@ def complete(
     temperature: float = 0.0,
     telemetry_role: str = "",
     telemetry_stack: str = "",
+    structured: bool = False,
 ) -> str:
     """
     Call any litellm-supported model and return the text response.
 
     Pass telemetry_role (e.g. "code_review", "test_run", "security") to record
     token usage and estimated cost to Redis. Failure to record is always silent.
+
+    ``structured=True`` (for callers that require JSON) sends response_format when the
+    model supports it, so a capable model can't answer with prose — attacking the
+    bad-JSON verdict failures ("please paste the diff", empty replies) on flaky models.
     """
     kwargs: dict = {
         "model": model,
@@ -44,6 +62,8 @@ def complete(
     }
     if api_key:
         kwargs["api_key"] = api_key
+    if structured and _supports_structured(model):
+        kwargs["response_format"] = {"type": "json_object"}
     resp = litellm.completion(**kwargs)
 
     if telemetry_role:
@@ -117,6 +137,7 @@ def review_diff(
         api_key=api_key,
         telemetry_role="reviewer",
         telemetry_stack=stack,
+        structured=True,
     )
     return _parse_json_response(raw, role="code_review")
 
@@ -157,6 +178,7 @@ def summarise_test_output(
         api_key=api_key,
         telemetry_role="tester",
         telemetry_stack=stack,
+        structured=True,
     )
     return _parse_json_response(raw, role="test_run")
 
