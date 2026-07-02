@@ -562,6 +562,26 @@ button.approve-btn:hover { background: rgba(34,197,94,.25); }
 /* Focus/legend bar: click an idea to spotlight its cards and dim the rest
    (focus + context). Chips double as a legend mapping each color to its idea. */
 .board-legend { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 14px; }
+/* Per-project progress inside a legend chip */
+.legend-prog { display: inline-block; width: 46px; height: 5px; border-radius: 3px;
+  background: rgba(148,163,184,.25); overflow: hidden; vertical-align: middle; margin: 0 4px; }
+.legend-prog-fill { display: block; height: 100%; background: currentColor; opacity: .8; }
+.legend-count { font-variant-numeric: tabular-nums; opacity: .7; font-size: 11px; }
+/* Running / slow / stuck pill on active story cards */
+.run-badge { display: inline-flex; align-items: center; gap: 5px; font-size: 11px;
+  font-variant-numeric: tabular-nums; padding: 1px 7px; border-radius: 10px; margin-left: 6px;
+  border: 1px solid transparent; }
+.run-badge.run-live  { color: #34d399; background: rgba(52,211,153,.12); border-color: rgba(52,211,153,.3); }
+.run-badge.run-stale { color: #eab308; background: rgba(234,179,8,.12); border-color: rgba(234,179,8,.4); }
+.run-badge.run-stuck { color: #f87171; background: rgba(248,113,113,.14); border-color: rgba(248,113,113,.5); }
+.run-pulse { width: 7px; height: 7px; border-radius: 50%; background: currentColor;
+  box-shadow: 0 0 0 0 currentColor; animation: runpulse 1.6s ease-out infinite; }
+@keyframes runpulse {
+  0%   { box-shadow: 0 0 0 0 rgba(52,211,153,.5); }
+  70%  { box-shadow: 0 0 0 6px rgba(52,211,153,0); }
+  100% { box-shadow: 0 0 0 0 rgba(52,211,153,0); }
+}
+@media (prefers-reduced-motion: reduce) { .run-pulse { animation: none; } }
 .quota-banner { border-radius: 8px; padding: 9px 13px; margin: 0 0 12px; font-size: 13px;
   border: 1px solid; display: flex; align-items: center; gap: 8px; }
 .quota-banner.warn { background: rgba(234,179,8,.12); border-color: rgba(234,179,8,.5); color: #eab308; }
@@ -1943,17 +1963,45 @@ function shortIdeaLabel(title) {
 // Render the focus/legend bar: an "All" chip plus one chip per idea. Clicking an
 // idea spotlights it (dims the rest); clicking it again — or "All" — clears focus.
 // Only shown when 2+ ideas are on the board (with one, there's nothing to separate).
-function renderBoardLegend(ideas, ideaMeta) {
+// Compact duration from seconds: 45s · 4m · 1h 2m.
+function fmtDuration(secs) {
+  secs = Math.max(0, Math.floor(secs || 0));
+  if (secs < 60) return secs + 's';
+  const m = Math.floor(secs / 60);
+  if (m < 60) return m + 'm';
+  return Math.floor(m / 60) + 'h ' + (m % 60) + 'm';
+}
+
+// Live "running / slow / stuck" pill for an active story (from API age_secs/stale/stuck).
+function runtimeBadge(item) {
+  const active = ['in-progress', 'in-review', 'changes-requested'];
+  if (item.type !== 'story' || !active.includes(item.state)) return '';
+  const t = fmtDuration(item.age_secs);
+  if (item.stuck)
+    return `<span class="run-badge run-stuck" title="Auto-recovery gave up — needs a look">⚠ stuck · ${t}</span>`;
+  if (item.stale)
+    return `<span class="run-badge run-stale" title="Past its expected time — watchdog will retry"><span class="run-pulse"></span>slow · ${t}</span>`;
+  return `<span class="run-badge run-live" title="Running"><span class="run-pulse"></span>${t}</span>`;
+}
+
+function renderBoardLegend(ideas, ideaMeta, progress) {
   const bar = document.getElementById('board-legend');
   if (!bar) return;
-  if (ideas.length < 2) { bar.innerHTML = ''; return; }
+  if (ideas.length < 1) { bar.innerHTML = ''; return; }
+  const miniBar = (p) => {
+    if (!p || !p.total) return '';
+    const pct = Math.round(100 * p.done / p.total);
+    return `<span class="legend-prog" title="${p.done}/${p.total} stories done (${pct}%)"><span class="legend-prog-fill" style="width:${pct}%"></span></span><span class="legend-count">${p.done}/${p.total}</span>`;
+  };
+  // "All ideas" toggle only matters with 2+ projects.
   const allActive = boardFocus ? '' : ' active';
-  let html = `<button class="legend-chip all-chip${allActive}" data-idea="">All ideas</button>`;
+  let html = ideas.length >= 2
+    ? `<button class="legend-chip all-chip${allActive}" data-idea="">All ideas</button>` : '';
   for (const idea of ideas) {
     const m = ideaMeta[idea.id];
     const active = boardFocus === idea.id ? ' active' : '';
     html += `<button class="legend-chip${active}" data-idea="${idea.id}" style="--c:${m.color}" title="${escHtml(idea.title)}">
-      <span class="idea-dot" style="background:${m.color}"></span>${escHtml(m.name)}
+      <span class="idea-dot" style="background:${m.color}"></span>${escHtml(m.name)} ${miniBar(progress[idea.id])}
     </button>`;
   }
   bar.innerHTML = html;
@@ -2041,7 +2089,13 @@ async function loadBoard() {
   // Drop a stale focus if its idea is no longer on the board, then render the
   // legend/focus bar (only worth showing when 2+ ideas are present).
   if (boardFocus && !ideaMeta[boardFocus]) boardFocus = null;
-  renderBoardLegend(ideas, ideaMeta);
+  // Per-project progress (done / total stories) for the legend bars.
+  const ideaProgress = {};
+  for (const idea of ideas) {
+    const kids = (storiesByIdea[idea.id] || []).filter(s => s.type === 'story');
+    ideaProgress[idea.id] = { done: kids.filter(s => s.state === 'done').length, total: kids.length };
+  }
+  renderBoardLegend(ideas, ideaMeta, ideaProgress);
 
   if (!d.total) {
     container.innerHTML = '<div class="board-empty">No work items yet — submit an idea to get started.</div>';
@@ -2143,7 +2197,7 @@ async function loadBoard() {
       html += `<div class="board-item${backlogClass}${dimClass}" data-id="${item.id}" data-idea="${cardIdeaId || ''}"${accentStyle}>
         ${seqBadge}
         <div class="board-item-title" data-id="${item.id}">${escHtml(item.title)}</div>
-        ${ideaChip}
+        ${ideaChip}${runtimeBadge(item)}
         <div class="board-item-meta">${typeLabel}${tsSpan ? ' · ' + tsSpan : ''}${epicBadge ? ' ' + epicBadge : ''}${stackBadge ? ' ' + stackBadge : ''}</div>
         ${verdictRow}
         ${actions}

@@ -134,6 +134,110 @@ def _reconcile_orphaned_stories() -> None:
         _dispatch_next_ready()
 
 
+# ── Periodic watchdog ─────────────────────────────────────────────────────────
+# The automatic sibling of the operator Reset/Retry buttons: a background sweep that
+# re-runs work stuck too long (a coder whose task silently died, verdicts that never
+# posted) instead of waiting for a restart. Bounded per story so a genuinely broken
+# item is flagged for the operator rather than looped forever.
+_WATCH_INTERVAL_SECS = 150
+_STUCK_IN_PROGRESS_SECS = 900    # coders finish in a few min; 15 min ⇒ dead task
+_STUCK_IN_REVIEW_SECS = 600      # verdicts are fast; 10 min ⇒ lost fan-out
+_WATCH_ATTEMPT_CAP = 3           # after this many auto-recoveries, hand it to the operator
+
+
+def _story_age_secs(item: dict) -> float:
+    from datetime import datetime, timezone
+    ts = item.get("updated_at") or item.get("created_at")
+    if not ts:
+        return 0.0
+    try:
+        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - dt).total_seconds()
+    except Exception:
+        return 0.0
+
+
+def is_story_stuck(item: dict) -> bool:
+    """True when a story has sat in an active state past its budget — the same signal
+    the watchdog acts on and the UI badges as 'stuck'."""
+    state, age = item.get("state"), _story_age_secs(item)
+    if state == "in-progress":
+        return age > _STUCK_IN_PROGRESS_SECS
+    if state in ("in-review", "changes-requested"):
+        return age > _STUCK_IN_REVIEW_SECS and bool(item.get("pr_url"))
+    return False
+
+
+def _requeue_pr_verdicts(item: dict) -> bool:
+    """Re-run review+tests+CI on the story's PR head (verdicts got lost). Same path as
+    the operator Retry button. Returns True if requeued."""
+    parts = _pr_url_parts(item.get("pr_url") or "")
+    if not parts:
+        return False
+    repo_full_name, pr_number = parts
+    owner, repo_name = repo_full_name.split("/", 1)
+    _clear_recovery_keys(item)
+    _clear_watchdog_state(item_id)
+    try:
+        from coding_agent.forgejo_client import ForgejoClient as CFJ
+        from coding_agent.config import settings as cs
+        with CFJ(cs.forgejo_base_url, cs.forgejo_api_token) as fg:
+            pr = fg.get(f"/repos/{owner}/{repo_name}/pulls/{pr_number}")
+    except Exception as exc:
+        log.warning("watchdog_pr_fetch_failed", id=item["id"], error=str(exc)[:120])
+        return False
+    head = pr.get("head") or {}
+    from event_bus.jobs.handlers import handle_pr_event
+    _queue_or_503().enqueue(
+        handle_pr_event, repo_full_name=repo_full_name, pr_number=pr_number,
+        head_sha=head.get("sha", ""), action="synchronized",
+        head_ref=head.get("ref", ""), base_ref=(pr.get("base") or {}).get("ref", "main"))
+    update_state(item["id"], "in-review")
+    return True
+
+
+def _sweep_stuck_stories() -> None:
+    """One watchdog pass: recover stories stuck past their budget, capped per story."""
+    if _redis_conn is None:
+        return
+    stuck = [s for s in list_items(item_type="story") if is_story_stuck(s)]
+    for s in stuck:
+        key = f"watch_attempts:{s['id']}"
+        try:
+            n = _redis_conn.incr(key)
+            _redis_conn.expire(key, 86_400)
+        except Exception:
+            n = 1
+        if n > _WATCH_ATTEMPT_CAP:
+            try:
+                _redis_conn.setex(f"stuck:{s['id']}", 86_400, b"1")   # surfaced in the API
+            except Exception:
+                pass
+            log.error("watchdog_gave_up", id=s["id"], state=s["state"],
+                      attempts=n, age_secs=int(_story_age_secs(s)))
+            continue
+        log.warning("watchdog_recovering", id=s["id"], state=s["state"],
+                    attempt=n, age_secs=int(_story_age_secs(s)))
+        if s["state"] == "in-progress":
+            _clear_recovery_keys(s)
+            update_state(s["id"], "ready")
+            _dispatch_next_ready()
+        else:  # in-review / changes-requested with a PR → re-run verdicts
+            _requeue_pr_verdicts(s)
+
+
+async def _watchdog_loop() -> None:
+    """Sweep for stuck stories every _WATCH_INTERVAL_SECS until the process exits."""
+    while True:
+        await asyncio.sleep(_WATCH_INTERVAL_SECS)
+        try:
+            await asyncio.to_thread(_sweep_stuck_stories)
+        except Exception as exc:  # noqa: BLE001 — a bad sweep must never kill the loop
+            log.warning("watchdog_sweep_failed", error=str(exc)[:160])
+
+
 def _dispatch_next_ready() -> None:
     """Claim + dispatch the next queued ready story (does NOT touch the slot counter)."""
     ready = [s for s in list_items(state="ready", item_type="story")]
@@ -180,6 +284,13 @@ def _clear_recovery_keys(item: dict) -> None:
         _redis_conn.delete(f"recode_retries:{parts[0]}:{parts[1]}")
 
 
+def _clear_watchdog_state(item_id: str) -> None:
+    """Reset the watchdog's per-story attempt counter + stuck flag — called when the
+    operator takes over (Retry/Reset), so auto-recovery starts fresh afterward."""
+    if _redis_conn:
+        _redis_conn.delete(f"watch_attempts:{item_id}", f"stuck:{item_id}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _redis_conn, _queue
@@ -196,8 +307,10 @@ async def lifespan(app: FastAPI):
     get_db()  # initialise SQLite schema
     _reap_orphan_coder_sandboxes()   # kill zombie coder containers from before restart
     _reconcile_orphaned_stories()    # resume stories stranded in-progress by the restart
+    watchdog = asyncio.create_task(_watchdog_loop())  # continuous stuck-job recovery
     log.info("event_bus_started", redis=settings.redis_url)
     yield
+    watchdog.cancel()
     if _redis_conn:
         _redis_conn.close()
 
@@ -527,11 +640,16 @@ async def list_work_items(response: Response):
     """Return all work items grouped by state with state metadata."""
     response.headers["Cache-Control"] = "no-store"
     groups = grouped_items()
-    # Enrich items that have a PR URL with live verdict data from Redis
+    _active = ("in-progress", "in-review", "changes-requested")
+    # Enrich items with live verdict data + runtime signals (elapsed / stale / stuck).
     for items in groups.values():
         for item in items:
             if item.get("pr_url"):
                 item["verdicts"] = _fetch_verdicts(item["pr_url"])
+            if item.get("type") == "story" and item.get("state") in _active:
+                item["age_secs"] = int(_story_age_secs(item))
+                item["stale"] = is_story_stuck(item)        # past its budget (amber)
+                item["stuck"] = bool(_redis_conn and _redis_conn.get(f"stuck:{item['id']}"))
     return {
         "groups": [
             {
@@ -1564,6 +1682,7 @@ async def retry_item(item_id: str):
     repo_full_name, pr_number = parts
     owner, repo_name = repo_full_name.split("/", 1)
     _clear_recovery_keys(item)
+    _clear_watchdog_state(item_id)
     try:
         from coding_agent.forgejo_client import ForgejoClient as CFJ
         from coding_agent.config import settings as cs
@@ -1597,6 +1716,7 @@ async def reset_item(item_id: str):
     if item["state"] not in _RESETTABLE:
         raise HTTPException(status_code=409, detail=f"story is '{item['state']}', not resettable")
     _clear_recovery_keys(item)
+    _clear_watchdog_state(item_id)
     update_state(item_id, "in-progress")
     story_prompt = get_prompt(_redis_or_503(), "coder.story")
     asyncio.create_task(_run_coding_agent(item_id, item["title"], item.get("description") or "", story_prompt))

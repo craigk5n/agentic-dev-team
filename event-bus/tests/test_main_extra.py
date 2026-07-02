@@ -1674,3 +1674,64 @@ class TestStyleGuidesApi:
         out = _augment_coder_prompt("base", c.get_stack("python"), c.get_sdlc("standard"),
                                     c.get_style_guides(["google-python"]))
         assert "Google Python" in out and "docstring" in out.lower()
+
+
+class TestWatchdog:
+    @staticmethod
+    def _story(state, age_secs, **kw):
+        from datetime import datetime, timezone, timedelta
+        ts = (datetime.now(timezone.utc) - timedelta(seconds=age_secs)).isoformat()
+        return {"id": kw.get("id", "s1"), "type": "story", "state": state,
+                "updated_at": ts, "pr_url": kw.get("pr_url"), "title": "S"}
+
+    def test_is_story_stuck_thresholds(self):
+        from event_bus.main import is_story_stuck
+        assert is_story_stuck(self._story("in-progress", 1000)) is True   # >900s
+        assert is_story_stuck(self._story("in-progress", 300)) is False
+        assert is_story_stuck(self._story("in-review", 700, pr_url="http://x/pulls/1")) is True
+        assert is_story_stuck(self._story("in-review", 700, pr_url=None)) is False  # no PR
+        assert is_story_stuck(self._story("done", 99999)) is False        # terminal
+
+    def test_sweep_recovers_stuck_in_progress(self, monkeypatch):
+        import event_bus.main as m
+        monkeypatch.setattr(m, "_redis_conn", fakeredis.FakeRedis())
+        stuck = self._story("in-progress", 1000, id="sX")
+        with patch.object(m, "list_items", return_value=[stuck]), \
+             patch.object(m, "update_state") as upd, \
+             patch.object(m, "_dispatch_next_ready") as disp, \
+             patch.object(m, "_clear_recovery_keys"):
+            m._sweep_stuck_stories()
+        upd.assert_any_call("sX", "ready")     # reset the dead coder
+        disp.assert_called_once()
+
+    def test_sweep_recovers_stuck_in_review_via_verdict_requeue(self, monkeypatch):
+        import event_bus.main as m
+        monkeypatch.setattr(m, "_redis_conn", fakeredis.FakeRedis())
+        stuck = self._story("in-review", 700, id="sR", pr_url="http://f/o/r/pulls/3")
+        with patch.object(m, "list_items", return_value=[stuck]), \
+             patch.object(m, "_requeue_pr_verdicts", return_value=True) as req:
+            m._sweep_stuck_stories()
+        req.assert_called_once()
+
+    def test_sweep_gives_up_after_cap_and_flags_stuck(self, monkeypatch):
+        import event_bus.main as m
+        r = fakeredis.FakeRedis()
+        monkeypatch.setattr(m, "_redis_conn", r)
+        stuck = self._story("in-progress", 1000, id="sG")
+        r.set("watch_attempts:sG", m._WATCH_ATTEMPT_CAP)   # already at cap
+        with patch.object(m, "list_items", return_value=[stuck]), \
+             patch.object(m, "update_state") as upd, \
+             patch.object(m, "_dispatch_next_ready") as disp:
+            m._sweep_stuck_stories()
+        assert r.get("stuck:sG") == b"1"       # flagged for the operator
+        upd.assert_not_called()                # did NOT re-dispatch
+        disp.assert_not_called()
+
+    def test_healthy_stories_untouched(self, monkeypatch):
+        import event_bus.main as m
+        monkeypatch.setattr(m, "_redis_conn", fakeredis.FakeRedis())
+        fresh = self._story("in-progress", 60, id="ok")   # young, not stuck
+        with patch.object(m, "list_items", return_value=[fresh]), \
+             patch.object(m, "update_state") as upd:
+            m._sweep_stuck_stories()
+        upd.assert_not_called()
