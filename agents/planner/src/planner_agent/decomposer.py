@@ -380,6 +380,7 @@ def normalize_plan(
     stack: str = "",
     redis_conn=None,
     skip_epics: set[str] | None = None,
+    epics: list[dict] | None = None,
 ) -> dict:
     """Map an externally-authored plan (pasted PRD/markdown) onto our epic/story model.
 
@@ -393,6 +394,11 @@ def normalize_plan(
     by a rate limit can be RESUMED to fill only the missing epics without redoing work.
     The returned ``epics`` is always the full list; ``stories`` covers only the epics
     that were actually processed this run.
+
+    ``epics`` — a pre-determined epic list to use instead of re-running pass 1. Passing
+    the list captured on the first run keeps epic identity STABLE across a resume (pass 1
+    is non-deterministic — Opus renames epics between runs, which would break skip_epics
+    matching and duplicate work).
     """
     skip = {e.strip() for e in (skip_epics or set()) if e}
     resuming = bool(skip)
@@ -400,16 +406,21 @@ def normalize_plan(
     plan = (plan_text or "")[:_MAX_PLAN_CHARS]
 
     # ── Pass 1: epic list only (names + descriptions) — tiny, truncation-proof ──
-    try:
-        top = _complete_json(
-            [{"role": "system", "content": _SYSTEM},
-             {"role": "user", "content": _NORMALIZE_EPICS_PROMPT.format(plan=plan)}],
-            max_tokens=2000, **call)
-    except Exception as exc:
-        log.warning("normalize_epics_failed", error=str(exc)[:160])
-        return _fallback("Imported plan", default_repo)
+    # Reuse the caller-supplied list on resume; otherwise extract it from the plan.
+    if epics:
+        project_name = "Imported plan"
+        top = {"epics": epics}
+    else:
+        try:
+            top = _complete_json(
+                [{"role": "system", "content": _SYSTEM},
+                 {"role": "user", "content": _NORMALIZE_EPICS_PROMPT.format(plan=plan)}],
+                max_tokens=2000, **call)
+        except Exception as exc:
+            log.warning("normalize_epics_failed", error=str(exc)[:160])
+            return _fallback("Imported plan", default_repo)
+        project_name = (top.get("project_name") or "Imported plan")[:80]
 
-    project_name = (top.get("project_name") or "Imported plan")[:80]
     epics = [{"name": e["name"], "description": e.get("description", "")}
              for e in top.get("epics", []) if e.get("name")][:_MAX_IMPORT_EPICS]
     if not epics:

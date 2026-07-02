@@ -220,6 +220,19 @@ class TestNormalizePlan:
                                   skip_epics={"Data Model"})
         assert plan["stories"] == []
 
+    def test_reuse_epics_skips_pass1(self):
+        # Supplying the epic list (resume) skips pass 1 entirely — the only calls are the
+        # per-epic stories passes — so epic identity stays stable across runs.
+        supplied = [{"name": "Data Model", "description": "d"},
+                    {"name": "Endpoints", "description": "d"}]
+        with patch("planner_agent.decomposer.litellm.completion",
+                   side_effect=_seq(self._STORIES_2)) as mock:
+            plan = normalize_plan("plan", model="m", default_repo="o/r",
+                                  epics=supplied, skip_epics={"Data Model"})
+        assert mock.call_count == 1                       # no pass-1 call; 1 stories pass
+        assert [e["name"] for e in plan["epics"]] == ["Data Model", "Endpoints"]
+        assert [s["title"] for s in plan["stories"]] == ["CRUD endpoints"]
+
     def test_rate_limit_uses_longer_backoff(self):
         from planner_agent import decomposer
         good = _mock_llm('{"ok": 1}')

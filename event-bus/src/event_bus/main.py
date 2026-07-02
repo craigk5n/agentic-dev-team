@@ -839,7 +839,31 @@ async def _run_import(item_id: str) -> None:
     except Exception as exc:
         log.error("import_failed", id=item_id, error=str(exc))
         return
+    _store_import_epics(item_id, plan.get("epics", []))
     _persist_plan(item_id, plan, repo_full, stack, sdlc, model, cfg)
+
+
+_IMPORT_EPICS_KEY = "import:epics:{}"
+
+
+def _store_import_epics(item_id: str, epics: list[dict]) -> None:
+    """Persist the pass-1 epic list so a later resume reuses it verbatim (epic identity
+    is stable across runs — pass 1 is non-deterministic and would otherwise rename
+    epics, breaking skip matching and duplicating work)."""
+    if not epics:
+        return
+    try:
+        _redis_or_503().set(_IMPORT_EPICS_KEY.format(item_id), _json.dumps(epics))
+    except Exception as exc:
+        log.warning("import_epics_store_failed", id=item_id, error=str(exc)[:120])
+
+
+def _load_import_epics(item_id: str) -> list[dict]:
+    try:
+        raw = _redis_or_503().get(_IMPORT_EPICS_KEY.format(item_id))
+        return _json.loads(raw) if raw else []
+    except Exception:
+        return []
 
 
 async def _resume_import(item_id: str) -> None:
@@ -858,15 +882,18 @@ async def _resume_import(item_id: str) -> None:
     existing = [s for s in list_items(item_type="story") if s.get("parent_id") == item_id]
     covered = {s.get("epic", "") for s in existing if s.get("epic")}
     seq_offset = max((s.get("sequence") or 0 for s in existing), default=0)
+    # Reuse the epic list captured on the first run so epic identity matches `covered`
+    # exactly (older imports predating this have no stored list → pass 1 re-runs).
+    stored_epics = _load_import_epics(item_id)
     log.info("import_resume_start", id=item_id, existing=len(existing),
-             covered_epics=len(covered), seq_offset=seq_offset)
+             covered_epics=len(covered), seq_offset=seq_offset, reuse_epics=len(stored_epics))
 
     try:
         from planner_agent.main import run_import
         plan = await asyncio.to_thread(
             run_import, item_id, plan_text, model,
             repo_full_name=repo_full, stack=stack.id, redis_conn=_redis_conn,
-            skip_epics=covered)
+            skip_epics=covered, epics=stored_epics or None)
     except Exception as exc:
         log.error("import_resume_failed", id=item_id, error=str(exc))
         return
