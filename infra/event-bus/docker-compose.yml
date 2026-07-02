@@ -33,6 +33,10 @@ x-event-bus-env: &event-bus-env
   # Idea / Planner — free models; override MODEL_IDEA / MODEL_PLANNER for higher quality
   MODEL_IDEA: ${MODEL_IDEA:-openrouter/nvidia/nemotron-3-super-120b-a12b:free}
   MODEL_PLANNER: ${MODEL_PLANNER:-openrouter/nvidia/nemotron-3-super-120b-a12b:free}
+  # Claude Code subscription planning (optional): token from `claude setup-token`.
+  # Enables the "Claude Code subscription" planning-model options — PLANNING ONLY;
+  # the high-volume coder/reviewer fleet must stay on API/free models.
+  CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
   # Coding Agent — uses opencode with OpenRouter free model (no Anthropic key needed)
   MODEL_CODER: ${MODEL_CODER:-openrouter/nvidia/nemotron-3-super-120b-a12b:free}
   # Reviewer Agent — Sonnet for quality; set OPENROUTER_API_KEY to route through OpenRouter
@@ -84,6 +88,8 @@ services:
       # opencode binary + config (coding agent uses opencode, no Anthropic key needed)
       - /home/cknudsen/.opencode/bin/opencode:/usr/local/bin/opencode:ro
       - /home/cknudsen/.config/opencode:/root/.config/opencode:ro
+      # claude CLI (host install) — subscription-backed planning via `claude -p`
+      - /home/cknudsen/.local/bin/claude:/usr/local/bin/claude:ro
       # Docker socket — needed when SANDBOX_MODE=docker to spawn ephemeral containers
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:

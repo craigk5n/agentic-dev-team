@@ -200,6 +200,33 @@ class TestNormalizePlan:
         assert plan["stories"][0]["description"].startswith("repo: devadmin/sandbox")
 
 
+class TestClaudeCodeRouting:
+    def test_claude_code_model_bypasses_litellm(self):
+        # A claude-code planner model must route through the subscription CLI adapter
+        # and never touch litellm (no API key, no per-token billing).
+        seq = ['{"project_name":"P","epics":[{"name":"E","description":"d"}]}',
+               '{"stories":[{"title":"s","description":"repo: o/r\\nx","priority":"low"}]}',
+               '{"missing":[]}']
+        with patch("planner_agent.claude_code.complete", side_effect=seq) as cli, \
+             patch("planner_agent.decomposer.litellm.completion") as llm:
+            plan = decompose_idea("T", "D", model="claude-code/opus", default_repo="o/r")
+        assert llm.call_count == 0
+        assert cli.call_count == 3
+        assert cli.call_args.kwargs["model"] == "claude-code/opus"
+        assert [s["title"] for s in plan["stories"]] == ["s"]
+
+    def test_cli_failure_retries_then_falls_back(self):
+        with patch("planner_agent.claude_code.complete",
+                   side_effect=RuntimeError("not logged in")) as cli, \
+             patch("planner_agent.decomposer.litellm.completion") as llm, \
+             patch("planner_agent.decomposer.time.sleep"):
+            plan = decompose_idea("My Feature", "D", model="claude-code",
+                                  default_repo="devadmin/sandbox")
+        assert llm.call_count == 0
+        assert cli.call_count == 3                       # epics pass retried to budget
+        assert len(plan["stories"]) == 1                 # graceful single-story fallback
+
+
 class TestCallHardening:
     def test_complete_json_sets_timeout_and_disables_internal_retry(self):
         from planner_agent.decomposer import _complete_json

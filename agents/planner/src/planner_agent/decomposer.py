@@ -110,7 +110,15 @@ def _style_block(sdlc_directive: str, best_practices: str) -> str:
 def _complete_json(messages, *, model, api_key, stack, redis_conn, max_tokens=None,
                    timeout=None, attempts=None):
     """One LLM call returning parsed JSON, with a bounded timeout + retry. Raises the
-    last error after the attempt budget so callers can fall back."""
+    last error after the attempt budget so callers can fall back.
+
+    ``claude-code*`` models route through the local claude CLI (operator's Claude Code
+    subscription — no per-token billing, no telemetry cost to record); everything else
+    goes through litellm as before.
+    """
+    from planner_agent import claude_code
+
+    use_subscription = claude_code.is_claude_code_model(model)
     kwargs: dict = {"model": model, "messages": messages, "temperature": 0.2,
                     "timeout": timeout or _CALL_TIMEOUT, "num_retries": 0}
     if api_key:
@@ -121,14 +129,18 @@ def _complete_json(messages, *, model, api_key, stack, redis_conn, max_tokens=No
     max_attempts = attempts or _MAX_ATTEMPTS
     for attempt in range(1, max_attempts + 1):
         try:
-            resp = litellm.completion(**kwargs)
-            if redis_conn is not None:
-                try:
-                    from reviewer.telemetry import record_usage
-                    record_usage(redis_conn, "planner", model, resp, stack=stack)
-                except Exception:
-                    pass
-            raw = resp.choices[0].message.content or ""
+            if use_subscription:
+                raw = claude_code.complete(messages, model=model,
+                                           timeout=timeout or _CALL_TIMEOUT)
+            else:
+                resp = litellm.completion(**kwargs)
+                if redis_conn is not None:
+                    try:
+                        from reviewer.telemetry import record_usage
+                        record_usage(redis_conn, "planner", model, resp, stack=stack)
+                    except Exception:
+                        pass
+                raw = resp.choices[0].message.content or ""
             clean = re.sub(r"^```(?:json)?\s*", "", raw.strip(), flags=re.MULTILINE)
             clean = re.sub(r"\s*```$", "", clean.strip(), flags=re.MULTILINE)
             return json.loads(clean)   # empty/malformed → JSONDecodeError → retry

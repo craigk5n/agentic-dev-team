@@ -1290,6 +1290,8 @@ const PLANNER_MODELS = [
   { value: '', label: 'Default (config model)' },
   { value: 'openrouter/anthropic/claude-sonnet-4-6', label: 'Claude Sonnet — paid, recommended' },
   { value: 'openrouter/anthropic/claude-opus-4-8', label: 'Claude Opus — paid, best reasoning' },
+  { value: 'claude-code/sonnet', label: 'Claude Code subscription — Sonnet (no per-token cost)' },
+  { value: 'claude-code/opus', label: 'Claude Code subscription — Opus (no per-token cost)' },
 ];
 function plannerModelPicker(itemId) {
   const opts = PLANNER_MODELS.map(m => `<option value="${escHtml(m.value)}">${escHtml(m.label)}</option>`).join('');

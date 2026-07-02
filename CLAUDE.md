@@ -21,7 +21,7 @@ An autonomous multi-agent coding team system. A human operator describes what to
 | Static security analysis | Semgrep + secret scanning |
 | Isolation | One container or microVM per agent run |
 
-**Important:** Claude SDK agents must use a direct `ANTHROPIC_API_KEY` (pay-as-you-go). Headless subscription usage is metered against a small capped credit and will hard-stop mid-month.
+**Important:** high-volume agents (coder/reviewer/tester/security) must use a direct `ANTHROPIC_API_KEY` or OpenRouter (pay-as-you-go) — heavy headless subscription usage hits the weekly caps and hard-stops mid-cycle. **Exception — planning:** the planner role may optionally run on the operator's Claude Code subscription via the local `claude -p` CLI (`planner_agent/claude_code.py`; model `claude-code/sonnet|opus`, token from `claude setup-token` in `CLAUDE_CODE_OAUTH_TOKEN`). Planning is a handful of calls per project, which fits subscription limits; never point the coder fleet at it.
 
 ## Agent Roles
 
