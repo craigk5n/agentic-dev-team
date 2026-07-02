@@ -48,7 +48,29 @@ ci_workflow: |
             else
               echo "No source files to type-check yet."
             fi
-            python3 -m pytest -q
+            # Fresh-environment test gate — the honest "clean install" check.
+            # Run the suite in an isolated venv holding ONLY the project's DECLARED
+            # dependencies (plus the test runner), sealed off from packages that happen
+            # to be baked into the CI image. A module the code imports but pyproject
+            # forgets to declare (e.g. an SDK) then fails HERE instead of passing on the
+            # runner and breaking later on a real `pip install`. Falls back to the
+            # in-image runner only if the venv can't be built (e.g. no network).
+            if python3 -m venv /tmp/freshenv 2>/dev/null; then
+              FRESH=/tmp/freshenv/bin
+              "$FRESH/python" -m pip install -q --upgrade pip
+              "$FRESH/python" -m pip install -q pytest pytest-asyncio
+              if ! "$FRESH/python" -m pip install -q . ; then
+                echo "::error:: clean 'pip install .' failed — fix pyproject build backend / dependencies"
+                exit 1
+              fi
+              "$FRESH/python" -m pip install -q '.[dev]' 2>/dev/null || true
+              [ -f requirements.txt ] && "$FRESH/python" -m pip install -q -r requirements.txt || true
+              echo "Running tests against declared dependencies only (isolated venv)…"
+              "$FRESH/python" -m pytest -q
+            else
+              echo "venv unavailable — falling back to the in-image runner (deps not isolated)"
+              python3 -m pytest -q
+            fi
             # Vulnerability scan — scoped to the project's OWN declared dependencies
             # (auditing the whole environment would flag the runner's base packages).
             if [ -s requirements.txt ]; then
