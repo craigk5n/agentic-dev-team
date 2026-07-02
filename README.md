@@ -102,6 +102,37 @@ spend as a hard bill backstop.
 
 A PR auto-merges only when all three verdicts and CI are green (plus any enabled human gate); the coder runs in a per-stack image, in an ephemeral sandbox with scoped credentials that cannot push to `main`.
 
+## Choosing models per role
+
+Every role can point at a different model (Config tab → Models, or `PATCH /api/config`). You are **not** meant to pick one model for everything — the roles have opposite economics, and the whole design leans into that.
+
+### The principle: spend where leverage is highest, economize where volume is highest
+
+- **Planning is a few high-leverage calls.** The idea and planner roles run a handful of times per project, and their output *shapes everything downstream*. One vague or wrong plan turns into dozens of wrong stories — mistakes here are the most expensive kind, because they cost you a whole execution run before you notice. This is where a stronger, more expensive model earns its keep, and where the extra cost is trivial (a few calls).
+- **Execution is high-volume, self-correcting work.** The coder/reviewer/tester/security roles run *per story* — potentially hundreds of times. But each story is a small, well-specified slice that is **independently reviewed, tested, security-scanned, and CI-gated before it merges**, and built on top of already-merged, working code. That verification net means a cheaper coding model that occasionally slips is *caught*, not shipped — so paying frontier prices per story buys little and costs a lot.
+
+Put simply: **get the plan right with a strong model, then let a cheap fleet execute it under a verification gauntlet.** That's the edge over a one-shot frontier prompt — not out-planning the frontier model, but executing its plan better, one verified unit at a time.
+
+### Model tiers and where they fit
+
+| Tier | Good for | Poor fit for |
+|---|---|---|
+| **Frontier reasoning** (Opus 4.8, GPT-class) | Idea + planner — decomposition, design decisions, normalizing a big imported PRD | Per-story coding (overkill, expensive, slow) |
+| **Strong coding** (Sonnet 4.6) | Planning on a budget; reviewer where quality matters | High-frequency tester/security triage |
+| **Cheap / free** (OpenRouter `:free`, local Ollama) | Coder fleet, tester, security triage, and *good-enough* planning for small projects | The plan for an ambitious, multi-epic project |
+
+### Three ways to power planning (idea + planner)
+
+1. **Free models** (default) — `openrouter/…:free`. Fine for small, well-scoped projects; the flaky-provider timeout/retry hardening keeps them usable. Struggles on large, ambitious plans.
+2. **Paid, metered** — `openrouter/anthropic/claude-sonnet-4-6` (≈$0.20–0.80 per plan) or Opus. Clean per-role cost telemetry; pay-as-you-go.
+3. **Claude Code subscription** — `claude-code/sonnet` or `claude-code/opus`. Routes planning through your Claude Pro/Max subscription via the local `claude` CLI (token from `claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN`). **Zero marginal cost** — the highest-leverage step runs on a plan you're already paying for. Set it once as the default, or pick it per project on the approval card / import form.
+
+> **Planning only.** `claude-code/*` is accepted **only** on the idea and planner roles — `PATCH /api/config` rejects it elsewhere. Pointing the high-volume coder/reviewer fleet at a subscription would exhaust its weekly caps and hard-stop the pipeline (and your own interactive Claude Code sessions). Keep execution on API/free models. Two things to know about subscription planning: cost telemetry records **$0** for those calls (there's no per-token charge to report), and a very large import on Opus can hit the subscription's usage window (HTTP 429) partway — the importer aborts cleanly and the plan is **resumable** (the *Resume import* button fills only the missing epics when the window resets), so no work is redone.
+
+### A worked example
+
+A ~110-story reimplementation PRD was imported end-to-end with **planner = `claude-code/opus`** (subscription, $0) — producing all 17 epics and 108 ordered stories — then handed to a **free-model coder fleet** for execution. Frontier-quality planning, free-tier execution: the split this section is about.
+
 ## Human approval gates
 
 | Gate | Default | Description |
@@ -157,14 +188,17 @@ Forgejo has its own admin login (`FORGEJO_ADMIN_PASSWORD`); the reviewer/coder a
 ## Environment variables
 
 ```
-ANTHROPIC_API_KEY           # for idea, planner, reviewer agents
-OPENROUTER_API_KEY          # alternative/supplement to Anthropic
+ANTHROPIC_API_KEY           # direct Anthropic (pay-as-you-go)
+OPENROUTER_API_KEY          # free + paid models via OpenRouter (alternative/supplement)
+CLAUDE_CODE_OAUTH_TOKEN     # optional: subscription-backed planning (`claude setup-token`)
 FORGEJO_API_TOKEN
 FORGEJO_WEBHOOK_SECRET
 BOARD_AUTH_USER=admin       # board login (HTTP Basic Auth)
 BOARD_AUTH_PASSWORD         # board password — KEEP THIS SET (blank = board open)
 SANDBOX_MODE=docker         # run coding agents in isolated containers (recommended)
 ```
+
+Per-role model selection is runtime config, not env vars — see [Choosing models per role](#choosing-models-per-role).
 
 See `infra/.env.example` for the full list.
 
