@@ -108,13 +108,9 @@ def _load(r: "redis.Redis") -> RuntimeConfig:
         g = raw.get("gates", {})
         m = raw.get("models", {})
         lim = raw.get("limits", {})
-        gates = GateConfig(
-            idea_approval=g.get("idea_approval", True),
-            pr_merge_approval=g.get("pr_merge_approval", False),
-            security_signoff=g.get("security_signoff", True),
-            free_models_only=g.get("free_models_only", False),
-            plan_approval=g.get("plan_approval", True),
-        )
+        # Only override gate fields present in the stored config; unset ones keep the
+        # dataclass default (so a newly-added gate can't be lost like auto_escalate was).
+        gates = GateConfig(**{k: bool(g[k]) for k in GateConfig.__dataclass_fields__ if k in g})
         models = ModelConfig(
             **{k: m.get(k, "") for k in ModelConfig.__dataclass_fields__}
         )
