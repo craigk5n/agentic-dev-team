@@ -607,6 +607,9 @@ button.approve-btn:hover { background: rgba(34,197,94,.25); }
 .apr-model { margin-bottom: 8px; }
 .apr-model select { font-size: 12px; padding: 3px 6px; background: var(--bg, #1a1a1a);
   color: inherit; border: 1px solid rgba(255,255,255,.15); border-radius: 4px; }
+.planner-free-warn { margin-top: 6px; font-size: 11px; line-height: 1.4; color: #eab308;
+  background: rgba(234,179,8,.1); border: 1px solid rgba(234,179,8,.35);
+  border-radius: 5px; padding: 6px 9px; }
 .stack-cost { margin-top: 16px; max-width: 420px; }
 .stack-cost-title { color: var(--muted); font-size: 12px; margin-bottom: 6px; text-transform: uppercase; letter-spacing: .04em; }
 button.reject-btn {
@@ -972,7 +975,7 @@ button.code-btn:hover { background: rgba(59,130,246,.25); }
         <div class="field"><label>Tech stack</label><select id="import-stack"></select></div>
         <div class="field"><label>SDLC style</label><select id="import-sdlc"></select></div>
       </div>
-      <div class="field"><label>Planning model</label><select id="import-model"></select></div>
+      <div class="field"><label>Planning model</label><select id="import-model" onchange="togglePlannerFreeWarn(this)"></select><div class="planner-free-warn" style="display:none"></div></div>
       <button type="submit" id="import-btn">Import plan →</button>
     </form>
     <div id="import-result" class="result"></div>
@@ -1324,11 +1327,20 @@ const PLANNER_MODELS = [
   { value: 'openrouter/anthropic/claude-opus-4-8', label: 'Claude Opus — paid, best reasoning' },
   { value: 'claude-code/sonnet', label: 'Claude Code subscription — Sonnet (no per-token cost)' },
   { value: 'claude-code/opus', label: 'Claude Code subscription — Opus (no per-token cost)' },
+  { value: 'openrouter/nvidia/nemotron-3-super-120b-a12b:free', label: 'Free — testing only (weaker plans)' },
 ];
+const PLANNER_FREE_WARN = '⚠ Free models make weaker plans and can flake on large projects. Great for a quick try (e.g. FizzBuzz); use a paid or subscription model for real work.';
+function isFreePlannerModel(v) { return (v || '').includes(':free'); }
+// Show/hide the inline free-model warning next to a planning-model <select>.
+function togglePlannerFreeWarn(sel) {
+  const w = sel.parentElement.querySelector('.planner-free-warn');
+  if (w) w.style.display = isFreePlannerModel(sel.value) ? 'block' : 'none';
+}
 function plannerModelPicker(itemId) {
   const opts = PLANNER_MODELS.map(m => `<option value="${escHtml(m.value)}">${escHtml(m.label)}</option>`).join('');
   return `<div class="apr-model" data-id="${itemId}"><div class="guide-label">Planning model</div>
-    <select class="apr-planner-model">${opts}</select></div>`;
+    <select class="apr-planner-model" onchange="togglePlannerFreeWarn(this)">${opts}</select>
+    <div class="planner-free-warn" style="display:none">${escHtml(PLANNER_FREE_WARN)}</div></div>`;
 }
 
 // ── Tab routing ───────────────────────────────────────────────────────────────
@@ -2273,6 +2285,9 @@ async function populateImportForm() {
         ? 'Claude Sonnet — recommended for import' : m.label;
       return `<option value="${escHtml(m.value)}">${escHtml(label)}</option>`;
     }).join('');
+    const warn = md.parentElement.querySelector('.planner-free-warn');
+    if (warn) warn.textContent = PLANNER_FREE_WARN;
+    togglePlannerFreeWarn(md);  // reflect the initial selection
   }
 }
 
