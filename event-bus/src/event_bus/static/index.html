@@ -562,6 +562,12 @@ button.approve-btn:hover { background: rgba(34,197,94,.25); }
 /* Focus/legend bar: click an idea to spotlight its cards and dim the rest
    (focus + context). Chips double as a legend mapping each color to its idea. */
 .board-legend { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 14px; }
+.quota-banner { border-radius: 8px; padding: 9px 13px; margin: 0 0 12px; font-size: 13px;
+  border: 1px solid; display: flex; align-items: center; gap: 8px; }
+.quota-banner.warn { background: rgba(234,179,8,.12); border-color: rgba(234,179,8,.5); color: #eab308; }
+.quota-banner.exceeded { background: rgba(239,68,68,.12); border-color: rgba(239,68,68,.55); color: #f87171; }
+.quota-banner .qbar { flex: 1; height: 6px; border-radius: 3px; background: rgba(148,163,184,.2); overflow: hidden; }
+.quota-banner .qbar > i { display: block; height: 100%; background: currentColor; }
 .board-legend:empty { margin: 0; }
 .legend-chip {
   display: inline-flex; align-items: center; gap: 6px;
@@ -1157,6 +1163,7 @@ button.code-btn:hover { background: rgba(59,130,246,.25); }
 <!-- ── Board ───────────────────────────────────────────────── -->
 <section id="board" class="tab-panel active">
   <h2>Board</h2>
+  <div id="free-quota-banner" class="quota-banner" style="display:none"></div>
   <div class="board-toolbar">
     <button class="secondary" id="refresh-board-btn">↻ Refresh</button>
     <span class="ts" id="board-ts"></span>
@@ -1926,10 +1933,27 @@ function applyBoardFocus() {
   });
 }
 
+async function refreshFreeQuotaBanner() {
+  const el = document.getElementById('free-quota-banner');
+  if (!el) return;
+  let q;
+  try { q = (await api('/api/telemetry')).free_quota; } catch { return; }
+  if (!q || !q.limit || (!q.warn && !q.exceeded)) { el.style.display = 'none'; return; }
+  const cls = q.exceeded ? 'exceeded' : 'warn';
+  const msg = q.exceeded
+    ? `OpenRouter free-tier limit reached — ${q.used}/${q.limit} requests today. Reviewer/tester/security calls will 429 until it resets (UTC midnight).`
+    : `Approaching OpenRouter free-tier limit — ${q.used}/${q.limit} requests today (${q.pct}%). ${q.remaining} left before reviewer/tester/security calls start failing.`;
+  el.className = 'quota-banner ' + cls;
+  el.innerHTML = `<span>${q.exceeded ? '⛔' : '⚠️'}</span><span>${escHtml(msg)}</span>
+    <span class="qbar"><i style="width:${Math.min(q.pct,100)}%"></i></span>`;
+  el.style.display = 'flex';
+}
+
 async function loadBoard() {
   const container = document.getElementById('board-items');
   container.innerHTML = '<div class="board-empty">Loading…</div>';
 
+  refreshFreeQuotaBanner();
   const r = await fetch('/api/items', { cache: 'no-store' });
   if (!r.ok) {
     const err = await r.json().catch(() => ({}));

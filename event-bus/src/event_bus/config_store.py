@@ -76,6 +76,13 @@ class LimitsConfig:
     # protects the bill even from authorized overuse or a runaway loop).
     max_cost_usd_daily: float = 0.0
 
+    # Daily OpenRouter free-tier (:free) request cap. OpenRouter allows 50/day
+    # (< $10 lifetime credit) or 1000/day (>= $10). The board warns at 80% and,
+    # if hold_at_free_cap is on, parks new work at 100% so verdicts degrade
+    # cleanly instead of 429-ing. 0 = unlimited / disabled.
+    max_free_requests_daily: int = 1000
+    hold_at_free_cap: bool = False
+
 
 @dataclass
 class RuntimeConfig:

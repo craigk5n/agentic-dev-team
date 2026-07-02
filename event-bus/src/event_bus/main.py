@@ -36,6 +36,7 @@ from event_bus.config import settings
 from event_bus.auth import check_basic_auth, is_exempt as auth_is_exempt
 from event_bus.catalog import get_catalog, reload_catalog
 from event_bus.cost_guard import over_budget
+from event_bus.free_guard import free_quota_status, free_quota_exceeded
 from event_bus.ci_workflow import CI_WORKFLOW_PATH
 from event_bus.config_store import get_config, patch_config
 from event_bus.prompt_store import get_prompt, set_prompt, delete_prompt, list_prompts
@@ -1094,6 +1095,13 @@ async def _run_coding_agent(item_id: str, title: str, description: str, story_pr
         log.warning("coder_skipped_cost_cap", id=item_id)
         update_state(item_id, "ready")
         return
+    # Free-tier backstop (opt-in): don't start new stories once the OpenRouter free
+    # daily cap is hit — a new PR would just fail its reviewer/tester/security verdicts
+    # on 429. Leave it in ready to resume when the quota resets (UTC midnight).
+    if cfg.limits.hold_at_free_cap and free_quota_exceeded(_redis_conn, cfg.limits.max_free_requests_daily):
+        log.warning("coder_held_free_cap", id=item_id)
+        update_state(item_id, "ready")
+        return
     # Enforce concurrency cap — leave story queued in ready if full
     if not _coder_slot_acquire():
         log.info("coder_cap_hit", id=item_id, cap=settings.max_coding_agents)
@@ -1934,9 +1942,14 @@ async def list_openrouter_models(refresh: bool = False):
 async def get_telemetry(days: int = 7):
     """
     Return LLM cost/token telemetry, current concurrency, and rate-limit rejection
-    counts aggregated over the last `days` days (default: 7).
+    counts aggregated over the last `days` days (default: 7), plus today's OpenRouter
+    free-tier request usage vs the configured daily cap.
     """
-    return get_telemetry_summary(_redis_or_503(), days=days)
+    r = _redis_or_503()
+    summary = get_telemetry_summary(r, days=days)
+    cfg = get_config(r)
+    summary["free_quota"] = free_quota_status(r, cfg.limits.max_free_requests_daily)
+    return summary
 
 
 @app.get("/metrics")
