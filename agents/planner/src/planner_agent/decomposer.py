@@ -131,6 +131,25 @@ def _style_block(sdlc_directive: str, best_practices: str) -> str:
     return ("\n" + "\n\n".join(parts) + "\n") if parts else ""
 
 
+_STRUCTURED_MEMO: dict[str, bool] = {}
+
+
+def _supports_structured(redis_conn, model: str) -> bool:
+    """Whether the model advertises structured-output support (from the model-meta cache).
+    Memoized per process; safe no-op when the cache/event_bus package isn't available."""
+    if model in _STRUCTURED_MEMO:
+        return _STRUCTURED_MEMO[model]
+    ok = False
+    try:
+        if redis_conn is not None:
+            from event_bus.models_catalog import supports_structured as _ss
+            ok = bool(_ss(redis_conn, model))
+    except Exception:
+        ok = False
+    _STRUCTURED_MEMO[model] = ok
+    return ok
+
+
 def _complete_json(messages, *, model, api_key, stack, redis_conn, max_tokens=None,
                    timeout=None, attempts=None):
     """One LLM call returning parsed JSON, with a bounded timeout + retry. Raises the
@@ -138,7 +157,8 @@ def _complete_json(messages, *, model, api_key, stack, redis_conn, max_tokens=No
 
     ``claude-code*`` models route through the local claude CLI (operator's Claude Code
     subscription — no per-token billing, no telemetry cost to record); everything else
-    goes through litellm as before.
+    goes through litellm as before. Models that support structured outputs are told to
+    return a JSON object so they can't answer with prose.
     """
     from planner_agent import claude_code
 
@@ -149,6 +169,8 @@ def _complete_json(messages, *, model, api_key, stack, redis_conn, max_tokens=No
         kwargs["api_key"] = api_key
     if max_tokens:
         kwargs["max_tokens"] = max_tokens
+    if not use_subscription and _supports_structured(redis_conn, model):
+        kwargs["response_format"] = {"type": "json_object"}
     last_exc: Exception | None = None
     max_attempts = attempts or _MAX_ATTEMPTS
     for attempt in range(1, max_attempts + 1):

@@ -203,3 +203,50 @@ class TestOllamaSuggestions:
         b = get_ollama_suggestions()
         a.append({"id": "x", "name": "x", "context_length": 0})
         assert len(a) != len(b)
+
+
+class TestModelMeta:
+    _SAMPLE = {"data": [
+        {"id": "anthropic/claude-sonnet-4-6", "name": "Sonnet", "context_length": 200000,
+         "pricing": {"prompt": "0.000003", "completion": "0.000015"},
+         "supported_parameters": ["tools", "structured_outputs", "response_format"],
+         "architecture": {"input_modalities": ["text", "image"]},
+         "expiration_date": "2027-01-01"},
+        {"id": "nvidia/nemotron:free", "name": "Nemotron", "context_length": 128000,
+         "pricing": {"prompt": "0", "completion": "0"}, "supported_parameters": ["temperature"]},
+    ]}
+
+    def _load(self):
+        import fakeredis
+        from unittest.mock import patch, MagicMock
+        from event_bus import models_catalog as mc
+        r = fakeredis.FakeRedis()
+        resp = MagicMock(); resp.json.return_value = self._SAMPLE; resp.raise_for_status = lambda: None
+        with patch("httpx.Client") as C:
+            C.return_value.__enter__.return_value.get.return_value = resp
+            mc.refresh_free_models(r, "")
+        return mc, r
+
+    def test_norm_id_strips_openrouter_prefix(self):
+        from event_bus.models_catalog import _norm_id
+        assert _norm_id("openrouter/anthropic/x") == "anthropic/x"
+        assert _norm_id("anthropic/x") == "anthropic/x"
+        assert _norm_id("claude-code/opus") == "claude-code/opus"
+
+    def test_meta_extracted_with_capabilities_and_pricing(self):
+        mc, r = self._load()
+        m = mc.get_model_meta(r, "openrouter/anthropic/claude-sonnet-4-6")
+        assert m["structured"] is True and m["tools"] is True
+        assert m["context_length"] == 200000 and m["free"] is False
+        assert m["price_prompt"] == 3e-06 and m["expiration_date"] == "2027-01-01"
+
+    def test_supports_structured(self):
+        mc, r = self._load()
+        assert mc.supports_structured(r, "openrouter/anthropic/claude-sonnet-4-6") is True
+        assert mc.supports_structured(r, "openrouter/nvidia/nemotron:free") is False
+        assert mc.supports_structured(r, "claude-code/opus") is False   # unknown → no-op
+
+    def test_free_still_extracted(self):
+        mc, r = self._load()
+        free_ids = [x["id"] for x in mc.get_free_models(r, "")["models"]]
+        assert "openrouter/nvidia/nemotron:free" in free_ids

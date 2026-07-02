@@ -83,7 +83,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
                             ("stack", "TEXT"), ("sdlc", "TEXT"), ("stack_rationale", "TEXT"),
                             ("style_guides", "TEXT"), ("archived_at", "TEXT"),
                             ("epic", "TEXT"), ("design_decisions", "TEXT"),
-                            ("planner_model", "TEXT")]:
+                            ("planner_model", "TEXT"), ("started_at", "TEXT")]:
         try:
             conn.execute(f"ALTER TABLE work_items ADD COLUMN {col} {definition}")
             conn.commit()
@@ -255,12 +255,22 @@ def list_items(state: str = "", item_type: str = "") -> list[dict]:
 
 
 def update_state(item_id: str, new_state: str) -> dict | None:
+    now = _now()
     with _lock:
         db = get_db()
-        db.execute(
-            "UPDATE work_items SET state=?, updated_at=? WHERE id=?",
-            (new_state, _now(), item_id),
-        )
+        # Stamp started_at the FIRST time a story begins coding (recodes don't reset it),
+        # so a completed story can show how long it actually took to build.
+        if new_state == "in-progress":
+            db.execute(
+                "UPDATE work_items SET state=?, updated_at=?, "
+                "started_at=COALESCE(started_at, ?) WHERE id=?",
+                (new_state, now, now, item_id),
+            )
+        else:
+            db.execute(
+                "UPDATE work_items SET state=?, updated_at=? WHERE id=?",
+                (new_state, now, item_id),
+            )
         db.commit()
     return get_item(item_id)
 

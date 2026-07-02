@@ -116,6 +116,16 @@ def expand_prompt(prompt: str, *, model: str, api_key: str = "", redis_conn=None
     # event-bus image — same cross-package pattern as reviewer.telemetry).
     use_subscription = model.strip().startswith("claude-code")
 
+    # Structured-output routing: tell capable models to return a JSON object so they
+    # can't reply with prose (guarded — no-op if the model-meta cache is unavailable).
+    if not use_subscription and redis_conn is not None:
+        try:
+            from event_bus.models_catalog import supports_structured
+            if supports_structured(redis_conn, model):
+                kwargs["response_format"] = {"type": "json_object"}
+        except Exception:
+            pass
+
     # Bounded retry — free models sometimes hang or return empty/error content.
     raw = ""
     for attempt in range(1, _MAX_ATTEMPTS + 1):

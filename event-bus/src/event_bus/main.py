@@ -159,6 +159,21 @@ def _story_age_secs(item: dict) -> float:
         return 0.0
 
 
+def _duration_secs(start: str | None, end: str | None) -> float | None:
+    """Seconds between two ISO timestamps, or None if either is missing/unparseable —
+    used to show how long a completed story took to build (started_at → done)."""
+    from datetime import datetime, timezone
+    if not start or not end:
+        return None
+    try:
+        def _p(s):
+            dt = datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        return max(0.0, (_p(end) - _p(start)).total_seconds())
+    except Exception:
+        return None
+
+
 def is_story_stuck(item: dict) -> bool:
     """True when a story has sat in an active state past its budget — the same signal
     the watchdog acts on and the UI badges as 'stuck'."""
@@ -308,6 +323,11 @@ async def lifespan(app: FastAPI):
     _reap_orphan_coder_sandboxes()   # kill zombie coder containers from before restart
     _reconcile_orphaned_stories()    # resume stories stranded in-progress by the restart
     watchdog = asyncio.create_task(_watchdog_loop())  # continuous stuck-job recovery
+    try:  # warm the model-meta cache so agents can route structured outputs immediately
+        from event_bus.models_catalog import refresh_free_models
+        await asyncio.to_thread(refresh_free_models, _redis_conn, settings.openrouter_api_key)
+    except Exception as exc:
+        log.warning("model_meta_warm_failed", error=str(exc)[:120])
     log.info("event_bus_started", redis=settings.redis_url)
     yield
     watchdog.cancel()
@@ -650,6 +670,10 @@ async def list_work_items(response: Response):
                 item["age_secs"] = int(_story_age_secs(item))
                 item["stale"] = is_story_stuck(item)        # past its budget (amber)
                 item["stuck"] = bool(_redis_conn and _redis_conn.get(f"stuck:{item['id']}"))
+            elif item.get("type") == "story" and item.get("state") == "done":
+                dur = _duration_secs(item.get("started_at"), item.get("updated_at"))
+                if dur is not None:
+                    item["duration_secs"] = int(dur)
     return {
         "groups": [
             {
@@ -2054,6 +2078,23 @@ async def list_openrouter_models(refresh: bool = False):
         raise HTTPException(status_code=502, detail=f"Failed to fetch models from OpenRouter: {exc}")
     data["ollama"] = get_ollama_suggestions()
     return data
+
+
+@app.get("/api/models/meta")
+async def model_meta(refresh: bool = False):
+    """Per-model metadata (context length, price/token, structured-output + tool support,
+    modalities, deprecation) for the whole OpenRouter catalog — powers the model picker's
+    cost/context/capability hints and the import context-fit check. Cached 2h."""
+    from event_bus.models_catalog import refresh_free_models, _META_KEY
+    r = _redis_or_503()
+    raw = r.get(_META_KEY)
+    if raw is None or refresh:
+        try:
+            await asyncio.to_thread(refresh_free_models, r, settings.openrouter_api_key)
+            raw = r.get(_META_KEY)
+        except Exception as exc:
+            log.warning("model_meta_fetch_failed", error=str(exc)[:120])
+    return {"meta": _json.loads(raw) if raw else {}}
 
 
 # ── Telemetry (Phase 7) ────────────────────────────────────────────────────────

@@ -574,6 +574,7 @@ button.approve-btn:hover { background: rgba(34,197,94,.25); }
 .run-badge.run-live  { color: #34d399; background: rgba(52,211,153,.12); border-color: rgba(52,211,153,.3); }
 .run-badge.run-stale { color: #eab308; background: rgba(234,179,8,.12); border-color: rgba(234,179,8,.4); }
 .run-badge.run-stuck { color: #f87171; background: rgba(248,113,113,.14); border-color: rgba(248,113,113,.5); }
+.run-badge.run-done  { color: #94a3b8; background: rgba(148,163,184,.1); border-color: rgba(148,163,184,.25); }
 .run-pulse { width: 7px; height: 7px; border-radius: 50%; background: currentColor;
   box-shadow: 0 0 0 0 currentColor; animation: runpulse 1.6s ease-out infinite; }
 @keyframes runpulse {
@@ -630,6 +631,11 @@ button.approve-btn:hover { background: rgba(34,197,94,.25); }
 .planner-free-warn { margin-top: 6px; font-size: 11px; line-height: 1.4; color: #eab308;
   background: rgba(234,179,8,.1); border: 1px solid rgba(234,179,8,.35);
   border-radius: 5px; padding: 6px 9px; }
+.model-hint { margin-top: 4px; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.model-hint:empty { display: none; }
+.mh-json { font-weight: 600; padding: 0 4px; border-radius: 3px; }
+.mh-json.ok { color: #34d399; background: rgba(52,211,153,.12); }
+.mh-json.no { color: #eab308; background: rgba(234,179,8,.12); }
 .stack-cost { margin-top: 16px; max-width: 420px; }
 .stack-cost-title { color: var(--muted); font-size: 12px; margin-bottom: 6px; text-transform: uppercase; letter-spacing: .04em; }
 button.reject-btn {
@@ -995,7 +1001,7 @@ button.code-btn:hover { background: rgba(59,130,246,.25); }
         <div class="field"><label>Tech stack</label><select id="import-stack"></select></div>
         <div class="field"><label>SDLC style</label><select id="import-sdlc"></select></div>
       </div>
-      <div class="field"><label>Planning model</label><select id="import-model" onchange="togglePlannerFreeWarn(this)"></select><div class="planner-free-warn" style="display:none"></div></div>
+      <div class="field"><label>Planning model</label><select id="import-model" onchange="togglePlannerFreeWarn(this); checkImportContextFit()"></select><div class="model-hint"></div><div class="planner-free-warn" style="display:none"></div><div id="import-ctx-warn" class="planner-free-warn" style="display:none"></div></div>
       <button type="submit" id="import-btn">Import plan →</button>
     </form>
     <div id="import-result" class="result"></div>
@@ -1351,15 +1357,44 @@ const PLANNER_MODELS = [
 ];
 const PLANNER_FREE_WARN = '⚠ Free models make weaker plans and can flake on large projects. Great for a quick try (e.g. FizzBuzz); use a paid or subscription model for real work.';
 function isFreePlannerModel(v) { return (v || '').includes(':free'); }
-// Show/hide the inline free-model warning next to a planning-model <select>.
+// Live per-model metadata (context / price / capabilities) from OpenRouter, loaded once.
+let MODEL_META = {};
+async function loadModelMeta() {
+  if (Object.keys(MODEL_META).length) return;
+  try { MODEL_META = (await api('/api/models/meta')).meta || {}; } catch { MODEL_META = {}; }
+}
+function modelMetaFor(value) {
+  if (!value) return null;
+  const id = value.startsWith('openrouter/') ? value.slice('openrouter/'.length) : value;
+  return MODEL_META[id] || null;
+}
+function fmtPricePerMtok(perToken) {
+  const v = (perToken || 0) * 1e6;
+  return v === 0 ? 'free' : ('$' + (v >= 1 ? v.toFixed(0) : v.toFixed(2)));
+}
+function fmtCtx(n) { return n >= 1000 ? Math.round(n / 1000) + 'K' : (n || '?'); }
+// One-line hint for a selected planning model: context · $/Mtok · JSON reliability (#1/#2).
+function modelHintHTML(value) {
+  const m = modelMetaFor(value);
+  if (!m) return value && value.startsWith('claude-code') ? 'Subscription · Opus/Sonnet-class' : '';
+  const json = m.structured
+    ? '<span class="mh-json ok" title="Supports structured outputs — returns valid JSON reliably">JSON✓</span>'
+    : '<span class="mh-json no" title="No structured-output support — may occasionally return prose">JSON~</span>';
+  return `${fmtCtx(m.context_length)} ctx · ${fmtPricePerMtok(m.price_prompt)}/${fmtPricePerMtok(m.price_completion)} per Mtok · ${json}`;
+}
+
+// Show/hide the inline free-model warning + refresh the model hint next to a picker.
 function togglePlannerFreeWarn(sel) {
   const w = sel.parentElement.querySelector('.planner-free-warn');
   if (w) w.style.display = isFreePlannerModel(sel.value) ? 'block' : 'none';
+  const h = sel.parentElement.querySelector('.model-hint');
+  if (h) h.innerHTML = modelHintHTML(sel.value);
 }
 function plannerModelPicker(itemId) {
   const opts = PLANNER_MODELS.map(m => `<option value="${escHtml(m.value)}">${escHtml(m.label)}</option>`).join('');
   return `<div class="apr-model" data-id="${itemId}"><div class="guide-label">Planning model</div>
     <select class="apr-planner-model" onchange="togglePlannerFreeWarn(this)">${opts}</select>
+    <div class="model-hint">${modelHintHTML('')}</div>
     <div class="planner-free-warn" style="display:none">${escHtml(PLANNER_FREE_WARN)}</div></div>`;
 }
 
@@ -1972,10 +2007,16 @@ function fmtDuration(secs) {
   return Math.floor(m / 60) + 'h ' + (m % 60) + 'm';
 }
 
-// Live "running / slow / stuck" pill for an active story (from API age_secs/stale/stuck).
+// Live "running / slow / stuck" pill for an active story, and a "built in Xm" pill for
+// a completed one (from API age_secs/stale/stuck/duration_secs).
 function runtimeBadge(item) {
+  if (item.type !== 'story') return '';
+  if (item.state === 'done' && item.duration_secs != null) {
+    const d = fmtDuration(item.duration_secs);
+    return `<span class="run-badge run-done" title="Built in ${d} (start → merged)">✓ ${d}</span>`;
+  }
   const active = ['in-progress', 'in-review', 'changes-requested'];
-  if (item.type !== 'story' || !active.includes(item.state)) return '';
+  if (!active.includes(item.state)) return '';
   const t = fmtDuration(item.age_secs);
   if (item.stuck)
     return `<span class="run-badge run-stuck" title="Auto-recovery gave up — needs a look">⚠ stuck · ${t}</span>`;
@@ -2057,6 +2098,7 @@ async function loadBoard() {
   }
   const d = await r.json();
   await loadCatalogOptions();
+  loadModelMeta();  // async warm — hints fill in on next render if not yet loaded
   document.getElementById('board-ts').textContent = 'Updated ' + new Date().toLocaleTimeString();
 
   // Assign each idea a stable, distinct accent color (Okabe-Ito colorblind-safe
@@ -2327,6 +2369,7 @@ async function loadBoard() {
 
 async function populateImportForm() {
   await loadCatalogOptions();
+  await loadModelMeta();
   const st = document.getElementById('import-stack');
   const sd = document.getElementById('import-sdlc');
   const md = document.getElementById('import-model');
@@ -2341,7 +2384,28 @@ async function populateImportForm() {
     }).join('');
     const warn = md.parentElement.querySelector('.planner-free-warn');
     if (warn) warn.textContent = PLANNER_FREE_WARN;
-    togglePlannerFreeWarn(md);  // reflect the initial selection
+    const plan = document.getElementById('import-plan');
+    if (plan && !plan._ctxWired) { plan.addEventListener('input', checkImportContextFit); plan._ctxWired = true; }
+    togglePlannerFreeWarn(md);   // reflect the initial selection (hint + free warn)
+    checkImportContextFit();
+  }
+}
+
+// #3 — warn when the pasted plan won't fit the selected model's context window.
+function checkImportContextFit() {
+  const el = document.getElementById('import-ctx-warn');
+  const md = document.getElementById('import-model');
+  const plan = document.getElementById('import-plan');
+  if (!el || !md || !plan) return;
+  const meta = modelMetaFor(md.value);
+  const chars = plan.value.length;
+  el.style.display = 'none';
+  if (!meta || !meta.context_length || chars < 200) return;   // unknown model or tiny plan
+  const estTokens = Math.ceil(chars / 4);             // rough chars→tokens
+  const ctx = meta.context_length;
+  if (estTokens > ctx * 0.7) {                        // leave headroom for the response
+    el.textContent = `⚠ This plan is ~${Math.round(estTokens/1000)}K tokens — close to or over ${meta.name || 'this model'}'s ${fmtCtx(ctx)} context. Pass 1 may truncate; use a larger-context model (e.g. Claude Sonnet/Opus, 200K) for a plan this size.`;
+    el.style.display = 'block';
   }
 }
 
