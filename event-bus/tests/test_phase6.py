@@ -110,6 +110,17 @@ class TestPatchConfig:
                             headers={"Content-Type": "application/json"})
         assert resp.status_code == 400
 
+    def test_claude_code_models_are_planning_only(self, client, monkeypatch):
+        monkeypatch.setattr("event_bus.main._redis_conn", fakeredis.FakeRedis())
+        # allowed on the planning roles…
+        ok = client.patch("/api/config", json={"models": {
+            "idea": "claude-code/sonnet", "planner": "claude-code/opus"}})
+        assert ok.status_code == 200
+        # …rejected on the high-volume roles (would break litellm + burn the subscription)
+        bad = client.patch("/api/config", json={"models": {"reviewer": "claude-code/sonnet"}})
+        assert bad.status_code == 422
+        assert "planning-only" in bad.json()["detail"]
+
     def test_patch_all_roles(self, client, monkeypatch):
         monkeypatch.setattr("event_bus.main._redis_conn", fakeredis.FakeRedis())
         overrides = {

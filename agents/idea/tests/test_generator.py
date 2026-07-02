@@ -109,3 +109,28 @@ class TestExpandRetry:
             result = expand_prompt("Add auth", model="m")
         assert mock.call_count == 3                 # initial + 2 retries
         assert result["title"] == "Add auth"        # graceful fallback
+
+
+class TestClaudeCodeRouting:
+    _GOOD = {"title": "JWT Auth", "description": "## Overview\n\nBuild auth."}
+
+    def test_claude_code_model_bypasses_litellm(self):
+        # Subscription models route via the shared CLI adapter — litellm never called.
+        with patch("planner_agent.claude_code.complete",
+                   return_value=json.dumps(self._GOOD)) as cli, \
+             patch("idea_agent.generator.litellm.completion") as llm:
+            result = expand_prompt("Add auth", model="claude-code/opus")
+        assert llm.call_count == 0
+        assert cli.call_count == 1
+        assert cli.call_args.kwargs["model"] == "claude-code/opus"
+        assert result["title"] == "JWT Auth"
+
+    def test_adapter_failure_falls_back_gracefully(self):
+        with patch("planner_agent.claude_code.complete",
+                   side_effect=RuntimeError("no token")) as cli, \
+             patch("idea_agent.generator.litellm.completion") as llm, \
+             patch("idea_agent.generator.time.sleep"):
+            result = expand_prompt("Add auth", model="claude-code")
+        assert llm.call_count == 0
+        assert cli.call_count == 3                # full retry budget
+        assert result["title"] == "Add auth"     # prompt-as-title fallback

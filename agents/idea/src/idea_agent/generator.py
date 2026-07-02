@@ -97,12 +97,13 @@ def expand_prompt(prompt: str, *, model: str, api_key: str = "", redis_conn=None
         stack_guidance=(_stack_guidance(stack_options, sdlc_options)
                         + _style_guidance(style_guide_options) + _DECISIONS_GUIDANCE),
     )
+    messages = [
+        {"role": "system", "content": _SYSTEM},
+        {"role": "user", "content": user_msg},
+    ]
     kwargs: dict = {
         "model": model,
-        "messages": [
-            {"role": "system", "content": _SYSTEM},
-            {"role": "user", "content": user_msg},
-        ],
+        "messages": messages,
         "temperature": 0.3,
         "timeout": _CALL_TIMEOUT,   # fail fast instead of litellm's long backoff
         "num_retries": 0,
@@ -110,18 +111,27 @@ def expand_prompt(prompt: str, *, model: str, api_key: str = "", redis_conn=None
     if api_key:
         kwargs["api_key"] = api_key
 
+    # `claude-code*` models route through the operator's Claude Code subscription via
+    # the shared CLI adapter (lives in the planner package; both ship together in the
+    # event-bus image — same cross-package pattern as reviewer.telemetry).
+    use_subscription = model.strip().startswith("claude-code")
+
     # Bounded retry — free models sometimes hang or return empty/error content.
     raw = ""
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         try:
-            resp = litellm.completion(**kwargs)
-            if redis_conn is not None:
-                try:
-                    from reviewer.telemetry import record_usage
-                    record_usage(redis_conn, "idea", model, resp)
-                except Exception:
-                    pass
-            raw = resp.choices[0].message.content or ""
+            if use_subscription:
+                from planner_agent import claude_code
+                raw = claude_code.complete(messages, model=model, timeout=_CALL_TIMEOUT)
+            else:
+                resp = litellm.completion(**kwargs)
+                if redis_conn is not None:
+                    try:
+                        from reviewer.telemetry import record_usage
+                        record_usage(redis_conn, "idea", model, resp)
+                    except Exception:
+                        pass
+                raw = resp.choices[0].message.content or ""
             data = _try_parse(raw)
             if data is not None:
                 return data

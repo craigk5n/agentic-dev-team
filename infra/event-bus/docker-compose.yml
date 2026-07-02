@@ -34,8 +34,8 @@ x-event-bus-env: &event-bus-env
   MODEL_IDEA: ${MODEL_IDEA:-openrouter/nvidia/nemotron-3-super-120b-a12b:free}
   MODEL_PLANNER: ${MODEL_PLANNER:-openrouter/nvidia/nemotron-3-super-120b-a12b:free}
   # Claude Code subscription planning (optional): token from `claude setup-token`.
-  # Enables the "Claude Code subscription" planning-model options — PLANNING ONLY;
-  # the high-volume coder/reviewer fleet must stay on API/free models.
+  # Enables the "claude-code/*" subscription models for the IDEA + PLANNER roles
+  # only; the high-volume coder/reviewer fleet must stay on API/free models.
   CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
   # Coding Agent — uses opencode with OpenRouter free model (no Anthropic key needed)
   MODEL_CODER: ${MODEL_CODER:-openrouter/nvidia/nemotron-3-super-120b-a12b:free}

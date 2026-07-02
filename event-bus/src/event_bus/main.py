@@ -1678,6 +1678,15 @@ async def patch_runtime_config(request: Request):
         body = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="invalid JSON")
+    # claude-code (subscription) models are supported only by the idea/planner call
+    # paths; the high-volume roles would fail their litellm calls — and must not draw
+    # on the subscription anyway (weekly caps would hard-stop them).
+    for role, val in (body.get("models") or {}).items():
+        if str(val).strip().startswith("claude-code") and role not in ("idea", "planner"):
+            raise HTTPException(
+                status_code=422,
+                detail=f"claude-code models are planning-only (idea/planner), not '{role}'",
+            )
     return asdict(patch_config(_redis_or_503(), body))
 
 
