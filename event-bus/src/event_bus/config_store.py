@@ -15,8 +15,9 @@ if TYPE_CHECKING:
     import redis
 
 _KEY = "runtime_config"
-_GATE_FIELDS = {"pr_merge_approval", "security_signoff", "free_models_only", "plan_approval"}  # idea_approval is always ON
-_MODEL_ROLES = {"idea", "planner", "coder", "reviewer", "tester", "security"}
+_GATE_FIELDS = {"pr_merge_approval", "security_signoff", "free_models_only", "plan_approval",
+                "auto_escalate"}  # idea_approval is always ON
+_MODEL_ROLES = {"idea", "planner", "coder", "reviewer", "tester", "security", "escalate"}
 
 
 @dataclass
@@ -26,6 +27,9 @@ class GateConfig:
     security_signoff: bool = True
     free_models_only: bool = False  # advisory flag: restrict roles to free/local models
     plan_approval: bool = True    # ON — hold the plan for operator review before stories run
+    # When ON, a story that exhausts its recode cap escalates coder+reviewer to a stronger
+    # model (models.escalate) for one more round before being flagged for a human.
+    auto_escalate: bool = False
 
 
 @dataclass
@@ -46,6 +50,10 @@ class ModelConfig:
     reviewer: str = ""
     tester: str = ""
     security: str = ""
+    # Stronger model coder+reviewer escalate to when a story stalls (gates.auto_escalate).
+    # Empty → the built-in default (a paid Sonnet). Must be a real API/OpenRouter model,
+    # not claude-code/* (subscription is planning-only and can't run the coder fleet).
+    escalate: str = ""
 
 
 @dataclass

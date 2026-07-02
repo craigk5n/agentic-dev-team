@@ -107,10 +107,15 @@ def handle_pr_event(
     # sandboxed container, so a transient crash shouldn't permanently strand the PR with
     # a missing verdict (no verdict = never merges). Backoff gives the provider time.
     retry = Retry(max=2, interval=[20, 60])
+    # If this PR's story has been auto-escalated, review it with the stronger model too
+    # (matching the escalated coder) — otherwise a strong coder vs weak reviewer just
+    # re-deadlocks. Set by internal_recode_for_pr when the recode cap is exhausted.
+    esc = r.get(f"escalate_pr:{repo_full_name}:{pr_number}")
+    reviewer_model = (esc.decode() if esc else "") or config.models.reviewer
     jobs = []
     if reviewer_ok:
         jobs.append(q.enqueue(run_code_reviewer, **base_kwargs,
-                              model_override=config.models.reviewer,
+                              model_override=reviewer_model,
                               system_prompt=reviewer_system_prompt,
                               task_prompt=reviewer_task_prompt,
                               stack=stack_id, retry=retry))

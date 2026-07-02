@@ -1735,3 +1735,67 @@ class TestWatchdog:
              patch.object(m, "update_state") as upd:
             m._sweep_stuck_stories()
         upd.assert_not_called()
+
+
+class TestAutoEscalate:
+    _item = {"id": "s1", "state": "changes-requested", "type": "story", "title": "S",
+             "pr_url": "http://f/o/r/pulls/9"}
+    _payload = {"repo_full_name": "o/r", "pr_number": 9,
+                "pr_url": "http://f/o/r/pulls/9", "feedback": "checks failed"}
+
+    def _cfg(self, auto, esc=""):
+        from event_bus.config_store import RuntimeConfig, GateConfig, ModelConfig
+        return RuntimeConfig(gates=GateConfig(auto_escalate=auto), models=ModelConfig(escalate=esc))
+
+    def test_escalates_at_cap_when_enabled(self, client, monkeypatch):
+        r = fakeredis.FakeRedis()
+        monkeypatch.setattr("event_bus.main._redis_conn", r)
+        r.set("recode_retries:o/r:9", 3)          # already at cap
+        r.set("stuck:s1", b"1")                   # a prior stuck flag should be cleared
+        with patch("event_bus.main.find_item_by_pr_url", return_value=self._item), \
+             patch("event_bus.main.get_config",
+                   return_value=self._cfg(True, "openrouter/anthropic/claude-sonnet-4-6")), \
+             patch("event_bus.main._recode_cap_for_item", return_value=3), \
+             patch("event_bus.main._post_pr_comment") as comment, \
+             patch("event_bus.main.update_state"), \
+             patch("event_bus.main.get_prompt", return_value=""), \
+             patch("coding_agent.main.fix_pr_review", return_value={"status": "error"}), \
+             patch("coding_agent.forgejo_client.ForgejoClient"):
+            client.post("/internal/recode-for-pr", json=self._payload)
+        assert r.get("escalate_pr:o/r:9") == b"openrouter/anthropic/claude-sonnet-4-6"
+        assert r.get("stuck:s1") is None          # actively retrying, not stuck
+        assert any("escalat" in str(c).lower() for c in comment.call_args_list)
+
+    def test_gives_up_when_already_escalated(self, client, monkeypatch):
+        r = fakeredis.FakeRedis()
+        monkeypatch.setattr("event_bus.main._redis_conn", r)
+        r.set("recode_retries:o/r:9", 3)
+        r.set("escalate_pr:o/r:9", b"openrouter/anthropic/claude-sonnet-4-6")  # already escalated
+        with patch("event_bus.main.find_item_by_pr_url", return_value=self._item), \
+             patch("event_bus.main.get_config", return_value=self._cfg(True)), \
+             patch("event_bus.main._recode_cap_for_item", return_value=3), \
+             patch("event_bus.main._post_pr_comment") as comment, \
+             patch("event_bus.main.update_state"):
+            resp = client.post("/internal/recode-for-pr", json=self._payload)
+        d = resp.json()
+        assert d["status"] == "retry_cap_reached" and d["escalated"] is True
+        assert r.get("stuck:s1") == b"1"          # flagged for the attention tray
+        assert any("gave up" in str(c).lower() for c in comment.call_args_list)
+
+    def test_gives_up_immediately_when_disabled(self, client, monkeypatch):
+        r = fakeredis.FakeRedis()
+        monkeypatch.setattr("event_bus.main._redis_conn", r)
+        r.set("recode_retries:o/r:9", 3)
+        with patch("event_bus.main.find_item_by_pr_url", return_value=self._item), \
+             patch("event_bus.main.get_config", return_value=self._cfg(False)), \
+             patch("event_bus.main._recode_cap_for_item", return_value=3), \
+             patch("event_bus.main._post_pr_comment"), \
+             patch("event_bus.main.update_state"):
+            resp = client.post("/internal/recode-for-pr", json=self._payload)
+        assert resp.json()["escalated"] is False
+        assert r.get("escalate_pr:o/r:9") is None    # no escalation when disabled
+
+    def test_escalate_model_rejects_claude_code(self, client, monkeypatch):
+        monkeypatch.setattr("event_bus.main._redis_conn", fakeredis.FakeRedis())
+        resp = client.patch("/api/config", json={"models": {"escalate": "claude-code/opus"}})
+        assert resp.status_code == 422    # subscription can't run the coder fleet

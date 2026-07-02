@@ -1414,6 +1414,8 @@ async def _run_recode_agent(review_event: ForgejoReviewEvent) -> None:
 
 
 _MAX_RECODE_RETRIES = 3
+# Stronger model coder+reviewer escalate to when a story stalls and models.escalate is unset.
+_DEFAULT_ESCALATE_MODEL = "openrouter/anthropic/claude-sonnet-4-6"
 
 
 def _recode_cap_for_item(item: dict) -> int:
@@ -1571,16 +1573,38 @@ async def internal_recode_for_pr(payload: dict):
     r = _redis_or_503()
     cap = _recode_cap_for_item(item)
     retry_key = f"recode_retries:{repo_full_name}:{pr_number}"
+    esc_key = f"escalate_pr:{repo_full_name}:{pr_number}"
     retries = int(r.get(retry_key) or 0)
     if retries >= cap:
-        log.warning("recode_retry_cap_reached", pr=pr_number, repo=repo_full_name, retries=retries, cap=cap)
-        _post_pr_comment(
-            repo_full_name, pr_number,
-            f"🤖 **Auto-fix gave up after {retries} attempts.** The checks are still failing — "
-            "this PR needs human attention.",
-        )
-        update_state(item["id"], "changes-requested")
-        return {"status": "retry_cap_reached", "retries": retries, "item_id": item["id"]}
+        cfg = get_config(r)
+        # Cascade: escalate coder+reviewer to a stronger model for one more round before
+        # handing off to a human. esc_key both marks "already escalated" and holds the
+        # override model both the coder (below) and the reviewer fan-out read.
+        if cfg.gates.auto_escalate and not r.get(esc_key):
+            esc_model = (cfg.models.escalate or "").strip() or _DEFAULT_ESCALATE_MODEL
+            r.setex(esc_key, 7 * 86_400, esc_model)
+            r.delete(retry_key)                    # fresh recode cap under the stronger model
+            r.delete(f"stuck:{item['id']}")        # actively retrying — not stuck (yet)
+            retries = 0
+            _post_pr_comment(
+                repo_full_name, pr_number,
+                f"⬆️ **Auto-escalating to a stronger model** (`{esc_model}`) after {cap} failed "
+                "attempts — retrying the coder and re-reviewing on the next push.")
+            log.warning("story_escalated", item_id=item["id"], pr=pr_number, model=esc_model)
+            # fall through: run the recode now with the escalated coder model
+        else:
+            escalated = bool(r.get(esc_key))
+            note = " even after escalating to a stronger model" if escalated else ""
+            log.warning("recode_retry_cap_reached", pr=pr_number, repo=repo_full_name,
+                        retries=retries, cap=cap, escalated=escalated)
+            _post_pr_comment(
+                repo_full_name, pr_number,
+                f"🤖 **Auto-fix gave up after {retries} attempts{note}.** The checks are still "
+                "failing — this PR needs human attention.")
+            update_state(item["id"], "changes-requested")
+            r.setex(f"stuck:{item['id']}", 86_400, b"1")   # surface in the attention tray
+            return {"status": "retry_cap_reached", "retries": retries,
+                    "item_id": item["id"], "escalated": escalated}
     r.setex(retry_key, 86400, retries + 1)
 
     owner, repo_name = repo_full_name.split("/", 1)
@@ -1603,6 +1627,8 @@ async def internal_recode_for_pr(payload: dict):
     review_fix_prompt = get_prompt(r, "coder.review_fix")
     log_cb = _make_log_cb(item["id"])
 
+    esc_coder_model = (r.get(esc_key) or b"").decode() if r.get(esc_key) else ""
+
     async def _recode_task() -> None:
         from coding_agent.main import fix_pr_review
         result: dict = {}
@@ -1614,6 +1640,7 @@ async def internal_recode_for_pr(payload: dict):
                 review_comments,
                 review_fix_prompt=review_fix_prompt,
                 log_line=log_cb,
+                model_override=esc_coder_model,   # stronger coder when escalated
             ) or {}
         except Exception as exc:
             log.error("recode_agent_failed", item_id=item["id"], error=str(exc))
