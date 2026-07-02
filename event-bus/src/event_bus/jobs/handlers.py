@@ -32,7 +32,7 @@ def handle_pr_event(
     Phase 7: rate-limit each role before enqueue.
     """
     import redis
-    from rq import Queue
+    from rq import Queue, Retry
     from event_bus.config import settings
     from event_bus.config_store import get_config
     from event_bus.prompt_store import get_prompt
@@ -103,20 +103,24 @@ def handle_pr_event(
     q = Queue("agent-jobs", connection=r)
     base_kwargs = dict(repo_full_name=repo_full_name, pr_number=pr_number,
                        head_sha=head_sha, base_ref=base_ref, head_ref=head_ref)
+    # Retry each verdict job on failure: the agents call flaky free models and hit a
+    # sandboxed container, so a transient crash shouldn't permanently strand the PR with
+    # a missing verdict (no verdict = never merges). Backoff gives the provider time.
+    retry = Retry(max=2, interval=[20, 60])
     jobs = []
     if reviewer_ok:
         jobs.append(q.enqueue(run_code_reviewer, **base_kwargs,
                               model_override=config.models.reviewer,
                               system_prompt=reviewer_system_prompt,
                               task_prompt=reviewer_task_prompt,
-                              stack=stack_id))
+                              stack=stack_id, retry=retry))
     if tester_ok:
         jobs.append(q.enqueue(run_tester, **base_kwargs,
                               model_override=config.models.tester,
-                              stack=stack_id))
+                              stack=stack_id, retry=retry))
     if security_ok:
         jobs.append(q.enqueue(run_security_scanner, **base_kwargs,
-                              model_override=config.models.security))
+                              model_override=config.models.security, retry=retry))
 
     job_ids = [j.id for j in jobs]
     log.info("pr_jobs_enqueued", repo=repo_full_name, pr=pr_number, job_ids=job_ids)

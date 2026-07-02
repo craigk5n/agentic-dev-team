@@ -65,6 +65,19 @@ _ROLE_ENV: dict[str, list[str]] = {
 _ALWAYS = ["LOG_LEVEL"]
 
 
+def _parse_result(output: str) -> dict | None:
+    """Extract the sandbox result — the last JSON object line in the container output.
+    Agent logs and stderr may precede it, so scan lines from the end."""
+    for line in reversed([ln for ln in output.splitlines() if ln.strip()]):
+        s = line.strip()
+        if s.startswith("{") and s.endswith("}"):
+            try:
+                return json.loads(s)
+            except json.JSONDecodeError:
+                continue
+    return None
+
+
 def _scoped_env(func_module: str) -> dict[str, str]:
     """Return only the env vars needed for the agent package that owns the function."""
     env = {k: os.environ.get(k, "") for k in _ALWAYS}
@@ -127,18 +140,22 @@ class Sandbox:
                 nano_cpus=int(self.cpus * 1_000_000_000),
                 network_mode=netns,
                 remove=True,
+                # Capture BOTH streams: sandbox_runner prints its result/error as JSON to
+                # stdout, and a hard crash (traceback, OOM) shows on stderr. Capturing only
+                # stdout meant a failed container surfaced an EMPTY error (invisible bug).
                 stdout=True,
-                stderr=False,
+                stderr=True,
             )
-            # sandbox_runner prints the JSON result as the final stdout line; agent
-            # logs may precede it, so parse the last non-empty line (not the whole blob).
-            lines = [ln for ln in raw.decode().splitlines() if ln.strip()]
-            if not lines:
-                return {"status": "error", "reason": "empty sandbox output"}
-            return json.loads(lines[-1])
+            # sandbox_runner prints the JSON result as the final line; agent logs (and any
+            # stderr) may precede it, so scan from the end for the last JSON object.
+            return _parse_result(raw.decode()) or {"status": "error", "reason": "empty sandbox output"}
         except docker.errors.ContainerError as exc:
+            # On non-zero exit docker-py raises before we can parse; the container's output
+            # (with sandbox_runner's {"status":"error","reason":...}) is on exc.stderr.
+            out = (exc.stderr or b"").decode(errors="replace")
+            reason = (_parse_result(out) or {}).get("reason") or out.strip()[-400:] or "no output"
             log.error("sandbox_container_failed", func=func_path, exit_code=exc.exit_status,
-                      stderr=exc.stderr.decode() if exc.stderr else "")
+                      reason=reason)
             raise
         except Exception as exc:
             log.error("sandbox_docker_error", func=func_path, error=str(exc))

@@ -218,6 +218,47 @@ class TestSandboxDockerMode:
             any("AGENT_FUNC" in str(a) for a in call_kwargs.args)
         )
 
+    def test_parse_result_picks_last_json_among_logs(self):
+        from event_bus.sandbox import _parse_result
+        out = ('2026-01-01 log line before\n'
+               '{"status": "pass", "role": "code_review"}\n'
+               'trailing log noise\n')
+        # real result is the JSON object even though a log line follows it
+        assert _parse_result(out) == {"status": "pass", "role": "code_review"}
+
+    def test_parse_result_none_when_no_json(self):
+        from event_bus.sandbox import _parse_result
+        assert _parse_result("just logs\nno json here\n") is None
+
+    def test_docker_failure_surfaces_reason_from_output(self):
+        # A crashed sandbox must log the real reason (from the container output), not the
+        # empty string that stderr=False used to yield.
+        from event_bus.sandbox import Sandbox
+        errors_mod = MagicMock()
+        class _ContainerError(Exception):
+            def __init__(self, stderr, exit_status):
+                self.stderr = stderr; self.exit_status = exit_status
+        errors_mod.ContainerError = _ContainerError
+        mock_docker = MagicMock()
+        mock_docker.errors = errors_mod
+        crash = _ContainerError(
+            stderr=b'agent log\n{"status": "error", "reason": "litellm timeout"}\n',
+            exit_status=1)
+        mock_docker.from_env.return_value.containers.run.side_effect = crash
+
+        with patch.dict("sys.modules", {"docker": mock_docker, "docker.errors": errors_mod}), \
+             patch("event_bus.sandbox.log") as mlog:
+            sb = Sandbox(mode="docker", image="test:latest")
+            def f(x): return {}
+            try:
+                sb.run(f, x=1)
+            except _ContainerError:
+                pass
+        # the real reason was extracted from the container output and logged
+        kw = mlog.error.call_args.kwargs
+        assert kw.get("reason") == "litellm timeout"
+        assert kw.get("exit_code") == 1
+
     def test_scoped_env_reviewer_includes_forgejo(self):
         from event_bus.sandbox import _scoped_env
         import os
