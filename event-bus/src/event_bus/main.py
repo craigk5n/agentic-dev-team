@@ -764,25 +764,28 @@ async def _run_planner(item_id: str, title: str, description: str) -> None:
 
 
 def _persist_plan(item_id: str, plan: dict, repo_full: str, stack, sdlc,
-                  model: str, cfg) -> None:
+                  model: str, cfg, seq_offset: int = 0) -> None:
     """Create the plan's epic-tagged stories and apply the plan-approval gate. Shared by
-    the auto-planner (_run_planner) and the plan importer (_run_import)."""
+    the auto-planner (_run_planner) and the plan importer (_run_import). ``seq_offset``
+    continues sequence numbering when appending to an existing plan (resume)."""
     item = get_item(item_id) or {}
     stories = plan.get("stories", [])
     idea_guides = [g for g in (item.get("style_guides") or "").split(",") if g]
     # Plan-approval gate: when ON, every story is parked in backlog until the operator
     # approves the plan; when OFF, the first story starts immediately (legacy behavior).
-    plan_gate = cfg.gates.plan_approval
+    # A resumed append (seq_offset > 0) never auto-starts — the plan is mid-review.
+    plan_gate = cfg.gates.plan_approval or seq_offset > 0
     first_story: dict = {}
     for i, story in enumerate(stories):
         state = "backlog" if (plan_gate or i > 0) else "ready"
+        seq = seq_offset + i + 1
         story_item = create_item(
             item_type="story",
             title=story["title"],
             description=story.get("description", ""),
             state=state,
             parent_id=item_id,
-            sequence=i + 1,
+            sequence=seq,
             model_used=model,
             repo=repo_full,
             stack=stack.id,
@@ -790,14 +793,15 @@ def _persist_plan(item_id: str, plan: dict, repo_full: str, stack, sdlc,
             style_guides=idea_guides,
             epic=story.get("epic", ""),
         )
-        log.info("story_created", id=story_item["id"], seq=i + 1, state=state,
+        log.info("story_created", id=story_item["id"], seq=seq, state=state,
                  epic=story.get("epic", ""), title=story_item["title"], repo=repo_full)
         if i == 0:
             first_story = story_item
 
     log.info("planner_complete", idea_id=item_id,
              module=plan.get("project_name") or plan.get("module_name"),
-             epics=len(plan.get("epics", [])), story_count=len(stories), repo=repo_full)
+             epics=len(plan.get("epics", [])), story_count=len(stories),
+             repo=repo_full, seq_offset=seq_offset)
 
     if stories and not plan_gate:
         update_state(first_story["id"], "in-progress")
@@ -836,6 +840,63 @@ async def _run_import(item_id: str) -> None:
         log.error("import_failed", id=item_id, error=str(exc))
         return
     _persist_plan(item_id, plan, repo_full, stack, sdlc, model, cfg)
+
+
+async def _resume_import(item_id: str) -> None:
+    """Fill the epics a prior import couldn't finish (e.g. cut short by a rate limit):
+    re-run pass 1 to get the full epic list, skip epics that already have stories, and
+    normalize only the missing ones — appending them without redoing completed work."""
+    cfg = get_config(_redis_or_503())
+    item = get_item(item_id) or {}
+    plan_text = item.get("prompt") or ""
+    cat = get_catalog()
+    stack = cat.get_stack(item.get("stack"))
+    sdlc = cat.get_sdlc(item.get("sdlc"))
+    model = (item.get("planner_model") or "").strip() or cfg.models.planner
+    repo_full = item.get("repo") or ""
+
+    existing = [s for s in list_items(item_type="story") if s.get("parent_id") == item_id]
+    covered = {s.get("epic", "") for s in existing if s.get("epic")}
+    seq_offset = max((s.get("sequence") or 0 for s in existing), default=0)
+    log.info("import_resume_start", id=item_id, existing=len(existing),
+             covered_epics=len(covered), seq_offset=seq_offset)
+
+    try:
+        from planner_agent.main import run_import
+        plan = await asyncio.to_thread(
+            run_import, item_id, plan_text, model,
+            repo_full_name=repo_full, stack=stack.id, redis_conn=_redis_conn,
+            skip_epics=covered)
+    except Exception as exc:
+        log.error("import_resume_failed", id=item_id, error=str(exc))
+        return
+    new_stories = plan.get("stories", [])
+    if not new_stories:
+        log.warning("import_resume_no_new_stories", id=item_id)
+        return
+    _persist_plan(item_id, plan, repo_full, stack, sdlc, model, cfg, seq_offset=seq_offset)
+
+
+@app.post("/api/items/{item_id}/resume-import", status_code=status.HTTP_202_ACCEPTED)
+async def resume_import(item_id: str):
+    """Resume a partial plan import — normalize only the epics still missing stories.
+
+    Safe to call repeatedly (e.g. after a subscription rate-limit window resets); each
+    call fills whatever epics remain until the plan is complete."""
+    item = get_item(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="item not found")
+    if item["type"] != "idea":
+        raise HTTPException(status_code=409, detail="only imported projects can be resumed")
+    if not (item.get("prompt") or "").strip():
+        raise HTTPException(status_code=409, detail="no source plan stored to resume from")
+    stories = [s for s in list_items(item_type="story") if s.get("parent_id") == item_id]
+    if stories and any(s["state"] not in ("backlog",) for s in stories):
+        raise HTTPException(status_code=409,
+                            detail="plan already started — resume only before approval")
+    log.info("import_resume_requested", id=item_id, existing=len(stories))
+    asyncio.create_task(_resume_import(item_id))
+    return {"status": "resuming", "id": item_id, "existing_stories": len(stories)}
 
 
 @app.post("/api/items/{item_id}/code", status_code=status.HTTP_202_ACCEPTED)

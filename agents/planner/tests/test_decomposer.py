@@ -199,6 +199,37 @@ class TestNormalizePlan:
         assert len(plan["stories"]) == 1
         assert plan["stories"][0]["description"].startswith("repo: devadmin/sandbox")
 
+    def test_resume_skips_covered_epics(self):
+        # Resume: pass 1 returns both epics; the already-covered one is skipped, so
+        # only the missing epic's stories pass runs. Full epic list still returned.
+        with patch("planner_agent.decomposer.litellm.completion",
+                   side_effect=_seq(self._EPICS, self._STORIES_2)) as mock:
+            plan = normalize_plan("plan", model="m", default_repo="o/r",
+                                  skip_epics={"Data Model"})
+        assert mock.call_count == 2                       # epics pass + 1 stories pass (not 2)
+        assert [e["name"] for e in plan["epics"]] == ["Data Model", "Endpoints"]
+        assert [s["title"] for s in plan["stories"]] == ["CRUD endpoints"]
+
+    def test_resume_returns_empty_not_fallback_when_all_fail(self):
+        # On resume, all remaining epics failing yields empty stories (caller: "nothing
+        # new this round"), NOT a bogus single-story fallback.
+        with patch("planner_agent.decomposer.litellm.completion",
+                   side_effect=_seq(self._EPICS, "{bad", "{bad")), \
+             patch("planner_agent.decomposer.time.sleep"):
+            plan = normalize_plan("plan", model="m", default_repo="o/r",
+                                  skip_epics={"Data Model"})
+        assert plan["stories"] == []
+
+    def test_rate_limit_uses_longer_backoff(self):
+        from planner_agent import decomposer
+        good = _mock_llm('{"ok": 1}')
+        with patch("planner_agent.decomposer.litellm.completion",
+                   side_effect=[Exception("api_error_status:429 too many requests"), good]), \
+             patch("planner_agent.decomposer.time.sleep") as slept:
+            decomposer._complete_json([{"role": "user", "content": "x"}],
+                                      model="m", api_key="", stack="", redis_conn=None)
+        slept.assert_called_once_with(decomposer._RATE_LIMIT_BACKOFF)
+
 
 class TestClaudeCodeRouting:
     def test_claude_code_model_bypasses_litellm(self):

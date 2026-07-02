@@ -392,6 +392,37 @@ class TestPlanApproval:
         assert resp.status_code == 409
 
 
+class TestResumeImport:
+    _idea = {"id": "imp-1", "title": "P", "state": "approved", "type": "idea",
+             "prompt": "## Epic 1\nspec\n## Epic 2\nspec", "stack": "python", "sdlc": "standard"}
+    _backlog = [
+        {"id": "s1", "parent_id": "imp-1", "type": "story", "state": "backlog",
+         "sequence": 1, "title": "One", "epic": "Epic 1"},
+    ]
+
+    def test_resume_triggers_background_fill(self, client, monkeypatch):
+        monkeypatch.setattr("event_bus.main._redis_conn", fakeredis.FakeRedis())
+        with patch("event_bus.main.get_item", return_value=self._idea), \
+             patch("event_bus.main.list_items", return_value=self._backlog), \
+             patch("event_bus.main._resume_import", new_callable=AsyncMock) as res:
+            resp = client.post("/api/items/imp-1/resume-import")
+        assert resp.status_code == 202
+        assert resp.json()["existing_stories"] == 1
+        res.assert_called_once_with("imp-1")
+
+    def test_resume_rejected_once_plan_started(self, client):
+        started = [{**self._backlog[0], "state": "in-progress"}]
+        with patch("event_bus.main.get_item", return_value=self._idea), \
+             patch("event_bus.main.list_items", return_value=started):
+            resp = client.post("/api/items/imp-1/resume-import")
+        assert resp.status_code == 409
+
+    def test_resume_rejected_without_source_plan(self, client):
+        with patch("event_bus.main.get_item", return_value={**self._idea, "prompt": ""}):
+            resp = client.post("/api/items/imp-1/resume-import")
+        assert resp.status_code == 409
+
+
 class TestProjectLifecycle:
     _idea = {"id": "idea-1", "title": "Auth", "state": "approved", "type": "idea",
              "repo": "dev/app", "description": "d", "pr_url": None}

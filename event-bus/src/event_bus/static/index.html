@@ -2032,8 +2032,12 @@ async function loadBoard() {
         const pp = planPending[item.id];
         const startPlan = pp
           ? `<button class="recov-btn start-plan-btn" data-id="${item.id}" title="Review done — start running the plan">▶ Start plan (${pp.epics ? pp.epics + ' epics · ' : ''}${pp.stories} stories)</button>` : '';
+        // Resume an imported plan that was cut short (e.g. by a rate limit): fills only
+        // the epics still missing stories. Safe/idempotent; no-op if already complete.
+        const resumeImport = pp
+          ? `<button class="recov-btn resume-import-btn" data-id="${item.id}" title="Fill any epics a partial import didn't finish (imported plans only)">⟳ Resume import</button>` : '';
         recovery = `<div class="board-item-actions recov">
-          ${startPlan}${repoLink}
+          ${startPlan}${resumeImport}${repoLink}
           <button class="recov-btn replan-btn" data-id="${item.id}" title="Re-run the planner for this project">↻ Re-plan</button>
           <button class="recov-btn cancel-btn" data-id="${item.id}" title="Stop this project and abandon its stories">✕ Cancel</button>
           <button class="recov-btn arch-proj" data-id="${item.id}" title="Archive this project (hide from the board, keep history)">🗄 Archive</button>
@@ -2161,6 +2165,7 @@ async function loadBoard() {
   // Operator recovery buttons (retry / reset / abandon / re-plan / cancel)
   const RECOVERY = {
     'start-plan-btn': { path: 'approve-plan', toast: 'Plan started' },
+    'resume-import-btn': { path: 'resume-import', toast: 'Resuming import — filling missing epics…' },
     'retry-btn':   { path: 'retry',   toast: 'Retrying…' },
     'reset-btn':   { path: 'reset',   toast: 'Reset — restarting coder' },
     'abandon-btn': { path: 'abandon', toast: 'Story abandoned', confirm: 'Abandon this story and unlock the next?' },

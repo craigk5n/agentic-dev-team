@@ -20,9 +20,10 @@ log = structlog.get_logger()
 
 # Fail fast instead of riding litellm's long default backoff, and retry the flaky
 # empty/error responses free models emit (finish_reason='error' → empty content).
-_CALL_TIMEOUT = 90.0    # seconds per attempt
-_MAX_ATTEMPTS = 3       # initial + 2 retries
-_RETRY_BACKOFF = 2.0    # seconds, ×attempt
+_CALL_TIMEOUT = 90.0        # seconds per attempt
+_MAX_ATTEMPTS = 3           # initial + 2 retries
+_RETRY_BACKOFF = 2.0        # seconds, ×attempt
+_RATE_LIMIT_BACKOFF = 20.0  # seconds — 429s need a real pause, not a short retry
 
 # Bounds — plan size scales with scope, but stays bounded.
 _MIN_EPICS, _MAX_EPICS = 3, 8
@@ -146,10 +147,14 @@ def _complete_json(messages, *, model, api_key, stack, redis_conn, max_tokens=No
             return json.loads(clean)   # empty/malformed → JSONDecodeError → retry
         except Exception as exc:       # timeout, provider error, or bad JSON
             last_exc = exc
+            # Rate limits (429 — common on subscription/Claude Code planning) need a
+            # much longer pause than a transient hiccup; a short backoff just wastes the
+            # attempt. If it doesn't clear, the caller aborts and the import is resumable.
+            rate_limited = "429" in str(exc) or "rate" in str(exc).lower()
             log.warning("planner_llm_retry", attempt=attempt, max=max_attempts,
-                        error=str(exc)[:140])
+                        rate_limited=rate_limited, error=str(exc)[:140])
             if attempt < max_attempts:
-                time.sleep(_RETRY_BACKOFF * attempt)
+                time.sleep(_RATE_LIMIT_BACKOFF if rate_limited else _RETRY_BACKOFF * attempt)
     raise last_exc
 
 
@@ -374,6 +379,7 @@ def normalize_plan(
     default_repo: str = "devadmin/sandbox",
     stack: str = "",
     redis_conn=None,
+    skip_epics: set[str] | None = None,
 ) -> dict:
     """Map an externally-authored plan (pasted PRD/markdown) onto our epic/story model.
 
@@ -381,7 +387,15 @@ def normalize_plan(
     pass 1 extracts the epic structure (terse), pass 2 expands each epic's stories in
     its own bounded call. Reconciled with the execution rules (scaffolded repo,
     shippable+testable slices). Returns the same shape as decompose_idea.
+
+    ``skip_epics`` — epic names already normalized in a prior run. Their pass-2 call is
+    skipped (no story produced, not counted as a failure), so a large import interrupted
+    by a rate limit can be RESUMED to fill only the missing epics without redoing work.
+    The returned ``epics`` is always the full list; ``stories`` covers only the epics
+    that were actually processed this run.
     """
+    skip = {e.strip() for e in (skip_epics or set()) if e}
+    resuming = bool(skip)
     call = dict(model=model, api_key=api_key, stack=stack, redis_conn=redis_conn)
     plan = (plan_text or "")[:_MAX_PLAN_CHARS]
 
@@ -412,6 +426,8 @@ def normalize_plan(
     flat = []
     consecutive_failures = 0
     for epic in epics:
+        if epic["name"] in skip:            # already done in a prior run (resume)
+            continue
         section = sections.get(epic["name"]) or plan
         try:
             data = _complete_json(
@@ -442,8 +458,11 @@ def normalize_plan(
                     "epic": epic["name"],
                 })
 
-    if not flat:
+    if not flat and not resuming:
+        # Fresh import produced nothing → single-story fallback so work still moves.
+        # On resume, an empty result just means "no new epics filled this round".
         return _fallback(project_name, default_repo)
-    log.info("plan_normalized", project=project_name, epics=len(epics), stories=len(flat))
+    log.info("plan_normalized", project=project_name, epics=len(epics),
+             stories=len(flat), resumed=resuming)
     return {"project_name": project_name, "module_name": project_name,
             "epics": epics, "stories": flat}

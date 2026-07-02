@@ -16,11 +16,13 @@ def run_import(
     repo_full_name: str = "",
     stack: str = "",
     redis_conn=None,
+    skip_epics: set[str] | None = None,
 ) -> dict:
     """Normalize an externally-authored plan into our epic/story model. Same return
-    shape as run_planner; persistence is handled by the caller."""
+    shape as run_planner; persistence is handled by the caller. ``skip_epics`` resumes a
+    partial import by re-normalizing only the epics that don't have stories yet."""
     log.info("import_start", item_id=item_id, repo=repo_full_name or settings.default_repo,
-             plan_chars=len(plan_text or ""))
+             plan_chars=len(plan_text or ""), resume_skip=len(skip_epics or ()))
     plan = normalize_plan(
         plan_text,
         model=model_override or settings.model_planner,
@@ -28,6 +30,7 @@ def run_import(
         default_repo=repo_full_name or settings.default_repo,
         stack=stack,
         redis_conn=redis_conn,
+        skip_epics=skip_epics,
     )
     log.info("import_done", item_id=item_id, epics=len(plan.get("epics", [])),
              stories=len(plan.get("stories", [])))
