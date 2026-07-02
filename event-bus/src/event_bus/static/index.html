@@ -1093,6 +1093,29 @@ button.code-btn:hover { background: rgba(59,130,246,.25); }
     </p>
   </div>
 
+  <!-- OpenRouter free-tier request limit -->
+  <div class="card">
+    <div class="section-title">OpenRouter Free-Tier Requests</div>
+    <p style="color:var(--muted);font-size:12px;margin-bottom:12px">
+      OpenRouter caps <code>:free</code> models per day (50 under $10 lifetime credit,
+      1000 at/above). These calls cost $0, so the cost cap can't catch them — the board
+      warns at 80%. 0 = unlimited.
+    </p>
+    <div class="field" style="max-width:320px">
+      <label for="cfg-free-cap">Max free requests / day</label>
+      <input id="cfg-free-cap" type="number" min="0" step="1" placeholder="1000">
+    </div>
+    <label class="guide-opt" style="display:flex;align-items:center;gap:8px;margin-top:8px;font-size:13px">
+      <input type="checkbox" id="cfg-free-hold">
+      Hold new stories at the cap (auto-resume at UTC reset)
+    </label>
+    <p style="font-size:12px;margin-top:8px">
+      Today: <strong id="cfg-free-used">0</strong> / <span id="cfg-free-limit">1000</span> requests
+      <span id="cfg-free-pct" style="color:var(--muted)"></span>
+      <span id="cfg-free-state" style="font-weight:600;display:none"></span>
+    </p>
+  </div>
+
   <button class="primary" id="save-config-btn">Save Config</button>
 
   <!-- Approve PR — only needed when PR Merge Approval gate is ON -->
@@ -1600,11 +1623,21 @@ async function loadConfig() {
       document.getElementById(`rpm-${r}`).value = data.limits[`max_rpm_${r}`] ?? 0;
     }
     document.getElementById('cfg-cost-cap').value = data.limits.max_cost_usd_daily ?? 0;
-    // Today's spend + paused state from telemetry
+    document.getElementById('cfg-free-cap').value = data.limits.max_free_requests_daily ?? 1000;
+    document.getElementById('cfg-free-hold').checked = data.limits.hold_at_free_cap || false;
+    // Today's spend + free-tier usage from telemetry
     try {
       const tel = await api('/api/telemetry');
       document.getElementById('cfg-cost-spend').textContent = '$' + (tel.daily_spend_usd ?? 0).toFixed(2);
       document.getElementById('cfg-cost-capped').style.display = tel.cost_capped ? 'inline' : 'none';
+      const q = tel.free_quota || {};
+      document.getElementById('cfg-free-used').textContent = q.used ?? 0;
+      document.getElementById('cfg-free-limit').textContent = q.limit || '∞';
+      document.getElementById('cfg-free-pct').textContent = q.limit ? ` (${q.pct}%)` : '';
+      const st = document.getElementById('cfg-free-state');
+      if (q.exceeded) { st.textContent = ' — LIMIT REACHED'; st.style.color = 'var(--danger,#ef4444)'; st.style.display = 'inline'; }
+      else if (q.warn) { st.textContent = ' — approaching limit'; st.style.color = '#eab308'; st.style.display = 'inline'; }
+      else { st.style.display = 'none'; }
     } catch (e) { /* telemetry optional */ }
   } catch (err) {
     toast('Failed to load config: ' + err.message, 'error');
@@ -1629,6 +1662,8 @@ document.getElementById('save-config-btn').addEventListener('click', async () =>
     limits[`max_rpm_${r}`] = +document.getElementById(`rpm-${r}`).value;
   }
   limits.max_cost_usd_daily = +document.getElementById('cfg-cost-cap').value || 0;
+  limits.max_free_requests_daily = +document.getElementById('cfg-free-cap').value || 0;
+  limits.hold_at_free_cap = document.getElementById('cfg-free-hold').checked;
 
   try {
     await api('/api/config', { method: 'PATCH', body: JSON.stringify({ gates, models, limits }) });
