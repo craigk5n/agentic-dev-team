@@ -81,6 +81,29 @@ Respond ONLY with valid JSON (no markdown fences):
 {{"stories": [{{"title": "<title>", "description": "repo: {default_repo}\\n<2-3 sentences: what to implement and how>", "priority": "urgent"|"high"|"medium"|"low"|"none"}}]}}
 """
 
+_IMPORT_CRITIC_PROMPT = """\
+This plan was imported from an external spec that assumed a ready-made environment. It
+will actually run in a FRESH scaffold: a minimal, GENERIC build file (e.g. pyproject)
+exists but is NOT customized to this project, and declares NONE of its real dependencies.
+
+Proposed plan (epics with their stories):
+{plan}
+
+Act as a release engineer doing a pre-flight check. List FOUNDATIONAL or CROSS-CUTTING
+work the project needs to install cleanly, build, run, and deploy that NO story above
+covers. Look hardest at the seams an external spec silently assumes:
+- Every third-party library the code imports MUST be a declared dependency — the generic
+  scaffold declares none of the project's real ones.
+- Package metadata (name, version, entry points) finalized to THIS project.
+- A clean-environment install + smoke/integration check that would catch an undeclared
+  dependency or a broken build (not just per-unit tests).
+- Container / build / CI / packaging artifacts the spec names but no story produces.
+Do NOT restate feature work already covered. If genuinely complete, return an empty list.
+
+Respond ONLY with valid JSON (no markdown fences):
+{{"missing": [{{"epic": "<existing or new epic name>", "title": "<title>", "description": "repo: {default_repo}\\n<what to implement + how to verify>", "priority": "high"|"medium"|"low"}}]}}
+"""
+
 _CRITIC_PROMPT = """\
 Project: {title}
 {description}
@@ -473,6 +496,40 @@ def normalize_plan(
         # Fresh import produced nothing → single-story fallback so work still moves.
         # On resume, an empty result just means "no new epics filled this round".
         return _fallback(project_name, default_repo)
+    # ── Deployability critic: catch foundational/cross-cutting gaps an external spec
+    # silently assumes (undeclared deps, unfinalized metadata, no clean-install check).
+    # Skipped on resume (that pass fills known-missing epics, not re-critiques).
+    if flat and not resuming:
+        try:
+            plan_txt = "\n".join(
+                f"## {e['name']}\n" + "\n".join(
+                    f"- {s['title']}" for s in flat if s["epic"] == e["name"])
+                for e in epics)
+            crit = _complete_json(
+                [{"role": "system", "content": _SYSTEM},
+                 {"role": "user", "content": _IMPORT_CRITIC_PROMPT.format(
+                     plan=plan_txt[:_MAX_PLAN_CHARS], default_repo=default_repo)}],
+                max_tokens=4000, **call)
+            epic_names = {e["name"] for e in epics}
+            added = 0
+            for m in crit.get("missing", []):
+                if not m.get("title"):
+                    continue
+                ename = m.get("epic") or "Project Finalization"
+                if ename not in epic_names:
+                    epics.append({"name": ename, "description": ""})
+                    epic_names.add(ename)
+                flat.append({
+                    "title": m["title"][:200],
+                    "description": _ensure_repo_prefix(m.get("description", ""), default_repo),
+                    "priority": m.get("priority", "high"),
+                    "epic": ename,
+                })
+                added += 1
+            log.info("import_critic_done", added=added)
+        except Exception as exc:
+            log.warning("import_critic_failed", error=str(exc)[:120])
+
     log.info("plan_normalized", project=project_name, epics=len(epics),
              stories=len(flat), resumed=resuming)
     return {"project_name": project_name, "module_name": project_name,

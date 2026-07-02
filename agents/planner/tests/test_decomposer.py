@@ -115,7 +115,7 @@ class TestNormalizePlan:
 
     def test_two_pass_maps_plan_to_epic_story_model(self):
         with patch("planner_agent.decomposer.litellm.completion",
-                   side_effect=_seq(self._EPICS, self._STORIES_1, self._STORIES_2)):
+                   side_effect=_seq(self._EPICS, self._STORIES_1, self._STORIES_2, _NO_MISSING)):
             plan = normalize_plan("## Epic 1 ...\n### Story ...", model="m", default_repo="o/r")
         assert plan["project_name"] == "Task API"
         assert [e["name"] for e in plan["epics"]] == ["Data Model", "Endpoints"]
@@ -126,13 +126,13 @@ class TestNormalizePlan:
 
     def test_one_stories_call_per_epic(self):
         with patch("planner_agent.decomposer.litellm.completion",
-                   side_effect=_seq(self._EPICS, self._STORIES_1, self._STORIES_2)) as mock:
+                   side_effect=_seq(self._EPICS, self._STORIES_1, self._STORIES_2, _NO_MISSING)) as mock:
             normalize_plan("plan", model="m", default_repo="o/r")
-        assert mock.call_count == 3          # 1 epics pass + 2 epics × 1 stories pass
+        assert mock.call_count == 4          # epics + 2 stories + deployability critic
 
     def test_pass1_epics_only_pass2_discovers_stories(self):
         with patch("planner_agent.decomposer.litellm.completion",
-                   side_effect=_seq(self._EPICS, self._STORIES_1, self._STORIES_2)) as mock:
+                   side_effect=_seq(self._EPICS, self._STORIES_1, self._STORIES_2, _NO_MISSING)) as mock:
             normalize_plan("some plan text", model="m", default_repo="o/r")
         epics_prompt = mock.call_args_list[0][1]["messages"][1]["content"].lower()
         assert "re-structuring an existing plan" in epics_prompt
@@ -146,7 +146,7 @@ class TestNormalizePlan:
         # If an epic's stories pass fails (both attempts), its stories are skipped
         # but the other epics survive.
         with patch("planner_agent.decomposer.litellm.completion",
-                   side_effect=_seq(self._EPICS, "{bad json", "{bad json", self._STORIES_2)), \
+                   side_effect=_seq(self._EPICS, "{bad json", "{bad json", self._STORIES_2, _NO_MISSING)), \
              patch("planner_agent.decomposer.time.sleep"):
             plan = normalize_plan("plan", model="m", default_repo="o/r")
         assert [s["title"] for s in plan["stories"]] == ["CRUD endpoints"]
@@ -159,7 +159,7 @@ class TestNormalizePlan:
                      "## Epic 1 — Data Model\nSECTION_A spec details\n"
                      "## Epic 2 — Endpoints\nSECTION_B spec details\n")
         with patch("planner_agent.decomposer.litellm.completion",
-                   side_effect=_seq(self._EPICS, self._STORIES_1, self._STORIES_2)) as mock:
+                   side_effect=_seq(self._EPICS, self._STORIES_1, self._STORIES_2, _NO_MISSING)) as mock:
             normalize_plan(plan_text, model="m", default_repo="o/r")
         p1 = mock.call_args_list[1][1]["messages"][1]["content"]
         p2 = mock.call_args_list[2][1]["messages"][1]["content"]
@@ -172,7 +172,7 @@ class TestNormalizePlan:
     def test_unmatched_epic_falls_back_to_full_plan(self):
         plan_text = "no headings at all, just prose describing the work"
         with patch("planner_agent.decomposer.litellm.completion",
-                   side_effect=_seq(self._EPICS, self._STORIES_1, self._STORIES_2)) as mock:
+                   side_effect=_seq(self._EPICS, self._STORIES_1, self._STORIES_2, _NO_MISSING)) as mock:
             normalize_plan(plan_text, model="m", default_repo="o/r")
         assert plan_text in mock.call_args_list[1][1]["messages"][1]["content"]
 
@@ -198,6 +198,27 @@ class TestNormalizePlan:
             plan = normalize_plan("x" * 100, model="m", default_repo="devadmin/sandbox")
         assert len(plan["stories"]) == 1
         assert plan["stories"][0]["description"].startswith("repo: devadmin/sandbox")
+
+    def test_deployability_critic_appends_finalization_story(self):
+        # After mapping, the import critic can add a foundational story (e.g. declare
+        # dependencies) the external spec assumed — tagged to a new epic if needed.
+        crit = {"missing": [{"epic": "Project Finalization",
+                             "title": "Declare all runtime dependencies + clean-install check",
+                             "description": "repo: o/r\nAdd mcp etc. to pyproject; verify pip install .",
+                             "priority": "high"}]}
+        with patch("planner_agent.decomposer.litellm.completion",
+                   side_effect=_seq(self._EPICS, self._STORIES_1, self._STORIES_2, crit)):
+            plan = normalize_plan("plan", model="m", default_repo="o/r")
+        titles = [s["title"] for s in plan["stories"]]
+        assert "Declare all runtime dependencies + clean-install check" in titles
+        assert "Project Finalization" in [e["name"] for e in plan["epics"]]
+
+    def test_critic_skipped_on_resume(self):
+        # Resume fills known-missing epics; it must NOT run the critic (no extra call).
+        with patch("planner_agent.decomposer.litellm.completion",
+                   side_effect=_seq(self._EPICS, self._STORIES_2)) as mock:
+            normalize_plan("plan", model="m", default_repo="o/r", skip_epics={"Data Model"})
+        assert mock.call_count == 2   # epics + 1 stories pass, no critic
 
     def test_resume_skips_covered_epics(self):
         # Resume: pass 1 returns both epics; the already-covered one is skipped, so
