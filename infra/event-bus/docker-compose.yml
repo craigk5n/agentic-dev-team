@@ -120,6 +120,10 @@ services:
     depends_on:
       - event-bus-redis
     deploy:
+      # Multiple worker replicas so verdict jobs (reviewer/tester/security) actually run
+      # in parallel up to the per-role concurrency limits — a single RQ worker processes
+      # one sandboxed job at a time and can't keep up with a fleet's PR review volume.
+      replicas: 3
       resources:
         limits:
           memory: 768m
