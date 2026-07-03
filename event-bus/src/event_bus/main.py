@@ -143,6 +143,7 @@ _WATCH_INTERVAL_SECS = 150
 _STUCK_IN_PROGRESS_SECS = 900    # coders finish in a few min; 15 min ⇒ dead task
 _STUCK_IN_REVIEW_SECS = 600      # verdicts are fast; 10 min ⇒ lost fan-out
 _WATCH_ATTEMPT_CAP = 3           # after this many auto-recoveries, hand it to the operator
+_CODER_ERROR_CAP = 5             # consecutive coder failures before flagging for a human
 
 
 def _story_age_secs(item: dict) -> float:
@@ -1367,18 +1368,40 @@ async def _run_coding_agent(item_id: str, title: str, description: str, story_pr
     finally:
         _expire_log(item_id)
 
+    _err_key = f"coder_errors:{item_id}"
     if result.get("status") == "success":
         update_state(item_id, "in-review")
         if result.get("pr_url"):
             set_pr_url(item_id, result["pr_url"])
+        if _redis_conn:
+            try: _redis_conn.delete(_err_key)   # clear the transient-error streak
+            except Exception: pass
         log.info("coding_agent_complete", id=item_id, pr=result.get("pr_url"))
     elif result.get("status") == "error":
-        # Agent crashed (OOM, network failure, etc.) — reset so it can be retried
+        # Agent crashed / the model failed (e.g. rate-limit) — retry, but cap the streak so
+        # a persistently-failing story is flagged for a human instead of looping forever.
         log.error("coding_agent_error", id=item_id, error=result.get("error", "unknown"))
-        update_state(item_id, "ready")
+        n = 0
+        if _redis_conn:
+            try:
+                n = _redis_conn.incr(_err_key); _redis_conn.expire(_err_key, 6 * 3600)
+            except Exception:
+                n = 0
+        if n >= _CODER_ERROR_CAP:
+            log.error("coder_error_cap_reached", id=item_id, attempts=n)
+            update_state(item_id, "changes-requested")
+            if _redis_conn:
+                try: _redis_conn.setex(f"stuck:{item_id}", 86_400, b"1")  # attention tray
+                except Exception: pass
+            _record_coder_outcome(item_id, "abandoned")
+        else:
+            update_state(item_id, "ready")   # re-queue for another attempt
     else:
-        # Agent ran but found nothing to implement — mark done and advance sequence
+        # Agent ran and genuinely found nothing to implement — mark done, advance sequence
         log.warning("coding_agent_no_changes", id=item_id)
+        if _redis_conn:
+            try: _redis_conn.delete(_err_key)
+            except Exception: pass
         update_state(item_id, "done")
         unlock_next_story(item_id)  # backlog → ready; release+dispatch below will trigger it
 
