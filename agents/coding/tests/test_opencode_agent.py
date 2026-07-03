@@ -4,7 +4,10 @@ import subprocess
 import pytest
 from unittest.mock import MagicMock, patch
 
-from coding_agent.opencode_agent import run_opencode_agent, _clean, _looks_like_provider_error
+from coding_agent.opencode_agent import (
+    run_opencode_agent, _clean, _looks_like_provider_error,
+    _looks_like_model_not_found, ModelNotFoundError,
+)
 
 
 class TestClean:
@@ -70,6 +73,57 @@ class TestRunOpencodeAgent:
         ):
             with pytest.raises(RuntimeError, match="provider error/rate-limit"):
                 run_opencode_agent("Story", "desc", str(tmp_path), "model")
+
+
+class TestModelNotFound:
+    _ERR = ["Calling model…\n",
+            'ProviderModelNotFoundError: modelID: "anthropic/claude-sonnet-4-6"\n',
+            "Error: Model not found: openrouter/anthropic/claude-sonnet-4-6\n"]
+
+    def test_detection(self):
+        assert _looks_like_model_not_found("ProviderModelNotFoundError: ...")
+        assert _looks_like_model_not_found("Error: Model not found: x")
+        assert not _looks_like_model_not_found("Added handling for a not-found 404 route")
+        assert not _looks_like_model_not_found("Implementation complete")
+
+    def test_raises_model_not_found_when_no_fallback(self, tmp_path):
+        # opencode exits 0 but the model is unresolvable → distinct error (not "no changes").
+        proc = _make_proc(self._ERR, returncode=0)
+        with (
+            patch("coding_agent.opencode_agent.shutil.which", return_value="/bin/opencode"),
+            patch("coding_agent.opencode_agent.subprocess.Popen", return_value=proc),
+        ):
+            with pytest.raises(ModelNotFoundError):
+                run_opencode_agent("Story", "desc", str(tmp_path), "openrouter/anthropic/claude-sonnet-4-6")
+
+    def test_falls_back_to_base_model(self, tmp_path):
+        # First run (escalate model) is model-not-found; retry transparently on the
+        # fallback model and return its output. Verify BOTH models were invoked.
+        bad = _make_proc(self._ERR, returncode=0)
+        good = _make_proc(["implemented the endpoint\n"], returncode=0)
+        with (
+            patch("coding_agent.opencode_agent.shutil.which", return_value="/bin/opencode"),
+            patch("coding_agent.opencode_agent.subprocess.Popen", side_effect=[bad, good]) as popen,
+        ):
+            result = run_opencode_agent(
+                "Story", "desc", str(tmp_path),
+                model="openrouter/anthropic/claude-sonnet-4-6",
+                fallback_model="openrouter/minimax/minimax-m2.5")
+        assert "implemented the endpoint" in result
+        assert popen.call_count == 2
+        models = [c.args[0][c.args[0].index("--model") + 1] for c in popen.call_args_list]
+        assert models == ["openrouter/anthropic/claude-sonnet-4-6", "openrouter/minimax/minimax-m2.5"]
+
+    def test_no_fallback_when_same_model(self, tmp_path):
+        # If the fallback equals the failing model, don't retry (would just fail again).
+        bad = _make_proc(self._ERR, returncode=0)
+        with (
+            patch("coding_agent.opencode_agent.shutil.which", return_value="/bin/opencode"),
+            patch("coding_agent.opencode_agent.subprocess.Popen", side_effect=[bad]) as popen,
+        ):
+            with pytest.raises(ModelNotFoundError):
+                run_opencode_agent("Story", "desc", str(tmp_path), model="m", fallback_model="m")
+        assert popen.call_count == 1
 
 
 class TestProviderErrorDetection:

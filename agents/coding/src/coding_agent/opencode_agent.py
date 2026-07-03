@@ -42,6 +42,30 @@ def _looks_like_provider_error(output: str) -> bool:
     return any(mk in low for mk in _PROVIDER_ERROR_MARKERS)
 
 
+# opencode surfaces an unknown/misconfigured model as ProviderModelNotFoundError and can
+# still exit 0. That's a CONFIG error, not transient — retrying the same model is futile;
+# the caller should fall back to a known-good model instead of silently committing "no
+# changes". (Common cause: an escalate/override model named in litellm style that isn't
+# in opencode's provider registry.)
+_MODEL_NOT_FOUND_MARKERS = (
+    "providermodelnotfounderror",
+    "model not found",
+    "modelnotfounderror",
+    "no such model",
+    "unknown model",
+    "invalid model",
+)
+
+
+class ModelNotFoundError(RuntimeError):
+    """opencode could not resolve the requested model (a config error, not transient)."""
+
+
+def _looks_like_model_not_found(output: str) -> bool:
+    low = (output or "").lower()
+    return any(mk in low for mk in _MODEL_NOT_FOUND_MARKERS)
+
+
 def _clean(line: str) -> str:
     return _ANSI_ESCAPE.sub("", line).rstrip("\r")
 
@@ -56,11 +80,17 @@ def run_opencode_agent(
     review_comments: list[dict] | None = None,
     prompt_template: str = "",
     log_line: Callable[[str], None] | None = None,
+    fallback_model: str = "",
 ) -> str:
     """
     Run opencode non-interactively on the given repo and story.
     Returns a summary of what was implemented.
     Raises RuntimeError on failure.
+
+    ``fallback_model`` — if the requested model can't be resolved by opencode
+    (ModelNotFoundError), transparently retry once with this known-good model instead of
+    failing. Lets an unavailable escalate/override model degrade gracefully to the base
+    coder model rather than wedging the story.
     """
     opencode_bin = shutil.which("opencode")
     if not opencode_bin:
@@ -120,61 +150,68 @@ def run_opencode_agent(
         except (KeyError, ValueError):
             prompt = template
 
-    cmd = [opencode_bin, "run", "--dir", repo_dir, "--model", model, prompt]
     env = {**os.environ}
     if openrouter_api_key:
         env["OPENROUTER_API_KEY"] = openrouter_api_key
 
-    log.info("opencode_start", model=model, repo=repo_dir, story=story_title)
+    def _invoke(use_model: str) -> str:
+        cmd = [opencode_bin, "run", "--dir", repo_dir, "--model", use_model, prompt]
+        log.info("opencode_start", model=use_model, repo=repo_dir, story=story_title)
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,  # merge stderr so caller sees everything
+            text=True,
+            env=env,
+        )
+        collected: list[str] = []
 
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,  # merge stderr so caller sees everything
-        text=True,
-        env=env,
-    )
+        def _reader() -> None:
+            assert proc.stdout is not None
+            for raw in proc.stdout:
+                line = _clean(raw)
+                collected.append(line)
+                if log_line:
+                    try:
+                        log_line(line)
+                    except Exception:
+                        pass
 
-    collected: list[str] = []
+        reader = threading.Thread(target=_reader, daemon=True)
+        reader.start()
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            reader.join(timeout=5)
+            raise RuntimeError(f"opencode timed out after {timeout}s")
+        reader.join(timeout=5)
+        output = "\n".join(collected)
+        if output:
+            log.info("opencode_stdout", chars=len(output))
 
-    def _reader() -> None:
-        assert proc.stdout is not None
-        for raw in proc.stdout:
-            line = _clean(raw)
-            collected.append(line)
-            if log_line:
-                try:
-                    log_line(line)
-                except Exception:
-                    pass
-
-    reader = threading.Thread(target=_reader, daemon=True)
-    reader.start()
+        # A model opencode can't resolve is a config error (it may even exit 0). Surface
+        # it distinctly so the caller can fall back rather than commit "no changes".
+        if _looks_like_model_not_found(output):
+            raise ModelNotFoundError(f"opencode could not resolve model {use_model!r}: {output[-300:]}")
+        if proc.returncode != 0:
+            raise RuntimeError(f"opencode exited {proc.returncode}: {output[-400:]}")
+        # opencode can exit 0 even when the LLM call itself failed (e.g. a free-tier 429
+        # surfaced as a provider error). Such a run produced NO real work — treat it as an
+        # error so the story is retried, not silently committed as "no changes / done".
+        if _looks_like_provider_error(output):
+            raise RuntimeError(f"opencode LLM call failed (provider error/rate-limit): {output[-300:]}")
+        log.info("opencode_done", story=story_title, model=use_model)
+        return output.strip() or "Implementation complete"
 
     try:
-        proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-        reader.join(timeout=5)
-        raise RuntimeError(f"opencode timed out after {timeout}s")
-
-    reader.join(timeout=5)
-    output = "\n".join(collected)
-
-    if output:
-        log.info("opencode_stdout", chars=len(output))
-
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"opencode exited {proc.returncode}: {output[-400:]}"
-        )
-
-    # opencode can exit 0 even when the LLM call itself failed (e.g. a free-tier 429
-    # surfaced as a provider error). Such a run produced NO real work — treat it as an
-    # error so the story is retried, not silently committed as "no changes / done".
-    if _looks_like_provider_error(output):
-        raise RuntimeError(f"opencode LLM call failed (provider error/rate-limit): {output[-300:]}")
-
-    log.info("opencode_done", story=story_title)
-    return output.strip() or "Implementation complete"
+        return _invoke(model)
+    except ModelNotFoundError:
+        if fallback_model and fallback_model != model:
+            log.warning("opencode_model_fallback", requested=model, fallback=fallback_model)
+            if log_line:
+                log_line(f"[coder] model '{model}' not available in opencode — "
+                         f"falling back to '{fallback_model}'")
+            return _invoke(fallback_model)
+        raise

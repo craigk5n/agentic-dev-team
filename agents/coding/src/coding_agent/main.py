@@ -167,6 +167,7 @@ def run_coding_agent(
                 openrouter_api_key=settings.openrouter_api_key,
                 prompt_template=story_prompt,
                 log_line=log_line,
+                fallback_model=settings.model_coder,
             )
 
             # In-coder TDD: run the stack's tests and iterate (red->green) before the PR.
@@ -196,6 +197,7 @@ def run_coding_agent(
                         }],
                         prompt_template=story_prompt,
                         log_line=log_line,
+                        fallback_model=settings.model_coder,
                     )
                 log.info("in_coder_tests", item_id=item_id, status=test_status)
 
@@ -314,6 +316,7 @@ def fix_pr_review(
                 review_comments=review_comments,
                 prompt_template=review_fix_prompt,
                 log_line=log_line,
+                fallback_model=settings.model_coder,
             )
 
             sha = git_ops.commit_all(tmpdir, f"fix: address review comments\n\n{summary[:500]}")
