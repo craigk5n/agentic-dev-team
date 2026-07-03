@@ -601,6 +601,8 @@ button.approve-btn:hover { background: rgba(34,197,94,.25); }
 .dash-bar-fill { height: 100%; width: 0; border-radius: 6px;
   background: linear-gradient(90deg, #34d399, #22d3ee); transition: width .8s cubic-bezier(.4,0,.2,1); }
 .dash-progress-label { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; min-width: 96px; text-align: right; }
+.dash-eta { font-size: 13px; font-weight: 600; color: #34d399; white-space: nowrap; }
+.dash-eta.dim { color: var(--muted); font-weight: 400; }
 .dash-live { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #34d399; text-transform: uppercase; letter-spacing: .08em; }
 .dash-live-dot { width: 8px; height: 8px; border-radius: 50%; background: #34d399; animation: runpulse 1.6s ease-out infinite; }
 .dash-grid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 16px; }
@@ -1397,6 +1399,7 @@ button.code-btn:hover { background: rgba(59,130,246,.25); }
       <div class="dash-bar"><div class="dash-bar-fill" id="dash-bar-fill"></div></div>
       <div class="dash-progress-label" id="dash-progress-label">— / —</div>
     </div>
+    <div class="dash-eta" id="dash-eta"></div>
     <div class="dash-live"><span class="dash-live-dot"></span>live</div>
   </div>
   <div class="dash-grid">
@@ -2452,6 +2455,21 @@ function renderTicker() {
     </div>`).join('') || '<div class="dash-empty">Waiting for activity…</div>';
   setHTML(document.getElementById('dash-ticker'), html);
 }
+// Throughput-based ETA: extrapolate from the actual recent completion pace, which
+// captures real parallelism and the current coder speed better than avg-cycle × count.
+function estimateEta(stories) {
+  const remaining = stories.filter(s => !['done', 'abandoned'].includes(s.state)).length;
+  if (remaining === 0) return { done: true };
+  const ts = stories.filter(s => s.state === 'done' && s.updated_at)
+    .map(s => Date.parse(s.updated_at)).filter(t => !isNaN(t)).sort((a, b) => a - b);
+  if (ts.length < 3) return { remaining, etaSecs: null };   // too little history to estimate
+  const win = ts.slice(-25);                                // recent completions only
+  const spanSecs = (win[win.length - 1] - win[0]) / 1000;
+  if (spanSecs <= 0) return { remaining, etaSecs: null };
+  const ratePerSec = (win.length - 1) / spanSecs;
+  return { remaining, etaSecs: remaining / ratePerSec, perHour: ratePerSec * 3600 };
+}
+
 function renderDashboard(items) {
   const stories = items.filter(i => i.type === 'story');
   const active = stories.filter(s => ['in-progress', 'in-review', 'changes-requested'].includes(s.state) && !s.stuck);
@@ -2469,6 +2487,17 @@ function renderDashboard(items) {
   if (fill) fill.style.width = pct + '%';
   const lbl = document.getElementById('dash-progress-label');
   if (lbl) lbl.textContent = `${doneCount} / ${total} done · ${pct}%`;
+  const etaEl = document.getElementById('dash-eta');
+  if (etaEl) {
+    const eta = estimateEta(stories);
+    if (eta.done) { etaEl.textContent = '✓ all done'; etaEl.className = 'dash-eta'; }
+    else if (eta.etaSecs == null) { etaEl.textContent = `${eta.remaining} to go`; etaEl.className = 'dash-eta dim'; }
+    else {
+      const per = eta.perHour >= 1 ? `~${Math.round(eta.perHour)}/hr` : `~${(eta.perHour * 24).toFixed(1)}/day`;
+      etaEl.textContent = `⏳ ~${fmtDuration(eta.etaSecs)} left · ${per}`;
+      etaEl.className = 'dash-eta';
+    }
+  }
   const ideas = items.filter(i => i.type === 'idea');
   const proj = document.getElementById('dash-project');
   if (proj) proj.textContent = ideas.length === 1 ? shortIdeaLabel(ideas[0].title) : 'Autonomous build';
