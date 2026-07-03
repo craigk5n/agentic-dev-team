@@ -38,22 +38,41 @@ class TestRunCodingAgent:
         assert result["sha"] == "a" * 40
         forgejo.create_pr.assert_called_once()
 
-    def test_no_changes_skips_pr(self, tmp_path):
+    def _run_with_summary(self, tmp_path, summary):
         forgejo = _make_forgejo()
         with (
             patch("coding_agent.main.ForgejoClient", return_value=forgejo),
             patch("coding_agent.main.git_ops.clone"),
             patch("coding_agent.main.git_ops.configure_identity"),
             patch("coding_agent.main.git_ops.create_branch"),
-            patch("coding_agent.main.git_ops.commit_all", return_value=""),
-            patch("coding_agent.main.run_opencode_agent", return_value="done"),
+            patch("coding_agent.main.git_ops.commit_all", return_value=""),  # no changes
+            patch("coding_agent.main.run_opencode_agent", return_value=summary),
             patch("coding_agent.main.tempfile.TemporaryDirectory") as mock_td,
         ):
             mock_td.return_value.__enter__.return_value = str(tmp_path)
             mock_td.return_value.__exit__.return_value = False
             result = run_coding_agent(_UUID, "Add login page", "Implement login form.")
+        return result, forgejo
+
+    def test_genuine_no_changes_skips_pr(self, tmp_path):
+        # A substantive summary + no diff == the coder really examined the code and found
+        # nothing to do → no_changes (done).
+        summary = ("Reviewed the auth module; the login page and form already exist and "
+                   "match the spec, so no code changes were necessary.")
+        result, forgejo = self._run_with_summary(tmp_path, summary)
         assert result["status"] == "no_changes"
         forgejo.create_pr.assert_not_called()
+
+    def test_empty_run_is_error_not_no_changes(self, tmp_path):
+        # An output-less run with no diff means the coder never did anything (e.g. a model
+        # error) — must be an error (retryable), NOT silently marked done.
+        result, forgejo = self._run_with_summary(tmp_path, "Implementation complete")
+        assert result["status"] == "error"
+        forgejo.create_pr.assert_not_called()
+
+    def test_tiny_summary_no_diff_is_error(self, tmp_path):
+        result, _ = self._run_with_summary(tmp_path, "done")
+        assert result["status"] == "error"
 
     def test_clone_failure_raises(self, tmp_path):
         forgejo = _make_forgejo()

@@ -22,6 +22,25 @@ DEFAULT_TIMEOUT = 900  # 15 minutes per story
 
 _ANSI_ESCAPE = re.compile(r'\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 
+# Phrases OpenRouter/providers emit when an LLM call fails (rate limit, provider outage,
+# no available endpoint). Specific enough not to collide with normal code the agent writes.
+_PROVIDER_ERROR_MARKERS = (
+    "temporarily rate-limited",
+    "rate-limited upstream",
+    "provider returned error",
+    "no endpoints found",
+    "no allowed providers",
+    "insufficient credits",
+    "quota exceeded",
+    "overloaded_error",
+    "503 service unavailable",
+)
+
+
+def _looks_like_provider_error(output: str) -> bool:
+    low = (output or "").lower()
+    return any(mk in low for mk in _PROVIDER_ERROR_MARKERS)
+
 
 def _clean(line: str) -> str:
     return _ANSI_ESCAPE.sub("", line).rstrip("\r")
@@ -150,6 +169,12 @@ def run_opencode_agent(
         raise RuntimeError(
             f"opencode exited {proc.returncode}: {output[-400:]}"
         )
+
+    # opencode can exit 0 even when the LLM call itself failed (e.g. a free-tier 429
+    # surfaced as a provider error). Such a run produced NO real work — treat it as an
+    # error so the story is retried, not silently committed as "no changes / done".
+    if _looks_like_provider_error(output):
+        raise RuntimeError(f"opencode LLM call failed (provider error/rate-limit): {output[-300:]}")
 
     log.info("opencode_done", story=story_title)
     return output.strip() or "Implementation complete"

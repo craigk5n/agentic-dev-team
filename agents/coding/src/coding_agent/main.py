@@ -201,6 +201,15 @@ def run_coding_agent(
 
             sha = git_ops.commit_all(tmpdir, f"feat: {title}\n\n{summary}")
             if not sha:
+                # Distinguish a genuine "nothing to implement" from a failed/empty run: a
+                # real no-changes run leaves a substantive summary of what it examined; an
+                # empty summary (or the placeholder from an output-less run) means the coder
+                # never actually did anything (e.g. a model error) — retry, don't mark done.
+                s = (summary or "").strip()
+                if len(s) < 40 or s == "Implementation complete":
+                    log.warning("coder_empty_run", item_id=item_id, summary_len=len(s))
+                    return {"status": "error", "item_id": item_id,
+                            "error": "coder produced no output or changes (likely model error/rate-limit)"}
                 log.warning("no_changes_committed", item_id=item_id)
                 return {"status": "no_changes", "item_id": item_id, "summary": summary}
 

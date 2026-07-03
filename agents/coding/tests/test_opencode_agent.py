@@ -4,7 +4,7 @@ import subprocess
 import pytest
 from unittest.mock import MagicMock, patch
 
-from coding_agent.opencode_agent import run_opencode_agent, _clean
+from coding_agent.opencode_agent import run_opencode_agent, _clean, _looks_like_provider_error
 
 
 class TestClean:
@@ -58,6 +58,30 @@ class TestRunOpencodeAgent:
         ):
             result = run_opencode_agent("Story", "desc", str(tmp_path), "model")
         assert result == "Implementation complete"
+
+    def test_provider_error_output_raises_even_on_exit_0(self, tmp_path):
+        # A 429 surfaced by opencode with a clean exit must raise, so the story is retried
+        # rather than silently treated as "no changes".
+        proc = _make_proc(["calling model…\n",
+                           "qwen/qwen3-coder:free is temporarily rate-limited upstream\n"])
+        with (
+            patch("coding_agent.opencode_agent.shutil.which", return_value="/bin/opencode"),
+            patch("coding_agent.opencode_agent.subprocess.Popen", return_value=proc),
+        ):
+            with pytest.raises(RuntimeError, match="provider error/rate-limit"):
+                run_opencode_agent("Story", "desc", str(tmp_path), "model")
+
+
+class TestProviderErrorDetection:
+    def test_flags_rate_limit_and_provider_errors(self):
+        assert _looks_like_provider_error("... temporarily rate-limited upstream ...")
+        assert _looks_like_provider_error("Provider returned error")
+        assert _looks_like_provider_error("No endpoints found for model x")
+
+    def test_does_not_flag_normal_code_output(self):
+        assert not _looks_like_provider_error("Added error handling for 404 and 500 responses")
+        assert not _looks_like_provider_error("Implementation complete")
+        assert not _looks_like_provider_error("")
 
     def test_timeout_kills_process_and_raises(self, tmp_path):
         proc = _make_proc(timeout=True)
