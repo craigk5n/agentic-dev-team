@@ -1657,7 +1657,12 @@ async def _run_recode_agent(review_event: ForgejoReviewEvent) -> None:
 
 _MAX_RECODE_RETRIES = 3
 # Stronger model coder+reviewer escalate to when a story stalls and models.escalate is unset.
-_DEFAULT_ESCALATE_MODEL = "openrouter/anthropic/claude-sonnet-4-6"
+# NOTE: opencode's registry uses dot notation (claude-sonnet-4.6) and litellm accepts it too,
+# so this one string resolves for BOTH the coder (opencode) and reviewer (litellm). The dash
+# form ("...-4-6") only resolves in litellm, so the coder's escalation silently failed with
+# ProviderModelNotFoundError. (The coder also falls back to the base model if an escalate
+# model is ever unresolvable — see opencode_agent.fallback_model.)
+_DEFAULT_ESCALATE_MODEL = "openrouter/anthropic/claude-sonnet-4.6"
 
 
 def _recode_cap_for_item(item: dict) -> int:
