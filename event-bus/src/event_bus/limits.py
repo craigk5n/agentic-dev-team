@@ -67,6 +67,34 @@ def release_slot(r: "redis.Redis", role: str) -> None:
         r.set(key, 0)
 
 
+# Roles that acquire a concurrency slot during job execution (in the RQ worker).
+_SLOT_ROLES = ("reviewer", "tester", "security")
+
+
+def reconcile_slots(r: "redis.Redis") -> dict:
+    """Reset every per-role concurrency counter to 0 — call this on WORKER startup.
+
+    A worker killed mid-job (crash / --force-recreate) can't run its jobs' release_slot()
+    finally blocks, so a slot acquired before the restart stays consumed for the key's
+    2h TTL and starves that role (every new job returns 'concurrency_limit_exceeded'
+    without doing any work). A fresh worker has zero in-flight jobs, so the truthful value
+    is 0. Mirrors the coder in-flight reconciliation on the web side.
+    """
+    leaked: dict = {}
+    for role in _SLOT_ROLES:
+        key = _CONCURRENCY_KEY.format(role=role)
+        try:
+            prev = int(r.get(key) or 0)
+        except (TypeError, ValueError):
+            prev = 0
+        if prev:
+            leaked[role] = prev
+        r.set(key, 0)
+    if leaked:
+        log.warning("concurrency_slots_reconciled", leaked=leaked)
+    return leaked
+
+
 def check_rate(r: "redis.Redis", role: str, max_per_minute: int) -> bool:
     """
     Sliding 1-minute window rate limit for `role`.

@@ -591,3 +591,21 @@ class TestTelemetryByStack:
         assert "by_stack" in summary
         assert summary["by_stack"]["python"]["calls"] == 2
         assert summary["by_stack"]["go"]["calls"] == 1
+
+
+class TestSlotReconciliation:
+    def test_reconcile_resets_leaked_slots(self):
+        import fakeredis
+        from event_bus import limits
+        r = fakeredis.FakeRedis()
+        r.set("limits:concurrency:reviewer", 3)   # leaked by a killed worker
+        r.set("limits:concurrency:tester", 1)
+        leaked = limits.reconcile_slots(r)
+        assert leaked == {"reviewer": 3, "tester": 1}
+        for role in ("reviewer", "tester", "security"):
+            assert int(r.get(f"limits:concurrency:{role}") or 0) == 0
+
+    def test_reconcile_noop_when_clean(self):
+        import fakeredis
+        from event_bus import limits
+        assert limits.reconcile_slots(fakeredis.FakeRedis()) == {}
