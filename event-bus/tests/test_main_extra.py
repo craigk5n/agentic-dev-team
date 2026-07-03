@@ -1698,11 +1698,42 @@ class TestWatchdog:
         stuck = self._story("in-progress", 1000, id="sX")
         with patch.object(m, "list_items", return_value=[stuck]), \
              patch.object(m, "update_state") as upd, \
-             patch.object(m, "_dispatch_next_ready") as disp, \
              patch.object(m, "_clear_recovery_keys"):
             m._sweep_stuck_stories()
-        upd.assert_any_call("sX", "ready")     # reset the dead coder
-        disp.assert_called_once()
+        upd.assert_any_call("sX", "ready")     # reset the dead coder (chain re-dispatches)
+
+    def test_requeue_open_pr_reenqueues_verdicts(self, monkeypatch):
+        # Regression: this path used to raise NameError (undefined item_id) and never ran.
+        import event_bus.main as m
+        monkeypatch.setattr(m, "_redis_conn", fakeredis.FakeRedis())
+        item = self._story("in-review", 700, id="sO", pr_url="http://f/o/r/pulls/7")
+        fake_fj = MagicMock()
+        fake_fj.__enter__.return_value.get.return_value = {"merged": False, "head": {"sha": "abc", "ref": "b"}, "base": {"ref": "main"}}
+        q = MagicMock()
+        with patch("coding_agent.forgejo_client.ForgejoClient", return_value=fake_fj), \
+             patch.object(m, "_queue_or_503", return_value=q), \
+             patch.object(m, "update_state") as upd, \
+             patch.object(m, "_clear_recovery_keys"):
+            assert m._requeue_pr_verdicts(item) is True
+        q.enqueue.assert_called_once()          # verdicts re-run
+        upd.assert_any_call("sO", "in-review")
+
+    def test_requeue_merged_pr_advances_to_done(self, monkeypatch):
+        # Lost post-merge advancement: PR already merged → advance, don't re-review.
+        import event_bus.main as m
+        monkeypatch.setattr(m, "_redis_conn", fakeredis.FakeRedis())
+        item = self._story("in-review", 700, id="sM", pr_url="http://f/o/r/pulls/9")
+        fake_fj = MagicMock()
+        fake_fj.__enter__.return_value.get.return_value = {"merged": True, "head": {}, "base": {}}
+        q = MagicMock()
+        with patch("coding_agent.forgejo_client.ForgejoClient", return_value=fake_fj), \
+             patch.object(m, "_queue_or_503", return_value=q), \
+             patch.object(m, "update_state") as upd, \
+             patch.object(m, "unlock_next_story") as unlock:
+            assert m._requeue_pr_verdicts(item) is True
+        upd.assert_any_call("sM", "done")       # advanced, not re-reviewed
+        unlock.assert_called_once_with("sM")
+        q.enqueue.assert_not_called()
 
     def test_sweep_recovers_stuck_in_review_via_verdict_requeue(self, monkeypatch):
         import event_bus.main as m

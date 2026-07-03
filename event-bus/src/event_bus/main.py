@@ -240,15 +240,15 @@ def _running_jobs_by_pr() -> dict[tuple[str, int], dict]:
 
 
 def _requeue_pr_verdicts(item: dict) -> bool:
-    """Re-run review+tests+CI on the story's PR head (verdicts got lost). Same path as
-    the operator Retry button. Returns True if requeued."""
+    """Recover a story stuck in in-review / changes-requested. If its PR already merged
+    (a lost post-merge notification), advance it to done; otherwise re-run its verdicts.
+    Runs in the watchdog worker thread, so it uses only thread-safe ops (redis + RQ +
+    the DB — no asyncio)."""
     parts = _pr_url_parts(item.get("pr_url") or "")
     if not parts:
         return False
     repo_full_name, pr_number = parts
     owner, repo_name = repo_full_name.split("/", 1)
-    _clear_recovery_keys(item)
-    _clear_watchdog_state(item_id)
     try:
         from coding_agent.forgejo_client import ForgejoClient as CFJ
         from coding_agent.config import settings as cs
@@ -257,6 +257,17 @@ def _requeue_pr_verdicts(item: dict) -> bool:
     except Exception as exc:
         log.warning("watchdog_pr_fetch_failed", id=item["id"], error=str(exc)[:120])
         return False
+    # Self-heal a lost post-merge advancement: the PR merged but the story never left
+    # in-review. Advance it to done rather than pointlessly re-reviewing a merged PR
+    # (a merged PR already passed CI, since the gate waits for CI before merging).
+    if pr.get("merged"):
+        log.info("watchdog_pr_already_merged", id=item["id"], pr=pr_number)
+        _clear_watchdog_state(item["id"])
+        update_state(item["id"], "done")
+        unlock_next_story(item["id"])
+        return True
+    # Otherwise re-run review + tests + CI on the PR head (RQ enqueue is thread-safe).
+    _clear_recovery_keys(item)
     head = pr.get("head") or {}
     from event_bus.jobs.handlers import handle_pr_event
     _queue_or_503().enqueue(
@@ -289,12 +300,15 @@ def _sweep_stuck_stories() -> None:
             continue
         log.warning("watchdog_recovering", id=s["id"], state=s["state"],
                     attempt=n, age_secs=int(_story_age_secs(s)))
-        if s["state"] == "in-progress":
-            _clear_recovery_keys(s)
-            update_state(s["id"], "ready")
-            _dispatch_next_ready()
-        else:  # in-review / changes-requested with a PR → re-run verdicts
-            _requeue_pr_verdicts(s)
+        # Recover one story; a failure here must not abort the rest of the sweep.
+        try:
+            if s["state"] == "in-progress":
+                _clear_recovery_keys(s)
+                update_state(s["id"], "ready")  # coder slot-release chain will dispatch it
+            else:  # in-review / changes-requested with a PR → re-run verdicts / advance
+                _requeue_pr_verdicts(s)
+        except Exception as exc:
+            log.warning("watchdog_recover_failed", id=s["id"], error=str(exc)[:160])
 
 
 async def _watchdog_loop() -> None:
