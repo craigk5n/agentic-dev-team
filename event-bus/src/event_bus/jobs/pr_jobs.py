@@ -56,6 +56,7 @@ def _capture_verdict(r, role: str, model: str, prior: str, result: dict, ms) -> 
     a flip when a re-review changed the verdict, and call latency. Best-effort."""
     try:
         from event_bus.outcomes import record_outcome, record_latency
+        from event_bus import ratelimit
         m = model or "(default)"
         status = (result or {}).get("status", "")
         if status in ("pass", "fail"):
@@ -65,6 +66,11 @@ def _capture_verdict(r, role: str, model: str, prior: str, result: dict, ms) -> 
         else:
             outcome = "error"
         record_outcome(r, role, m, outcome)
+        # Feed the rate-limit circuit breaker: a 429 arms it, a real verdict clears it.
+        if outcome == "rate_limited" and model:
+            ratelimit.trip(r, model)
+        elif outcome in ("pass", "fail") and model:
+            ratelimit.clear(r, model)
         if prior in ("pass", "fail") and status in ("pass", "fail") and prior != status:
             record_outcome(r, role, m, "flip")   # a re-review changed its mind
         if ms is not None:

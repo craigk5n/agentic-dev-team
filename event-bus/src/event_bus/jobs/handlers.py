@@ -112,6 +112,14 @@ def handle_pr_event(
     # re-deadlocks. Set by internal_recode_for_pr when the recode cap is exhausted.
     esc = r.get(f"escalate_pr:{repo_full_name}:{pr_number}")
     reviewer_model = (esc.decode() if esc else "") or config.models.reviewer
+    # Rate-limit circuit breaker: if any verdict model is paused (429), HOLD the whole
+    # fan-out rather than enqueue a partial set (which would never aggregate). The story
+    # stays in-review and the watchdog re-queues once the breaker clears — no false stuck.
+    from event_bus import ratelimit
+    if any(ratelimit.is_tripped(r, vm)
+           for vm in (reviewer_model, config.models.tester, config.models.security) if vm):
+        log.warning("pr_event_rate_limit_hold", repo=repo_full_name, pr=pr_number)
+        return {"status": "rate_limit_hold", "reason": "a verdict model is rate-limited"}
     jobs = []
     if reviewer_ok:
         jobs.append(q.enqueue(run_code_reviewer, **base_kwargs,

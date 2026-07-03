@@ -282,8 +282,20 @@ def _sweep_stuck_stories() -> None:
     """One watchdog pass: recover stories stuck past their budget, capped per story."""
     if _redis_conn is None:
         return
+    from event_bus import ratelimit
+    from event_bus.config_store import get_config
+    _cfg = get_config(_redis_conn)
+    _coder_m = _cfg.models.coder
+    _verdict_ms = [_cfg.models.reviewer, _cfg.models.tester, _cfg.models.security]
     stuck = [s for s in list_items(item_type="story") if is_story_stuck(s)]
     for s in stuck:
+        # A story whose needed model is rate-limit-paused is *waiting*, not stuck — don't
+        # count it against the watchdog cap or flag it for a human; it resumes on recovery.
+        if s["state"] == "in-progress":
+            if _coder_m and ratelimit.is_tripped(_redis_conn, _coder_m):
+                continue
+        elif any(m and ratelimit.is_tripped(_redis_conn, m) for m in _verdict_ms):
+            continue
         key = f"watch_attempts:{s['id']}"
         try:
             n = _redis_conn.incr(key)
@@ -723,6 +735,11 @@ def _fetch_verdicts(pr_url: str) -> dict:
         return {}
 
 
+def _rate_limited_from_ratelimit() -> list:
+    from event_bus import ratelimit
+    return ratelimit.tripped_models(_redis_conn)
+
+
 @app.get("/api/items")
 async def list_work_items(response: Response):
     """Return all work items grouped by state with state metadata."""
@@ -763,6 +780,9 @@ async def list_work_items(response: Response):
             for state, items in groups.items()
         ],
         "total": sum(len(v) for v in groups.values()),
+        # Models currently paused by the rate-limit circuit breaker → drives the "paused"
+        # banner so the operator sees the fleet is waiting (auto-retrying), not dead.
+        "rate_limited": _rate_limited_from_ratelimit(),
     }
 
 
@@ -1311,6 +1331,14 @@ def _run_coding_agent_sandboxed_sync(
             pass
 
 
+def _looks_rate_limited_text(s: str) -> bool:
+    """True if an error string reflects a provider 429 / rate-limit (used to arm the
+    circuit breaker on the coder path)."""
+    t = (s or "").lower()
+    return ("429" in t or "rate-limit" in t or "rate limit" in t
+            or "ratelimit" in t or "temporarily rate" in t)
+
+
 async def _run_coding_agent(item_id: str, title: str, description: str, story_prompt: str = "") -> None:
     """Run the Coding Agent in a thread; update state and PR URL on completion."""
     # Cost backstop — leave the story in ready so it resumes when budget frees up
@@ -1325,6 +1353,13 @@ async def _run_coding_agent(item_id: str, title: str, description: str, story_pr
             _redis_conn.setex(f"coder_model:{item_id}", 30 * 86_400, coder_model)
         except Exception:
             pass
+    # Rate-limit hold — if the coder model is paused (429), leave the story ready and
+    # come back when the breaker clears, rather than burning a doomed run.
+    from event_bus import ratelimit
+    if coder_model and ratelimit.is_tripped(_redis_conn, coder_model):
+        log.info("coder_rate_limit_hold", id=item_id, model=coder_model)
+        update_state(item_id, "ready")
+        return
     if over_budget(_redis_conn, cfg.limits.max_cost_usd_daily):
         log.warning("coder_skipped_cost_cap", id=item_id)
         update_state(item_id, "ready")
@@ -1376,7 +1411,11 @@ async def _run_coding_agent(item_id: str, title: str, description: str, story_pr
                                              install_command=stack.install_command, log_line=log_cb)
     except Exception as exc:
         log.error("coding_agent_failed", id=item_id, error=str(exc))
-        update_state(item_id, "ready")  # unclaim so it can be retried
+        # A clear provider 429 (opencode raised on it) arms the breaker so the fleet
+        # pauses instead of hammering a rate-limited model.
+        if coder_model and _looks_rate_limited_text(str(exc)):
+            ratelimit.trip(_redis_conn, coder_model)
+        update_state(item_id, "ready")  # unclaim so it can be retried / resumed
         _coder_slot_release_and_dispatch()
         return
     finally:
@@ -1390,6 +1429,7 @@ async def _run_coding_agent(item_id: str, title: str, description: str, story_pr
         if _redis_conn:
             try: _redis_conn.delete(_err_key)   # clear the transient-error streak
             except Exception: pass
+        ratelimit.clear(_redis_conn, coder_model)   # the model is healthy
         log.info("coding_agent_complete", id=item_id, pr=result.get("pr_url"))
     elif result.get("status") == "error":
         # Agent crashed / the model failed (e.g. rate-limit) — retry, but cap the streak so
@@ -1416,6 +1456,7 @@ async def _run_coding_agent(item_id: str, title: str, description: str, story_pr
         if _redis_conn:
             try: _redis_conn.delete(_err_key)
             except Exception: pass
+        ratelimit.clear(_redis_conn, coder_model)   # the model is healthy
         update_state(item_id, "done")
         unlock_next_story(item_id)  # backlog → ready; release+dispatch below will trigger it
 
