@@ -30,6 +30,49 @@ def _redis_and_limits():
         return None, LimitsConfig()
 
 
+_VERDICT_CHECK = {"reviewer": "code_review", "tester": "test_run", "security": "security"}
+
+
+def _verdict_status(r, repo_full_name: str, pr_number: int, check: str) -> str:
+    """Current stored verdict status for a PR+check, or '' — used to detect flips."""
+    try:
+        import json
+        owner, repo = repo_full_name.split("/", 1)
+        raw = r.get(f"pr_verdict:{owner}:{repo}:{pr_number}:{check}")
+        if raw:
+            return json.loads(raw).get("status", "")
+    except Exception:
+        pass
+    return ""
+
+
+def _looks_rate_limited(result: dict) -> bool:
+    t = (str((result or {}).get("reason", "")) + str((result or {}).get("error", ""))).lower()
+    return "429" in t or "rate limit" in t or "rate_limit" in t or "ratelimit" in t
+
+
+def _capture_verdict(r, role: str, model: str, prior: str, result: dict, ms) -> None:
+    """Record a verdict's Metrics signals: reliability (pass/fail vs error/rate_limited),
+    a flip when a re-review changed the verdict, and call latency. Best-effort."""
+    try:
+        from event_bus.outcomes import record_outcome, record_latency
+        m = model or "(default)"
+        status = (result or {}).get("status", "")
+        if status in ("pass", "fail"):
+            outcome = status
+        elif _looks_rate_limited(result):
+            outcome = "rate_limited"
+        else:
+            outcome = "error"
+        record_outcome(r, role, m, outcome)
+        if prior in ("pass", "fail") and status in ("pass", "fail") and prior != status:
+            record_outcome(r, role, m, "flip")   # a re-review changed its mind
+        if ms is not None:
+            record_latency(r, role, m, ms)
+    except Exception:
+        pass
+
+
 def run_code_reviewer(
     repo_full_name: str,
     pr_number: int,
@@ -48,9 +91,12 @@ def run_code_reviewer(
     if not acquire_slot(r, "reviewer", lim.max_concurrent_reviewer):
         return {"status": "error", "role": "code_review", "reason": "concurrency_limit_exceeded"}
 
+    import time as _t
+    prior = _verdict_status(r, repo_full_name, pr_number, "code_review")
+    t0 = _t.monotonic()
     try:
         from reviewer.code_review import run_code_review
-        return get_sandbox().run(
+        res = get_sandbox().run(
             run_code_review,
             repo_full_name=repo_full_name,
             pr_number=pr_number,
@@ -62,8 +108,11 @@ def run_code_reviewer(
             task_prompt=task_prompt,
             stack=stack,
         )
+        _capture_verdict(r, "reviewer", model_override, prior, res, (_t.monotonic() - t0) * 1000)
+        return res
     except ImportError:
         log.error("reviewer_not_installed")
+        _capture_verdict(r, "reviewer", model_override, prior, {"status": "error"}, None)
         return {"status": "error", "role": "code_review", "reason": "reviewer package not available"}
     finally:
         release_slot(r, "reviewer")
@@ -85,9 +134,12 @@ def run_tester(
     if not acquire_slot(r, "tester", lim.max_concurrent_tester):
         return {"status": "error", "role": "test_run", "reason": "concurrency_limit_exceeded"}
 
+    import time as _t
+    prior = _verdict_status(r, repo_full_name, pr_number, "test_run")
+    t0 = _t.monotonic()
     try:
         from reviewer.test_runner import run_tests
-        return get_sandbox().run(
+        res = get_sandbox().run(
             run_tests,
             repo_full_name=repo_full_name,
             pr_number=pr_number,
@@ -97,8 +149,11 @@ def run_tester(
             model_override=model_override,
             stack=stack,
         )
+        _capture_verdict(r, "tester", model_override, prior, res, (_t.monotonic() - t0) * 1000)
+        return res
     except ImportError:
         log.error("reviewer_not_installed")
+        _capture_verdict(r, "tester", model_override, prior, {"status": "error"}, None)
         return {"status": "error", "role": "test_run", "reason": "reviewer package not available"}
     finally:
         release_slot(r, "tester")
@@ -119,9 +174,12 @@ def run_security_scanner(
     if not acquire_slot(r, "security", lim.max_concurrent_security):
         return {"status": "error", "role": "security", "reason": "concurrency_limit_exceeded"}
 
+    import time as _t
+    prior = _verdict_status(r, repo_full_name, pr_number, "security")
+    t0 = _t.monotonic()
     try:
         from reviewer.security_scan import run_security_scan
-        return get_sandbox().run(
+        res = get_sandbox().run(
             run_security_scan,
             repo_full_name=repo_full_name,
             pr_number=pr_number,
@@ -130,8 +188,11 @@ def run_security_scanner(
             head_ref=head_ref,
             model_override=model_override,
         )
+        _capture_verdict(r, "security", model_override, prior, res, (_t.monotonic() - t0) * 1000)
+        return res
     except ImportError:
         log.error("reviewer_not_installed")
+        _capture_verdict(r, "security", model_override, prior, {"status": "error"}, None)
         return {"status": "error", "role": "security", "reason": "reviewer package not available"}
     finally:
         release_slot(r, "security")

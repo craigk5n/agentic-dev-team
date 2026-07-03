@@ -185,6 +185,59 @@ def is_story_stuck(item: dict) -> bool:
     return False
 
 
+# Human-friendly labels for the agent-jobs functions, so a card can say "reviewing…"
+# rather than "run_code_reviewer". Keyed by the bare function name.
+_JOB_LABELS = {
+    "run_code_reviewer": "reviewing",
+    "run_tester": "running tests",
+    "run_security_scanner": "security scan",
+    "handle_pr_event": "dispatching",
+    "do_merge_pr": "merging",
+}
+
+
+def _running_jobs_by_pr() -> dict[tuple[str, int], dict]:
+    """Map (repo_full_name, pr_number) → {'label', 'state'} for jobs currently executing
+    or queued on the agent-jobs queue.
+
+    Verdict jobs (reviewer/tester/security) run while the story sits in in-review /
+    changes-requested — its status never changes, so the board otherwise shows only a
+    static badge and looks frozen while work is actually in flight. Reading RQ's live
+    registry (rather than a heartbeat key that can go stale) reflects reality directly."""
+    if _queue is None or _redis_conn is None:
+        return {}
+    try:
+        from rq.registry import StartedJobRegistry
+        from rq.job import Job
+        started = StartedJobRegistry(_queue.name, connection=_redis_conn)
+        running_ids = list(started.get_job_ids())
+        queued_ids = list(_queue.job_ids)
+    except Exception:
+        return {}
+
+    def _label(func_name: str) -> str:
+        base = (func_name or "").rsplit(".", 1)[-1]
+        return _JOB_LABELS.get(base, base or "working")
+
+    out: dict[tuple[str, int], dict] = {}
+    # Running first so it wins over a queued job for the same PR.
+    for jid, jstate in ([(j, "running") for j in running_ids]
+                        + [(j, "queued") for j in queued_ids]):
+        try:
+            job = Job.fetch(jid, connection=_redis_conn)
+        except Exception:
+            continue
+        kw = job.kwargs or {}
+        repo, pr = kw.get("repo_full_name"), kw.get("pr_number")
+        if not repo or pr is None:
+            continue
+        key = (repo, int(pr))
+        if out.get(key, {}).get("state") == "running":
+            continue  # keep the running label already recorded
+        out[key] = {"label": _label(job.func_name), "state": jstate}
+    return out
+
+
 def _requeue_pr_verdicts(item: dict) -> bool:
     """Re-run review+tests+CI on the story's PR head (verdicts got lost). Same path as
     the operator Retry button. Returns True if requeued."""
@@ -661,6 +714,7 @@ async def list_work_items(response: Response):
     response.headers["Cache-Control"] = "no-store"
     groups = grouped_items()
     _active = ("in-progress", "in-review", "changes-requested")
+    running_by_pr = _running_jobs_by_pr()  # (repo, pr) → live/queued agent job
     # Enrich items with live verdict data + runtime signals (elapsed / stale / stuck).
     for items in groups.values():
         for item in items:
@@ -670,10 +724,20 @@ async def list_work_items(response: Response):
                 item["age_secs"] = int(_story_age_secs(item))
                 item["stale"] = is_story_stuck(item)        # past its budget (amber)
                 item["stuck"] = bool(_redis_conn and _redis_conn.get(f"stuck:{item['id']}"))
+                # A live verdict job for this PR means work is in flight even though the
+                # story status hasn't moved — surface it so the card shows "reviewing…".
+                parts = _pr_url_parts(item.get("pr_url") or "")
+                if parts and parts in running_by_pr:
+                    item["running_job"] = running_by_pr[parts]
             elif item.get("type") == "story" and item.get("state") == "done":
                 dur = _duration_secs(item.get("started_at"), item.get("updated_at"))
                 if dur is not None:
                     item["duration_secs"] = int(dur)
+                    # Historical stories were backfilled with an estimated start time
+                    # (they predate started_at stamping) — flag so the pill reads "~".
+                    item["duration_approx"] = bool(
+                        _redis_conn and _redis_conn.get(f"approx_duration:{item['id']}")
+                    )
     return {
         "groups": [
             {
@@ -1149,6 +1213,7 @@ def _run_coding_agent_sandboxed_sync(
     coder_image: str = "",
     test_command: str = "",
     install_command: str = "",
+    model: str = "",
 ) -> dict:
     """Blocking: spawn an ephemeral Docker container for one coding agent run.
     Returns the result dict from sandbox_runner (same shape as run_coding_agent).
@@ -1158,6 +1223,8 @@ def _run_coding_agent_sandboxed_sync(
     client = _docker_sdk.from_env()
 
     env = {k: _os.environ[k] for k in _CODER_SANDBOX_ENV if k in _os.environ}
+    if model:
+        env["MODEL_CODER"] = model   # runtime-config override wins over the container env
     env.update({
         "STORY_ID": item_id,
         "STORY_TITLE": title[:500],
@@ -1233,6 +1300,16 @@ async def _run_coding_agent(item_id: str, title: str, description: str, story_pr
     """Run the Coding Agent in a thread; update state and PR URL on completion."""
     # Cost backstop — leave the story in ready so it resumes when budget frees up
     cfg = get_config(_redis_or_503())
+    # Runtime config wins over the env default so the coder model is switchable live from
+    # the Config tab (the sandbox otherwise reads only MODEL_CODER from the container env).
+    coder_model = cfg.models.coder or _os.environ.get("MODEL_CODER", "")
+    # Remember which coder model built this story so its eventual outcome (merged /
+    # abandoned / escalated) can be attributed to the right model in the Metrics tab.
+    if _redis_conn and coder_model:
+        try:
+            _redis_conn.setex(f"coder_model:{item_id}", 30 * 86_400, coder_model)
+        except Exception:
+            pass
     if over_budget(_redis_conn, cfg.limits.max_cost_usd_daily):
         log.warning("coder_skipped_cost_cap", id=item_id)
         update_state(item_id, "ready")
@@ -1261,12 +1338,14 @@ async def _run_coding_agent(item_id: str, title: str, description: str, story_pr
     log_cb = _make_log_cb(item_id)
     log.info("coding_agent_dispatch", id=item_id, mode=settings.sandbox_mode,
              stack=stack.id, coder_image=stack.coder_image)
+    import time as _timing
+    _coder_t0 = _timing.monotonic()
     try:
         if settings.sandbox_mode == "docker":
             result = await asyncio.to_thread(
                 _run_coding_agent_sandboxed_sync,
                 item_id, title, description, story_prompt, log_cb, stack.coder_image,
-                stack.test_command, stack.install_command,
+                stack.test_command, stack.install_command, coder_model,
             )
         else:
             try:
@@ -1303,21 +1382,91 @@ async def _run_coding_agent(item_id: str, title: str, description: str, story_pr
         update_state(item_id, "done")
         unlock_next_story(item_id)  # backlog → ready; release+dispatch below will trigger it
 
-    # Record coder call — opencode runs as subprocess so no token counts available
-    if _redis_conn:
+    # Record coder usage. opencode runs as a subprocess and doesn't report exact token
+    # counts, so cost is an ESTIMATE from the prompt + captured output priced at the
+    # model's OpenRouter rate (free models → $0). Better than the previous $0/calls-only.
+    _record_coder_usage(coder_model or "opencode", story_prompt, description, result, stack.id)
+    if _redis_conn and coder_model:
         try:
-            from coding_agent.config import settings as _cs
-            model = _cs.model_coder or "opencode"
-            import time
-            key = f"telemetry:llm:{time.strftime('%Y-%m-%d')}"
-            prefix = f"coder:{model}"
-            _redis_conn.hincrby(key, f"{prefix}:calls", 1)
-            _redis_conn.expire(key, 30 * 86_400)
+            from event_bus.outcomes import record_latency
+            record_latency(_redis_conn, "coder", coder_model, (_timing.monotonic() - _coder_t0) * 1000)
         except Exception:
             pass
 
     # Release slot and trigger next queued story (after all state updates are done)
     _coder_slot_release_and_dispatch()
+
+
+def _record_coder_usage(model: str, story_prompt: str, description: str,
+                        result: dict, stack: str = "") -> None:
+    """Record coder token/cost telemetry for one opencode run.
+
+    opencode is a subprocess that doesn't surface exact token counts, so this is a
+    best-effort ESTIMATE: tokens ≈ chars/4 over the prompt sent and the captured output,
+    priced at the model's OpenRouter per-token rate (free models → $0). It under-counts
+    opencode's internal multi-turn context, but it makes coder spend visible in telemetry
+    and feed the daily cost cap instead of silently reporting $0. Written in the same
+    telemetry:llm:{date} schema as the litellm-backed roles so it aggregates uniformly."""
+    if _redis_conn is None:
+        return
+    try:
+        in_tok = (len(story_prompt or "") + len(description or "")) // 4
+        out_tok = len(str((result or {}).get("summary") or "")) // 4
+        cost = 0.0
+        try:
+            from event_bus.models_catalog import get_model_meta
+            meta = get_model_meta(_redis_conn, model) or {}
+            cost = (in_tok * float(meta.get("price_prompt") or 0.0)
+                    + out_tok * float(meta.get("price_completion") or 0.0))
+        except Exception:
+            pass
+        import time
+        date = time.strftime("%Y-%m-%d", time.gmtime())
+        key = f"telemetry:llm:{date}"
+        prefix = f"coder:{model}"
+        pipe = _redis_conn.pipeline()
+        pipe.hincrbyfloat(key, f"{prefix}:cost_usd", cost)
+        pipe.hincrby(key, f"{prefix}:input_tokens", in_tok)
+        pipe.hincrby(key, f"{prefix}:output_tokens", out_tok)
+        pipe.hincrby(key, f"{prefix}:calls", 1)
+        pipe.expire(key, 30 * 86_400)
+        if stack:
+            skey = f"telemetry:stack:{date}"
+            pipe.hincrbyfloat(skey, f"{stack}:cost_usd", cost)
+            pipe.hincrby(skey, f"{stack}:input_tokens", in_tok)
+            pipe.hincrby(skey, f"{stack}:output_tokens", out_tok)
+            pipe.hincrby(skey, f"{stack}:calls", 1)
+            pipe.expire(skey, 30 * 86_400)
+        pipe.execute()
+    except Exception:
+        pass
+
+
+def _record_coder_outcome(item_id: str, outcome: str) -> None:
+    """Attribute a story's terminal outcome (merged/abandoned/escalated/first_pass) to
+    the coder model that built it, for the Metrics tab. Best-effort."""
+    if _redis_conn is None:
+        return
+    try:
+        m = _redis_conn.get(f"coder_model:{item_id}")
+        model = m.decode() if isinstance(m, bytes) else m
+        if not model:
+            return
+        from event_bus.outcomes import record_outcome
+        record_outcome(_redis_conn, "coder", model, outcome)
+    except Exception:
+        pass
+
+
+def _mark_reworked(item_id: str) -> None:
+    """Flag a story as having needed a recode/escalation, so it doesn't count as
+    first-pass when it eventually merges."""
+    if _redis_conn is None:
+        return
+    try:
+        _redis_conn.setex(f"story_reworked:{item_id}", 30 * 86_400, b"1")
+    except Exception:
+        pass
 
 
 def _post_pr_comment(repo_full_name: str, pr_number: int, body: str) -> bool:
@@ -1535,6 +1684,11 @@ def _on_story_merged(item_id: str, repo_full_name: str = "") -> dict | None:
     """A PR merged → 'merged' is transient; post-merge CI on main decides done vs fix.
     The next story is NOT unlocked until this one reaches 'done' (CI-verified main)."""
     updated = update_state(item_id, "merged")
+    # Coder success: the PR was good enough to merge. Credit first_pass only if the
+    # story never needed a recode/escalation on its way here.
+    _record_coder_outcome(item_id, "merged")
+    if _redis_conn and not _redis_conn.get(f"story_reworked:{item_id}"):
+        _record_coder_outcome(item_id, "first_pass")
     repo = repo_full_name or get_repo_for_story(item_id)
     asyncio.create_task(_await_post_merge_ci(item_id, repo))
     return updated
@@ -1591,6 +1745,8 @@ async def internal_recode_for_pr(payload: dict):
                 f"⬆️ **Auto-escalating to a stronger model** (`{esc_model}`) after {cap} failed "
                 "attempts — retrying the coder and re-reviewing on the next push.")
             log.warning("story_escalated", item_id=item["id"], pr=pr_number, model=esc_model)
+            _record_coder_outcome(item["id"], "escalated")
+            _mark_reworked(item["id"])
             # fall through: run the recode now with the escalated coder model
         else:
             escalated = bool(r.get(esc_key))
@@ -1603,8 +1759,10 @@ async def internal_recode_for_pr(payload: dict):
                 "failing — this PR needs human attention.")
             update_state(item["id"], "changes-requested")
             r.setex(f"stuck:{item['id']}", 86_400, b"1")   # surface in the attention tray
+            _record_coder_outcome(item["id"], "abandoned")
             return {"status": "retry_cap_reached", "retries": retries,
                     "item_id": item["id"], "escalated": escalated}
+    _mark_reworked(item["id"])   # any recode means this story is no longer first-pass
     r.setex(retry_key, 86400, retries + 1)
 
     owner, repo_name = repo_full_name.split("/", 1)
@@ -1786,6 +1944,7 @@ async def abandon_item(item_id: str):
         raise HTTPException(status_code=409, detail="only stories can be abandoned")
     if item["state"] in ("done", "abandoned"):
         raise HTTPException(status_code=409, detail=f"story is already '{item['state']}'")
+    _record_coder_outcome(item_id, "abandoned")   # before clearing coder attribution
     _clear_recovery_keys(item)
     updated = update_state(item_id, "abandoned")
     unlock_next_story(item_id)
@@ -2138,6 +2297,136 @@ async def get_telemetry(days: int = 7):
     cfg = get_config(r)
     summary["free_quota"] = free_quota_status(r, cfg.limits.max_free_requests_daily)
     return summary
+
+
+_ROLE_ORDER = {"coder": 0, "reviewer": 1, "tester": 2, "security": 3, "planner": 4, "idea": 5}
+
+
+@app.get("/api/metrics")
+async def get_metrics(days: int = 30):
+    """Per-model success + usage metrics for the Metrics tab. Joins volume/cost
+    (telemetry:llm) with outcomes (telemetry:outcome) on (role, model), and derives
+    the rates that inform model choice: coder success/first-pass/escalation +
+    cost-per-success; verdict-role reliability (produced a verdict vs errored)."""
+    r = _redis_or_503()
+    from reviewer.telemetry import read_all
+    from event_bus.outcomes import read_outcomes, read_latency
+
+    vol: dict = {}
+    for rec in read_all(r, days=days):
+        key = (rec["role"], rec["model"])
+        v = vol.setdefault(key, {"cost_usd": 0.0, "input_tokens": 0, "output_tokens": 0, "calls": 0})
+        for f in ("cost_usd", "input_tokens", "output_tokens", "calls"):
+            v[f] += rec.get(f, 0)
+    outs = read_outcomes(r, days=days)
+    lat = read_latency(r, days=days)
+
+    def _rate(num, den):
+        return round(num / den, 3) if den else None
+
+    models = []
+    for (role, model) in set(vol) | set(outs) | set(lat):
+        v = vol.get((role, model), {})
+        o = outs.get((role, model), {})
+        entry = {
+            "role": role, "model": model or "(default)",
+            "calls": int(v.get("calls", 0)),
+            "cost_usd": round(v.get("cost_usd", 0.0), 6),
+            "input_tokens": int(v.get("input_tokens", 0)),
+            "output_tokens": int(v.get("output_tokens", 0)),
+            "avg_latency_ms": lat.get((role, model)),
+            "outcomes": o,
+        }
+        if role == "coder":
+            merged, abandoned = o.get("merged", 0), o.get("abandoned", 0)
+            total = merged + abandoned
+            entry["completed"] = merged
+            entry["success_rate"] = _rate(merged, total)
+            entry["first_pass_rate"] = _rate(o.get("first_pass", 0), merged)
+            entry["escalation_rate"] = _rate(o.get("escalated", 0), total)
+            entry["cost_per_success"] = round(v.get("cost_usd", 0.0) / merged, 4) if merged else None
+        elif role in ("reviewer", "tester", "security"):
+            p, f, e, rl = o.get("pass", 0), o.get("fail", 0), o.get("error", 0), o.get("rate_limited", 0)
+            attempts = p + f + e + rl
+            entry["verdicts"] = p + f
+            entry["reliability"] = _rate(p + f, attempts)
+            entry["pass_rate"] = _rate(p, p + f)
+            entry["flip_rate"] = _rate(o.get("flip", 0), p + f)          # #4 re-review changed its mind
+            entry["rate_limit_rate"] = _rate(rl, attempts)               # #5 provider 429 share
+        models.append(entry)
+
+    models.sort(key=lambda m: (_ROLE_ORDER.get(m["role"], 9), -m["calls"]))
+
+    # ── Daily trend + per-model sparklines (single pass over the daily LLM hashes) ──
+    import time
+    now = time.time()
+    dates = [time.strftime("%Y-%m-%d", time.gmtime(now - i * 86_400)) for i in range(days)]
+    dates.reverse()  # oldest → newest
+    team_day = {d: {"calls": 0, "cost_usd": 0.0} for d in dates}
+    model_daily: dict = {}
+    for d in dates:
+        for field, val in r.hgetall(f"telemetry:llm:{d}").items():
+            field = field.decode() if isinstance(field, bytes) else field
+            rm, _, metric = field.rpartition(":")
+            role, _, model = rm.partition(":")   # model may itself contain ':'
+            if not model:
+                continue
+            if metric == "calls":
+                team_day[d]["calls"] += int(val)
+                model_daily.setdefault((role, model), {})[d] = \
+                    model_daily.get((role, model), {}).get(d, 0) + int(val)
+            elif metric == "cost_usd":
+                team_day[d]["cost_usd"] += float(val)
+    for m in models:
+        m["spark"] = [model_daily.get((m["role"], m["model"]), {}).get(d, 0) for d in dates]
+
+    # ── Per-stack success + throughput (from work items, so it includes history) ──
+    stories = list_items(item_type="story")
+    by_stack: dict = {}
+    durs = []
+    comp_by_date: dict = {}
+    for s in stories:
+        state = s.get("state")
+        st = by_stack.setdefault(s.get("stack") or "(none)",
+                                 {"done": 0, "abandoned": 0, "in_flight": 0, "cyc": []})
+        if state == "done":
+            st["done"] += 1
+            d = _duration_secs(s.get("started_at"), s.get("updated_at"))
+            if d is not None:
+                st["cyc"].append(d); durs.append(d)
+            if s.get("updated_at"):
+                day = str(s["updated_at"])[:10]
+                comp_by_date[day] = comp_by_date.get(day, 0) + 1
+        elif state == "abandoned":
+            st["abandoned"] += 1
+        elif state in ("in-progress", "in-review", "changes-requested", "ready", "backlog"):
+            st["in_flight"] += 1
+
+    stacks = []
+    for name, st in by_stack.items():
+        total = st["done"] + st["abandoned"]
+        stacks.append({
+            "stack": name, "done": st["done"], "abandoned": st["abandoned"],
+            "in_flight": st["in_flight"],
+            "success_rate": round(st["done"] / total, 3) if total else None,
+            "avg_cycle_secs": round(sum(st["cyc"]) / len(st["cyc"])) if st["cyc"] else None,
+        })
+    stacks.sort(key=lambda x: -(x["done"] + x["abandoned"] + x["in_flight"]))
+
+    trend = [{"date": d, "calls": team_day[d]["calls"],
+              "cost_usd": round(team_day[d]["cost_usd"], 4),
+              "completed": comp_by_date.get(d, 0)} for d in dates]
+    avg_cycle = round(sum(durs) / len(durs)) if durs else None
+
+    return {
+        "days": days,
+        "models": models,
+        "coder_compare": [m for m in models if m["role"] == "coder"],
+        "avg_cycle_secs": avg_cycle,
+        "completed_stories": len(durs),
+        "trend": trend,
+        "by_stack": stacks,
+    }
 
 
 @app.get("/metrics")

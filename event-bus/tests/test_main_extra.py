@@ -1799,3 +1799,96 @@ class TestAutoEscalate:
         monkeypatch.setattr("event_bus.main._redis_conn", fakeredis.FakeRedis())
         resp = client.patch("/api/config", json={"models": {"escalate": "claude-code/opus"}})
         assert resp.status_code == 422    # subscription can't run the coder fleet
+
+
+class TestRunningJobsByPr:
+    """The board must show which PRs have a live agent job so a card doesn't look
+    frozen while a verdict job is actually running (regression for the 'looks stuck
+    but is reviewing' UX gap)."""
+
+    def _job(self, func, repo, pr):
+        j = MagicMock()
+        j.func_name = func
+        j.kwargs = {"repo_full_name": repo, "pr_number": pr}
+        return j
+
+    def _patch_rq(self, monkeypatch, running, queued):
+        """Wire fake RQ registry/queue/redis into main for _running_jobs_by_pr."""
+        import event_bus.main as m
+        q = MagicMock()
+        q.name = "agent-jobs"
+        q.job_ids = [j.id for j in queued]
+        monkeypatch.setattr(m, "_queue", q)
+        monkeypatch.setattr(m, "_redis_conn", MagicMock())
+        reg = MagicMock()
+        reg.get_job_ids.return_value = [j.id for j in running]
+        by_id = {j.id: j for j in (running + queued)}
+        monkeypatch.setattr("rq.registry.StartedJobRegistry", lambda *a, **k: reg)
+        monkeypatch.setattr("rq.job.Job.fetch", lambda jid, connection=None: by_id[jid])
+
+    def test_running_job_maps_to_pr_with_label(self, monkeypatch):
+        import event_bus.main as m
+        run = [self._job("event_bus.jobs.pr_jobs.run_code_reviewer", "o/r", 32)]
+        run[0].id = "j1"
+        self._patch_rq(monkeypatch, running=run, queued=[])
+        out = m._running_jobs_by_pr()
+        assert out[("o/r", 32)] == {"label": "reviewing", "state": "running"}
+
+    def test_running_wins_over_queued_for_same_pr(self, monkeypatch):
+        import event_bus.main as m
+        r = self._job("run_code_reviewer", "o/r", 7); r.id = "run"
+        qd = self._job("run_tester", "o/r", 7); qd.id = "que"
+        self._patch_rq(monkeypatch, running=[r], queued=[qd])
+        out = m._running_jobs_by_pr()
+        assert out[("o/r", 7)]["state"] == "running"
+
+    def test_queued_only_is_labelled_queued(self, monkeypatch):
+        import event_bus.main as m
+        qd = self._job("run_security_scanner", "o/r", 5); qd.id = "q"
+        self._patch_rq(monkeypatch, running=[], queued=[qd])
+        out = m._running_jobs_by_pr()
+        assert out[("o/r", 5)] == {"label": "security scan", "state": "queued"}
+
+    def test_jobs_without_pr_kwargs_ignored(self, monkeypatch):
+        import event_bus.main as m
+        j = self._job("some_other_job", None, None); j.id = "x"; j.kwargs = {}
+        self._patch_rq(monkeypatch, running=[j], queued=[])
+        assert m._running_jobs_by_pr() == {}
+
+
+class TestRecordCoderUsage:
+    """Coder cost estimate: free model → $0, paid model → non-zero, always visible."""
+
+    def _run(self, monkeypatch, model, meta):
+        import event_bus.main as m
+        import fakeredis, time
+        r = fakeredis.FakeRedis(decode_responses=True)
+        monkeypatch.setattr(m, "_redis_conn", r)
+        monkeypatch.setattr("event_bus.models_catalog.get_model_meta", lambda *_a, **_k: meta)
+        result = {"summary": "x" * 4000}  # ~1000 output tokens
+        m._record_coder_usage(model, "y" * 400, "z" * 400, result, stack="python")  # ~200 in tok
+        key = f"telemetry:llm:{time.strftime('%Y-%m-%d', time.gmtime())}"
+        return r.hgetall(key), key
+
+    def test_free_model_records_zero_cost_but_tokens_and_calls(self, monkeypatch):
+        h, _ = self._run(monkeypatch, "openrouter/qwen/qwen3-coder:free",
+                         {"price_prompt": 0.0, "price_completion": 0.0})
+        pfx = "coder:openrouter/qwen/qwen3-coder:free"
+        assert float(h[f"{pfx}:cost_usd"]) == 0.0
+        assert int(h[f"{pfx}:calls"]) == 1
+        assert int(h[f"{pfx}:output_tokens"]) == 1000     # 4000 chars / 4
+        assert int(h[f"{pfx}:input_tokens"]) == 200       # 800 chars / 4
+
+    def test_paid_model_records_nonzero_estimate(self, monkeypatch):
+        h, _ = self._run(monkeypatch, "openrouter/minimax/minimax-m2.5",
+                         {"price_prompt": 1.2e-07, "price_completion": 4.8e-07})
+        pfx = "coder:openrouter/minimax/minimax-m2.5"
+        # 200*1.2e-7 + 1000*4.8e-7 = 2.4e-5 + 4.8e-4
+        assert abs(float(h[f"{pfx}:cost_usd"]) - (200*1.2e-7 + 1000*4.8e-7)) < 1e-9
+        assert int(h[f"{pfx}:calls"]) == 1
+
+    def test_missing_meta_is_safe_zero(self, monkeypatch):
+        h, _ = self._run(monkeypatch, "openrouter/unknown/model", None)
+        pfx = "coder:openrouter/unknown/model"
+        assert float(h[f"{pfx}:cost_usd"]) == 0.0
+        assert int(h[f"{pfx}:calls"]) == 1
