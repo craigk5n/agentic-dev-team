@@ -53,9 +53,12 @@ CODER_REVIEW_FIX = """\
 
 INSTRUCTIONS:
 1. Read the existing code in the repo first.
-2. Address ALL review comments listed above — that is the primary objective.
-3. Make only the changes needed to satisfy the feedback.
-4. Do not introduce unrelated changes."""
+2. FIRST resolve every CRITICAL and HIGH finding — those block the merge and MUST be
+   fixed. Address medium/low findings too when the fix is straightforward, but never let
+   a minor nit stop you from fixing the critical ones.
+3. Many findings include a "Suggested fix" — apply it, or an equivalent correct fix.
+   Prefer the smallest change that genuinely resolves the issue.
+4. Make only the changes needed to satisfy the feedback — no unrelated changes."""
 
 REVIEWER_SYSTEM = """\
 You are a senior code reviewer. Be concise and specific. \
@@ -68,6 +71,11 @@ Review the following git diff. Identify:
 3. Missing or incorrect error handling
 4. Significant readability issues that mask bugs
 
+For EACH finding, propose a concrete fix in `suggestion` — a short corrected code
+snippet or the exact change to make — the way a helpful human reviewer leaves a
+suggestion. Keep suggestions minimal and directly applicable (the coding agent will
+apply them). It's fine to suggest the specific lines to change rather than the whole file.
+
 Diff (may be truncated):
 {diff}
 
@@ -78,7 +86,8 @@ Respond ONLY with valid JSON matching this schema exactly:
   "findings": [
     {{"severity": "critical"|"high"|"medium"|"low",
       "file": "<path>", "line": <int or null>,
-      "message": "<actionable description>"}}
+      "message": "<actionable description>",
+      "suggestion": "<concrete fix: a short corrected code snippet or the exact change>"}}
   ]
 }}
 

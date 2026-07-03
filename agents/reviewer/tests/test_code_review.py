@@ -71,3 +71,31 @@ class TestRunCodeReview:
 
         # post_pr_comment: once for the code-review result, once for aggregated summary
         assert fg.post_pr_comment.call_count >= 2
+
+
+class TestFormatReviewComment:
+    def test_renders_finding_with_inline_suggestion(self):
+        from reviewer.code_review import _format_review_comment
+        v = {"status": "fail", "summary": "issue found", "findings": [
+            {"severity": "critical", "file": "a.py", "line": 91,
+             "message": "Host header injection",
+             "suggestion": "use settings.public_host instead of request headers"}]}
+        out = _format_review_comment(v)
+        assert "**CRITICAL** `a.py:91` — Host header injection" in out
+        assert "Suggested fix: `use settings.public_host instead of request headers`" in out
+
+    def test_renders_multiline_suggestion_as_code_block(self):
+        from reviewer.code_review import _format_review_comment
+        v = {"status": "fail", "summary": "x", "findings": [
+            {"severity": "high", "file": "b.py", "line": 5, "message": "m",
+             "suggestion": "if host not in allowed:\n    raise ValueError"}]}
+        out = _format_review_comment(v)
+        assert "Suggested fix:\n```\nif host not in allowed:\n    raise ValueError\n```" in out
+
+    def test_finding_without_suggestion_still_renders(self):
+        from reviewer.code_review import _format_review_comment
+        v = {"status": "warn", "summary": "s", "findings": [
+            {"severity": "low", "file": "c.py", "line": 1, "message": "nit"}]}
+        out = _format_review_comment(v)
+        assert "**LOW** `c.py:1` — nit" in out
+        assert "Suggested fix" not in out

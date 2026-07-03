@@ -1909,6 +1909,25 @@ async def internal_recode_for_pr(payload: dict):
     review_fix_prompt = get_prompt(r, "coder.review_fix")
     log_cb = _make_log_cb(item["id"])
 
+    # Security fast-track: a CRITICAL/HIGH finding is unlikely to be fixed by the weak base
+    # model, so escalate to the strong model on the FIRST such recode rather than burning
+    # the whole recode cap on doomed attempts. Reuses the same esc_key the reviewer reads;
+    # the `not esc_key` guard means we never double-escalate.
+    if not r.get(esc_key):
+        _cfg = get_config(r)
+        if _cfg.gates.auto_escalate:
+            blob = " ".join(c.get("body", "") for c in review_comments).lower()
+            if "**critical**" in blob or "**high**" in blob:
+                esc_model = (_cfg.models.escalate or "").strip() or _DEFAULT_ESCALATE_MODEL
+                r.setex(esc_key, 7 * 86_400, esc_model)
+                log.warning("story_escalated_severity", item_id=item["id"], pr=pr_number,
+                            model=esc_model)
+                _post_pr_comment(
+                    repo_full_name, pr_number,
+                    f"⬆️ **Escalating to a stronger model** (`{esc_model}`) — a critical/high "
+                    "finding needs a stronger coder to fix.")
+                _record_coder_outcome(item["id"], "escalated")
+
     esc_coder_model = (r.get(esc_key) or b"").decode() if r.get(esc_key) else ""
 
     async def _recode_task() -> None:

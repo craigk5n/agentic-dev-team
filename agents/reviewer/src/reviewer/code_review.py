@@ -28,6 +28,13 @@ def _format_review_comment(verdict: dict) -> str:
             sev = f.get("severity", "low").upper()
             loc = f"{f.get('file', '?')}:{f.get('line', '?')}"
             lines.append(f"- **{sev}** `{loc}` — {f.get('message', '')}")
+            sug = (f.get("suggestion") or "").strip()
+            if sug:
+                # Surface the reviewer's proposed fix so the coding agent can apply it.
+                if "\n" in sug:
+                    lines.append(f"  Suggested fix:\n```\n{sug}\n```")
+                else:
+                    lines.append(f"  Suggested fix: `{sug}`")
     else:
         lines.append("_No findings._")
 
