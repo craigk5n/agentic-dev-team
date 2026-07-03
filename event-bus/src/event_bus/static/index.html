@@ -471,6 +471,12 @@ button.secondary.free-browse-btn {
 }
 .board-live { display: inline-flex; align-items: center; gap: 6px; font-size: 12px;
   color: #34d399; text-transform: uppercase; letter-spacing: .08em; }
+/* Rate-limit "paused" banner */
+.rate-banner { margin: 0 0 12px; border-radius: 8px; border: 1px solid rgba(234,179,8,.5);
+  background: rgba(234,179,8,.1); padding: 9px 13px; color: #eab308; font-size: 13px; font-weight: 600; }
+.rate-banner .rb-sub { color: var(--muted); font-weight: 400; margin-left: 4px; }
+.rate-banner .rb-models { color: var(--muted); font-weight: 400; font-size: 12px; margin-top: 3px;
+  font-variant-numeric: tabular-nums; }
 
 .board-group-label {
   display: flex;
@@ -1402,6 +1408,7 @@ button.code-btn:hover { background: rgba(59,130,246,.25); }
     <div class="dash-eta" id="dash-eta"></div>
     <div class="dash-live"><span class="dash-live-dot"></span>live</div>
   </div>
+  <div id="dash-rate-banner" class="rate-banner" style="display:none"></div>
   <div class="dash-grid">
     <div class="dash-col dash-col-wide">
       <div class="dash-col-head">⚙ In progress <span class="dash-count" id="dash-count-active">0</span></div>
@@ -1425,6 +1432,7 @@ button.code-btn:hover { background: rgba(59,130,246,.25); }
 
 <section id="board" class="tab-panel active">
   <h2>Board</h2>
+  <div id="board-rate-banner" class="rate-banner" style="display:none"></div>
   <div id="attention-tray" class="attention-tray" style="display:none"></div>
   <div id="free-quota-banner" class="quota-banner" style="display:none"></div>
   <div class="board-toolbar">
@@ -2284,6 +2292,25 @@ function runtimeBadge(item) {
   return `<span class="run-badge run-live" title="Running"><span class="run-pulse"></span>${t}</span>`;
 }
 
+// "Paused" banner when the rate-limit circuit breaker has tripped one or more models.
+// Reassures the operator the fleet is waiting + auto-retrying, not broken.
+function renderRateBanner(elId, rateLimited) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  if (!rateLimited || !rateLimited.length) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  const positives = rateLimited.map(m => m.seconds_left || 0).filter(s => s > 0);
+  const soonest = positives.length ? Math.min(...positives) : 0;
+  const models = rateLimited.map(m => {
+    const nm = m.model.replace('openrouter/', '');
+    return escHtml(nm) + (m.seconds_left ? ` (~${fmtDuration(m.seconds_left)})` : '');
+  }).join(', ');
+  const n = rateLimited.length;
+  el.style.display = 'block';
+  el.innerHTML = `⏸ Paused — ${n} model${n > 1 ? 's' : ''} rate-limited`
+    + `<span class="rb-sub">· auto-retrying${soonest ? ` (resumes in ~${fmtDuration(soonest)})` : ''}, no action needed</span>`
+    + `<div class="rb-models">${models}</div>`;
+}
+
 // Pinned tray listing every story flagged 'needs human attention' (watchdog/escalation
 // exhausted), with jump-to-card links — so you can't miss it even scrolled off-screen.
 function renderAttentionTray(stuck, ideaMeta) {
@@ -2521,7 +2548,9 @@ async function loadDashboard() {
   try {
     const r = await fetch('/api/items', { cache: 'no-store' });
     if (!r.ok) return;
-    const items = (await r.json()).groups.flatMap(g => g.items);
+    const d = await r.json();
+    const items = d.groups.flatMap(g => g.items);
+    renderRateBanner('dash-rate-banner', d.rate_limited);
     computeTransitions(items);
     renderDashboard(items);
   } catch (e) { /* transient poll error — next tick retries */ }
@@ -2840,6 +2869,7 @@ async function loadBoard(opts = {}) {
     }
   }
   const changed = setHTML(container, html);   // skip the rebuild when nothing changed (no blink)
+  renderRateBanner('board-rate-banner', d.rate_limited);
   renderAttentionTray(d.groups.flatMap(g => g.items).filter(i => i.stuck), ideaMeta);
   tickElapsed(container);                      // update live "elapsed" spans in place
   if (!changed) return;                        // DOM identical → keep existing listeners, done
