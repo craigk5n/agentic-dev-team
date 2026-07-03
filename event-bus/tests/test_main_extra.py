@@ -1923,3 +1923,32 @@ class TestRecordCoderUsage:
         pfx = "coder:openrouter/unknown/model"
         assert float(h[f"{pfx}:cost_usd"]) == 0.0
         assert int(h[f"{pfx}:calls"]) == 1
+
+
+class TestPostMergeCICancellation:
+    def _fj(self, runs):
+        from unittest.mock import MagicMock
+        fj = MagicMock()
+        fj.__enter__.return_value.get.return_value = {"workflow_runs": runs}
+        return fj
+
+    def test_cancelled_run_detected(self):
+        import event_bus.main as m
+        from unittest.mock import patch
+        runs = [{"head_sha": "abc", "status": "cancelled"}, {"head_sha": "abc", "status": "cancelled"}]
+        with patch("coding_agent.forgejo_client.ForgejoClient", return_value=self._fj(runs)):
+            assert m._ci_cancelled("o/r", "abc") is True
+
+    def test_genuine_failure_not_flagged_cancelled(self):
+        import event_bus.main as m
+        from unittest.mock import patch
+        runs = [{"head_sha": "abc", "status": "failure"}, {"head_sha": "abc", "status": "cancelled"}]
+        with patch("coding_agent.forgejo_client.ForgejoClient", return_value=self._fj(runs)):
+            assert m._ci_cancelled("o/r", "abc") is False   # a real failure exists → not just cancelled
+
+    def test_no_runs_for_sha_not_cancelled(self):
+        import event_bus.main as m
+        from unittest.mock import patch
+        runs = [{"head_sha": "other", "status": "cancelled"}]
+        with patch("coding_agent.forgejo_client.ForgejoClient", return_value=self._fj(runs)):
+            assert m._ci_cancelled("o/r", "abc") is False

@@ -134,6 +134,20 @@ def _reconcile_orphaned_stories() -> None:
         _dispatch_next_ready()
 
 
+def _reconcile_merged_stories() -> None:
+    """A restart kills in-flight _await_post_merge_ci tasks, stranding stories in the
+    transient 'merged' state forever (they never reach done — observed one stuck 6h). On
+    startup, re-drive the post-merge CI check for each so it resolves to done (or bounces
+    on a genuine failure). Runs in the async lifespan, so create_task is safe here."""
+    merged = list_items(state="merged", item_type="story")
+    if not merged:
+        return
+    for s in merged:
+        repo = get_repo_for_story(s["id"]) or ""
+        asyncio.create_task(_await_post_merge_ci(s["id"], repo))
+    log.warning("merged_stories_reconciled", count=len(merged))
+
+
 # ── Periodic watchdog ─────────────────────────────────────────────────────────
 # The automatic sibling of the operator Reset/Retry buttons: a background sweep that
 # re-runs work stuck too long (a coder whose task silently died, verdicts that never
@@ -402,6 +416,7 @@ async def lifespan(app: FastAPI):
     get_db()  # initialise SQLite schema
     _reap_orphan_coder_sandboxes()   # kill zombie coder containers from before restart
     _reconcile_orphaned_stories()    # resume stories stranded in-progress by the restart
+    _reconcile_merged_stories()      # re-drive stories stranded in the transient 'merged' state
     watchdog = asyncio.create_task(_watchdog_loop())  # continuous stuck-job recovery
     try:  # warm the model-meta cache so agents can route structured outputs immediately
         from event_bus.models_catalog import refresh_free_models
@@ -1704,6 +1719,25 @@ def _poll_commit_ci(repo_full_name: str, sha: str,
             _t.sleep(interval)
 
 
+def _ci_cancelled(repo_full_name: str, sha: str) -> bool:
+    """True if the Actions run for `sha` was cancelled (superseded by a newer merge to
+    main) rather than a genuine test failure. Forgejo's commit-status API reports a
+    cancelled run as 'failure', so we consult the Actions API — which exposes
+    status=='cancelled' — to tell a supersede apart from a real red build."""
+    from coding_agent.forgejo_client import ForgejoClient
+    from coding_agent.config import settings as cs
+    owner, repo = repo_full_name.split("/", 1)
+    try:
+        with ForgejoClient(cs.forgejo_base_url, cs.forgejo_api_token) as fj:
+            data = fj.get(f"/repos/{owner}/{repo}/actions/tasks?limit=40")
+        runs = [t for t in (data.get("workflow_runs") or []) if t.get("head_sha") == sha]
+        # cancelled iff there is a run for this sha and none of them genuinely
+        # succeeded/failed (all were cancelled/superseded).
+        return bool(runs) and all(t.get("status") == "cancelled" for t in runs)
+    except Exception:
+        return False
+
+
 def _advance_after_done(item_id: str) -> None:
     """Unlock + dispatch the next sequenced story once item_id is done."""
     unlocked = unlock_next_story(item_id)
@@ -1751,6 +1785,13 @@ async def _await_post_merge_ci(item_id: str, repo_full_name: str) -> None:
     if result in ("success", "none"):
         update_state(item_id, "done")
         log.info("post_merge_ci_passed", item_id=item_id, ci=result, sha=sha[:8])
+        _advance_after_done(item_id)
+    elif result == "failure" and await asyncio.to_thread(_ci_cancelled, repo_full_name, sha):
+        # The run was cancelled by a superseding merge, not a real failure — the story's
+        # code is already on main and a later merge's CI covers the cumulative state.
+        # Bouncing it to changes-requested would pointlessly re-code merged code.
+        update_state(item_id, "done")
+        log.info("post_merge_ci_cancelled_advance", item_id=item_id, sha=sha[:8])
         _advance_after_done(item_id)
     else:
         update_state(item_id, "changes-requested")
