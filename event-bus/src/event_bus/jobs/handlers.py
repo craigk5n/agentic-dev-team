@@ -122,11 +122,15 @@ def handle_pr_event(
         return {"status": "rate_limit_hold", "reason": "a verdict model is rate-limited"}
     jobs = []
     if reviewer_ok:
+        # A subscription (claude-code) reviewer shells to the claude CLI, which reviews a
+        # full diff agentically (up to ~5 min). RQ's 180s default would kill it mid-review
+        # and strand the verdict — give the reviewer job real headroom (litellm reviews
+        # finish well within it, so this doesn't slow the common case).
         jobs.append(q.enqueue(run_code_reviewer, **base_kwargs,
                               model_override=reviewer_model,
                               system_prompt=reviewer_system_prompt,
                               task_prompt=reviewer_task_prompt,
-                              stack=stack_id, retry=retry))
+                              stack=stack_id, retry=retry, job_timeout=420))
     if tester_ok:
         jobs.append(q.enqueue(run_tester, **base_kwargs,
                               model_override=config.models.tester,

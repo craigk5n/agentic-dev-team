@@ -8,6 +8,7 @@ import pytest
 from reviewer.llm import (
     complete, review_diff, summarise_test_output, _parse_json_response,
     InsufficientCreditsError, _looks_like_credit_error, _MAX_OUTPUT_TOKENS,
+    _CLAUDE_CODE_TIMEOUT,
 )
 
 
@@ -85,17 +86,23 @@ class TestComplete:
                 complete("m", [{"role": "user", "content": "q"}])
 
     def test_claude_code_model_routes_to_subscription(self):
-        # claude-code/* models bypass litellm and go through the claude CLI adapter.
+        # claude-code/* models bypass litellm and go through the claude CLI adapter, with a
+        # generous timeout (an agentic review of a full diff far exceeds the 90s default).
         import sys, types
+        calls = {}
         fake = types.ModuleType("planner_agent.claude_code")
         fake.is_claude_code_model = lambda m: str(m).startswith("claude-code")
-        fake.complete = lambda messages, model="", timeout=90.0: "SUB-REVIEW"
+        def _fake_complete(messages, model="", timeout=90.0):
+            calls["timeout"] = timeout
+            return "SUB-REVIEW"
+        fake.complete = _fake_complete
         pkg = types.ModuleType("planner_agent"); pkg.claude_code = fake
         with patch.dict(sys.modules, {"planner_agent": pkg, "planner_agent.claude_code": fake}), \
              patch("reviewer.llm.litellm.completion") as mock_litellm:
             out = complete("claude-code/sonnet", [{"role": "user", "content": "review this"}])
         assert out == "SUB-REVIEW"
         mock_litellm.assert_not_called()   # subscription path, never touches litellm
+        assert calls["timeout"] == _CLAUDE_CODE_TIMEOUT and calls["timeout"] >= 300
 
 
 class TestCreditErrorDetection:

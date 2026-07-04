@@ -27,6 +27,11 @@ _MAX_DIFF_CHARS = 24_000
 # max_tokens" 402 that strands the verdict. Cap it to something a verdict never exceeds.
 _MAX_OUTPUT_TOKENS = 8192
 
+# The subscription (claude-code) path shells to the `claude` CLI, which runs agentically
+# and reviews a full diff far slower than a raw completion — the adapter's 90s default
+# times out on a real review (~50s for 8KB, more for a 24KB diff). Give it real headroom.
+_CLAUDE_CODE_TIMEOUT = 300.0
+
 # Substrings that mark a provider "out of credit / quota" rejection (OpenRouter 402,
 # Anthropic/OpenAI quota). Matched case-insensitively against the exception text.
 _CREDIT_ERROR_MARKERS = (
@@ -88,7 +93,7 @@ def complete(
     # OpenRouter credit. The adapter feeds the prompt on stdin and returns the text.
     if (model or "").strip().startswith("claude-code"):
         from planner_agent import claude_code
-        return claude_code.complete(messages, model=model)
+        return claude_code.complete(messages, model=model, timeout=_CLAUDE_CODE_TIMEOUT)
 
     kwargs: dict = {
         "model": model,
