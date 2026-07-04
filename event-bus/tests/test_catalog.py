@@ -131,6 +131,15 @@ class TestDefaults:
         assert "pyproject.toml" in py.scaffold
         assert py.best_practices_prompt
 
+    def test_python_security_checklist_covers_the_failure_classes(self):
+        # HS-2: the checklist must name the boundaries the DEVHUB build kept failing on
+        # (shell/template/URL sinks, auth, secrets, local-first assets, deletions).
+        c = load_stacks()["python"].security_checklist.lower()
+        assert c, "python stack must ship a security_checklist"
+        for needle in ("escape", "autoescap", "xss", "ssrf", "auth", "hardcode",
+                       "vendor", "cdn", "integrity", "local-first", "delete"):
+            assert needle in c, f"security_checklist should address {needle!r}"
+
     def test_python_installs_deps_before_in_coder_tests(self):
         py = load_stacks()["python"]
         # install_command installs the project + deps so in-coder pytest can import them

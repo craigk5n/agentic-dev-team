@@ -1517,6 +1517,15 @@ class TestCoderStackContext:
         out = _augment_coder_prompt("base", c.get_stack("generic"), c.get_sdlc("standard"))
         assert out == "base"
 
+    def test_augment_injects_security_checklist_for_python(self):
+        # HS-2: the coder gets the security requirements up front (before review).
+        from event_bus.main import _augment_coder_prompt
+        from event_bus.catalog import get_catalog
+        c = get_catalog()
+        out = _augment_coder_prompt("base", c.get_stack("python"), c.get_sdlc("standard"))
+        assert "Security requirements" in out
+        assert "VENDOR" in out and "integrity" in out.lower()  # the SRI/CDN guidance
+
     def test_coder_context_resolves(self, monkeypatch):
         from event_bus import main as m
         monkeypatch.setattr(m, "get_stack_sdlc_for_story", lambda _id: ("go", "tdd"))

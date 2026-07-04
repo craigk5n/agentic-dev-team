@@ -66,6 +66,11 @@ def handle_pr_event(
                 "\n\nStack conventions to check (this is a "
                 f"{stack.display_name} project):\n" + stack.best_practices_prompt.strip()
             )
+        if getattr(stack, "security_checklist", "").strip():
+            reviewer_task_prompt += (
+                "\n\nSecurity requirements to enforce (flag any violation as a blocking "
+                "finding):\n" + stack.security_checklist.strip()
+            )
         # Make the reviewer check adherence to the project's chosen style guides.
         from event_bus.work_store import get_style_guides_for_repo
         for g in cat.get_style_guides(get_style_guides_for_repo(repo_full_name)):

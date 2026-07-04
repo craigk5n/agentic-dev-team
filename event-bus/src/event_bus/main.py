@@ -1242,6 +1242,9 @@ def _augment_coder_prompt(story_prompt: str, stack, sdlc, guides=()) -> str:
     extra = []
     if stack.best_practices_prompt.strip():
         extra.append("Stack conventions:\n" + stack.best_practices_prompt.strip())
+    if getattr(stack, "security_checklist", "").strip():
+        extra.append("Security requirements (the reviewer will block on these):\n"
+                     + stack.security_checklist.strip())
     if sdlc.coder_directive.strip():
         extra.append("Development style:\n" + sdlc.coder_directive.strip())
     for g in guides:

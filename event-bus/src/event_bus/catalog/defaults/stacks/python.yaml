@@ -160,3 +160,26 @@ best_practices_prompt: |
   [tool.pytest.ini_options] sections intact. Pin deps and prefer well-maintained libraries
   with no known advisories — imported dependencies are scanned for known vulnerabilities
   with pip-audit in CI, which will fail the build if any are found.
+
+security_checklist: |
+  Apply these BEFORE opening the PR — the reviewer will block on any of them:
+  - Untrusted input into a shell: when generating scripts or calling a shell, escape every
+    substituted value (e.g. Jinja `{{ v | replace("'", "'\\''") }}` inside single quotes,
+    or pass args as a list — never interpolate into `sh -c`). Command injection is a blocker.
+  - HTML output: rely on Jinja autoescaping and never mark user/tool data `| safe`; escape
+    values placed into HTML attributes and `hx-*`/`_=` handler strings. XSS is a blocker.
+  - Outbound URLs (discovery / proxy / fetch): validate the target. Reconcile SSRF protection
+    with the project's reachability requirement — if the app is local-first, allow
+    loopback/LAN via an explicit opt-in flag rather than hardcoding a public-only guard.
+  - Auth: every state-changing endpoint (POST/PUT/DELETE, toggles, clears) requires the
+    project's auth dependency. "Empty credentials = allow" is NOT a secure default — deny by
+    default and gate any open mode behind an explicit config flag.
+  - Secrets: never hardcode credentials, tokens, or default passwords in source or config.
+  - Front-end assets: VENDOR JavaScript/CSS locally (e.g. under `static/vendor/`) and
+    reference them with relative paths — this is a local-first tool. Do NOT load libraries
+    from a public CDN, and NEVER put an `integrity=` (SRI) hash on a script tag unless you
+    computed it from the exact bytes you are shipping (a wrong/guessed hash silently blocks
+    the script and breaks the page).
+  - Destructive edits: do not delete or wholesale-rewrite existing files (Dockerfile, config,
+    templates, tests) unless the story explicitly asks for it; make the smallest change that
+    satisfies the story.
