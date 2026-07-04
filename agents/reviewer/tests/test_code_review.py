@@ -31,6 +31,29 @@ class TestRunCodeReview:
         assert result["status"] == "pass"
         assert result["role"] == "code_review"
 
+    def test_insufficient_credits_returns_error_no_verdict(self):
+        # An out-of-credit failure returns a distinct error and does NOT store a verdict
+        # or post a review comment — the worker surfaces it to the operator instead.
+        from reviewer.llm import InsufficientCreditsError
+        r = fakeredis.FakeRedis()
+        fg = _make_forgejo()
+        with (
+            patch("reviewer.code_review.git_ops.clone"),
+            patch("reviewer.code_review.git_ops.get_diff", return_value="+ x"),
+            patch("reviewer.code_review.llm.review_diff",
+                  side_effect=InsufficientCreditsError("requires more credits")),
+            patch("reviewer.code_review.ForgejoClient", return_value=fg),
+            patch("reviewer.code_review.redis.from_url", return_value=r),
+            patch("reviewer.code_review.store_and_check") as mock_store,
+        ):
+            from reviewer.code_review import run_code_review
+            result = run_code_review("alice/backend", 7, "a" * 40)
+        assert result["status"] == "error"
+        assert result["reason"] == "insufficient_credits"
+        assert result.get("operator_action") is True
+        mock_store.assert_not_called()          # no poisoned verdict stored
+        fg.post_pr_comment.assert_not_called()  # no misleading review comment
+
     def test_empty_diff_skips_llm(self, tmp_path):
         r = fakeredis.FakeRedis()
 

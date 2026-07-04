@@ -21,6 +21,34 @@ log = structlog.get_logger()
 # Truncate diffs to avoid blowing context budgets
 _MAX_DIFF_CHARS = 24_000
 
+# A review / triage verdict is a small JSON object. Left unset, litellm/OpenRouter
+# request the model's *maximum* completion (e.g. 65536 for sonnet-4.6), which needlessly
+# inflates cost and — on a low provider balance — trips an "insufficient credits for
+# max_tokens" 402 that strands the verdict. Cap it to something a verdict never exceeds.
+_MAX_OUTPUT_TOKENS = 8192
+
+# Substrings that mark a provider "out of credit / quota" rejection (OpenRouter 402,
+# Anthropic/OpenAI quota). Matched case-insensitively against the exception text.
+_CREDIT_ERROR_MARKERS = (
+    "requires more credits", "add more credits", "insufficient credits",
+    "insufficient_quota", "exceeded your current quota", "payment required",
+)
+
+
+class InsufficientCreditsError(RuntimeError):
+    """The provider rejected the call for lack of credit/quota (e.g. OpenRouter 402).
+
+    Raised as a distinct type so callers can surface an operator-actionable message and
+    park the work, instead of treating it as a transient error and looping forever.
+    """
+
+
+def _looks_like_credit_error(exc: Exception) -> bool:
+    if getattr(exc, "status_code", None) == 402:
+        return True
+    text = str(exc).lower()
+    return any(m in text for m in _CREDIT_ERROR_MARKERS)
+
 
 def _supports_structured(model: str) -> bool:
     """Whether the model advertises structured-output support (from the shared model-meta
@@ -59,12 +87,20 @@ def complete(
         "model": model,
         "messages": messages,
         "temperature": temperature,
+        "max_tokens": _MAX_OUTPUT_TOKENS,
     }
     if api_key:
         kwargs["api_key"] = api_key
     if structured and _supports_structured(model):
         kwargs["response_format"] = {"type": "json_object"}
-    resp = litellm.completion(**kwargs)
+    try:
+        resp = litellm.completion(**kwargs)
+    except Exception as exc:
+        if _looks_like_credit_error(exc):
+            raise InsufficientCreditsError(
+                f"provider rejected the call for insufficient credit/quota: {str(exc)[:300]}"
+            ) from exc
+        raise
 
     if telemetry_role:
         try:

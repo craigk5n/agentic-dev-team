@@ -51,6 +51,31 @@ def _looks_rate_limited(result: dict) -> bool:
     return "429" in t or "rate limit" in t or "rate_limit" in t or "ratelimit" in t
 
 
+def _alert_operator_insufficient_credits(r, repo_full_name: str, pr_number: int,
+                                         model: str, detail: str) -> None:
+    """Post a one-time operator comment when a verdict can't run for lack of provider
+    credit. Guarded by a Redis key (6h TTL) so the watchdog's periodic re-runs don't
+    spam the PR. Best-effort — never raises into the job."""
+    try:
+        key = f"credit_alert:{repo_full_name}:{pr_number}"
+        if r is not None and not r.set(key, "1", nx=True, ex=6 * 3600):
+            return  # already alerted recently
+        from event_bus.config import settings
+        from coding_agent.forgejo_client import ForgejoClient
+        owner, repo = repo_full_name.split("/", 1)
+        body = (
+            "⛔ **Review paused — out of model credits.**\n\n"
+            f"The reviewer (`{model or 'default'}`) could not run: {detail or 'insufficient credit/quota'}.\n\n"
+            "This is an operator action, not a code issue. Top up the provider balance "
+            "(or switch this role to a cheaper/free model), then **Retry** this story."
+        )
+        with ForgejoClient(settings.forgejo_base_url, settings.effective_forgejo_token) as fj:
+            fj.post_pr_comment(owner, repo, pr_number, body)
+        log.warning("operator_alert_insufficient_credits", repo=repo_full_name, pr=pr_number)
+    except Exception as exc:
+        log.debug("credit_alert_skipped", error=str(exc)[:120])
+
+
 def _capture_verdict(r, role: str, model: str, prior: str, result: dict, ms) -> None:
     """Record a verdict's Metrics signals: reliability (pass/fail vs error/rate_limited),
     a flip when a re-review changed the verdict, and call latency. Best-effort."""
@@ -115,11 +140,23 @@ def run_code_reviewer(
             stack=stack,
         )
         _capture_verdict(r, "reviewer", model_override, prior, res, (_t.monotonic() - t0) * 1000)
+        # Out-of-credit is unrecoverable — surface it to the operator once (guarded so the
+        # watchdog's re-runs don't spam the PR) rather than silently looping forever.
+        if isinstance(res, dict) and res.get("reason") == "insufficient_credits":
+            _alert_operator_insufficient_credits(r, repo_full_name, pr_number, model_override,
+                                                 res.get("detail", ""))
         return res
     except ImportError:
         log.error("reviewer_not_installed")
         _capture_verdict(r, "reviewer", model_override, prior, {"status": "error"}, None)
         return {"status": "error", "role": "code_review", "reason": "reviewer package not available"}
+    except Exception as exc:
+        # A sandbox crash (ContainerError, OOM, etc.) must not raise uncaught — that strands
+        # the PR with no verdict and no signal. Record an error outcome and return a
+        # structured error so the caller/watchdog can see it instead of an RQ retry storm.
+        log.error("reviewer_job_failed", repo=repo_full_name, pr=pr_number, error=str(exc)[:300])
+        _capture_verdict(r, "reviewer", model_override, prior, {"status": "error"}, None)
+        return {"status": "error", "role": "code_review", "reason": f"reviewer_failed: {str(exc)[:200]}"}
     finally:
         release_slot(r, "reviewer")
 

@@ -63,14 +63,24 @@ def run_code_review(
     if not diff.strip():
         verdict = {"status": "pass", "summary": "No diff detected.", "findings": []}
     else:
-        verdict = llm.review_diff(
-            diff,
-            model=model,
-            api_key=settings.effective_api_key,
-            system_prompt=system_prompt,
-            task_prompt=task_prompt,
-            stack=stack,
-        )
+        try:
+            verdict = llm.review_diff(
+                diff,
+                model=model,
+                api_key=settings.effective_api_key,
+                system_prompt=system_prompt,
+                task_prompt=task_prompt,
+                stack=stack,
+            )
+        except llm.InsufficientCreditsError as exc:
+            # Out of provider credit/quota — an unrecoverable, operator-actionable state,
+            # not a code problem. Return a distinct error (no verdict stored, no review
+            # comment) so the worker surfaces it once and parks the PR instead of the
+            # watchdog looping on a call that can never succeed.
+            log.error("code_review_insufficient_credits", repo=repo_full_name, pr=pr_number,
+                      model=model, error=str(exc)[:200])
+            return {"status": "error", "role": "code_review", "reason": "insufficient_credits",
+                    "detail": str(exc)[:300], "operator_action": True}
 
     verdict["role"] = "code_review"
 

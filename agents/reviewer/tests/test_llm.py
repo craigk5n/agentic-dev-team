@@ -5,7 +5,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from reviewer.llm import complete, review_diff, summarise_test_output, _parse_json_response
+from reviewer.llm import (
+    complete, review_diff, summarise_test_output, _parse_json_response,
+    InsufficientCreditsError, _looks_like_credit_error, _MAX_OUTPUT_TOKENS,
+)
 
 
 def _mock_completion(text: str):
@@ -61,6 +64,38 @@ class TestComplete:
              patch("reviewer.llm._supports_structured", return_value=True):
             review_diff("some diff", model="m")
         assert mock.call_args[1].get("response_format") == {"type": "json_object"}
+
+    def test_caps_max_tokens(self):
+        # An unset max_tokens defaults to the model's max (e.g. 65536) — inflating cost and
+        # tripping provider "insufficient credits for max_tokens" 402s. Cap it.
+        with patch("reviewer.llm.litellm.completion", return_value=_mock_completion("x")) as mock:
+            complete("m", [{"role": "user", "content": "q"}])
+        assert mock.call_args[1]["max_tokens"] == _MAX_OUTPUT_TOKENS
+
+    def test_credit_error_raises_typed(self):
+        # A 402 / out-of-credit rejection becomes a distinct, catchable error type.
+        err = Exception("OpenrouterException - This request requires more credits, or fewer max_tokens")
+        with patch("reviewer.llm.litellm.completion", side_effect=err):
+            with pytest.raises(InsufficientCreditsError):
+                complete("m", [{"role": "user", "content": "q"}])
+
+    def test_non_credit_error_propagates_untyped(self):
+        with patch("reviewer.llm.litellm.completion", side_effect=ValueError("boom")):
+            with pytest.raises(ValueError):
+                complete("m", [{"role": "user", "content": "q"}])
+
+
+class TestCreditErrorDetection:
+    def test_detects_by_message(self):
+        assert _looks_like_credit_error(Exception("please add more credits")) is True
+        assert _looks_like_credit_error(Exception("exceeded your current quota")) is True
+
+    def test_detects_by_status_code(self):
+        exc = Exception("x"); exc.status_code = 402
+        assert _looks_like_credit_error(exc) is True
+
+    def test_ignores_unrelated(self):
+        assert _looks_like_credit_error(Exception("connection reset")) is False
 
 
 class TestReviewDiff:

@@ -71,6 +71,38 @@ class TestPrJobWrappers:
         )
         assert result["status"] == "pass"
 
+    def test_insufficient_credits_alerts_operator(self):
+        # A credit-exhaustion verdict surfaces a one-time operator alert and is returned
+        # (not raised), so the watchdog doesn't loop on an unrunnable call.
+        from event_bus.jobs.pr_jobs import run_code_reviewer
+        credit_res = {"status": "error", "role": "code_review",
+                      "reason": "insufficient_credits", "detail": "402", "operator_action": True}
+        with (
+            patch("event_bus.jobs.pr_jobs._redis_and_limits", return_value=_no_limits()),
+            patch("event_bus.sandbox.get_sandbox", return_value=_direct_sandbox()),
+            patch("reviewer.code_review.run_code_review", return_value=credit_res),
+            patch("event_bus.jobs.pr_jobs._alert_operator_insufficient_credits") as mock_alert,
+        ):
+            result = run_code_reviewer(**self._kwargs, model_override="m")
+        assert result["reason"] == "insufficient_credits"
+        mock_alert.assert_called_once()
+
+    def test_sandbox_crash_returns_error_not_raise(self):
+        # A sandbox crash must be caught and returned as a structured error, not raised
+        # uncaught (which would strand the PR with no verdict + an RQ retry storm).
+        from event_bus.jobs.pr_jobs import run_code_reviewer
+        sb = MagicMock()
+        sb.run.side_effect = RuntimeError("container exited 1")
+        with (
+            patch("event_bus.jobs.pr_jobs._redis_and_limits", return_value=_no_limits()),
+            patch("event_bus.sandbox.get_sandbox", return_value=sb),
+            patch("reviewer.code_review.run_code_review", return_value={"status": "pass"}),
+        ):
+            result = run_code_reviewer(**self._kwargs, model_override="m")
+        assert result["status"] == "error"
+        assert result["role"] == "code_review"
+        assert "reviewer_failed" in result["reason"]
+
     def test_missing_package_returns_error(self):
         from event_bus.jobs.pr_jobs import run_code_reviewer
         with (
