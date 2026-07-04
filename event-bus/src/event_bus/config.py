@@ -47,6 +47,9 @@ class Settings(BaseSettings):
     # HOST paths to bind into sandbox containers (must be host paths, not container paths)
     sandbox_opencode_bin: str = ""
     sandbox_opencode_config: str = ""
+    # HOST path to the `claude` CLI — bound into the reviewer sandbox so a claude-code/*
+    # (subscription) reviewer can shell out to it. Same binary the worker mounts.
+    sandbox_claude_bin: str = ""
     sandbox_network: str = "forgejo_default"
 
     log_level: str = "INFO"

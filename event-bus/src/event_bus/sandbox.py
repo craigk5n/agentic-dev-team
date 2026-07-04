@@ -36,6 +36,10 @@ _MODE = os.environ.get("SANDBOX_MODE", "process").lower()
 _IMAGE = os.environ.get("SANDBOX_IMAGE", "dev-agents/event-bus:latest")
 _MEMORY = os.environ.get("SANDBOX_MEMORY", "512m")
 _CPUS = float(os.environ.get("SANDBOX_CPUS", "1.0"))
+# HOST path to the `claude` CLI, bound into the reviewer sandbox for claude-code/*
+# (subscription) reviews. The image doesn't ship the binary (it's mounted into the
+# worker); the reviewer runs in a fresh sandbox container, so it needs its own mount.
+_CLAUDE_BIN = os.environ.get("SANDBOX_CLAUDE_BIN", "")
 
 # Env var groups each agent role needs.
 # Keys are prefixes that appear in func dotted paths.
@@ -128,8 +132,15 @@ class Sandbox:
         env["AGENT_FUNC"] = func_path
         env["AGENT_KWARGS_B64"] = payload
 
+        # The reviewer may run a claude-code/* (subscription) verdict, which shells out to
+        # the `claude` CLI. That binary isn't in the image (the worker gets it via a bind
+        # mount), so bind it into this sandbox too. Only the reviewer needs it.
+        volumes = None
+        if _CLAUDE_BIN and "code_review" in func.__module__:
+            volumes = {_CLAUDE_BIN: {"bind": "/usr/local/bin/claude", "mode": "ro"}}
+
         log.info("sandbox_docker_run", func=func_path, image=self.image,
-                 memory=self.memory, cpus=self.cpus)
+                 memory=self.memory, cpus=self.cpus, claude_mount=bool(volumes))
 
         client = docker.from_env()
         # Share the worker's network namespace so the sandbox resolves the same
@@ -142,6 +153,7 @@ class Sandbox:
                 self.image,
                 command=["python", "-m", "event_bus.sandbox_runner"],
                 environment=env,
+                volumes=volumes,
                 mem_limit=self.memory,
                 nano_cpus=int(self.cpus * 1_000_000_000),
                 network_mode=netns,

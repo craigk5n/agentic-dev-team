@@ -218,6 +218,45 @@ class TestSandboxDockerMode:
             any("AGENT_FUNC" in str(a) for a in call_kwargs.args)
         )
 
+    def test_reviewer_sandbox_mounts_claude_binary(self):
+        # The claude-code reviewer shells out to the claude CLI, which isn't in the image;
+        # it must be bind-mounted into the reviewer sandbox.
+        import event_bus.sandbox as sb_mod
+        mock_docker = MagicMock()
+        mock_docker.from_env.return_value.containers.run.return_value = b'{"status":"ok"}'
+        with patch.dict("sys.modules", {"docker": mock_docker, "docker.errors": MagicMock()}), \
+             patch.object(sb_mod, "_CLAUDE_BIN", "/host/claude"):
+            sb = sb_mod.Sandbox(mode="docker", image="test-image:latest")
+
+            def run_code_review(pr_number):
+                return {}
+            run_code_review.__module__ = "reviewer.code_review"  # reviewer namespace
+            sb.run(run_code_review, pr_number=1)
+
+            def run_tests(pr_number):
+                return {}
+            run_tests.__module__ = "reviewer.test_runner"
+        vols = mock_docker.from_env.return_value.containers.run.call_args.kwargs.get("volumes")
+        assert vols == {"/host/claude": {"bind": "/usr/local/bin/claude", "mode": "ro"}}
+
+    def test_non_reviewer_sandbox_has_no_claude_mount(self):
+        # Only the code reviewer needs claude; tester/security (also reviewer.* modules)
+        # and unrelated funcs must not get the mount.
+        import event_bus.sandbox as sb_mod
+        mock_docker = MagicMock()
+        mock_docker.from_env.return_value.containers.run.return_value = b'{"status":"ok"}'
+        for mod in ("reviewer.test_runner", "reviewer.security_scan", "event_bus.other"):
+            with patch.dict("sys.modules", {"docker": mock_docker, "docker.errors": MagicMock()}), \
+                 patch.object(sb_mod, "_CLAUDE_BIN", "/host/claude"):
+                sb = sb_mod.Sandbox(mode="docker", image="test-image:latest")
+
+                def some_func(x):
+                    return {}
+                some_func.__module__ = mod
+                sb.run(some_func, x=1)
+            vols = mock_docker.from_env.return_value.containers.run.call_args.kwargs.get("volumes")
+            assert vols is None, f"{mod} should not mount claude"
+
     def test_parse_result_picks_last_json_among_logs(self):
         from event_bus.sandbox import _parse_result
         out = ('2026-01-01 log line before\n'

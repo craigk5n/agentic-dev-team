@@ -25,6 +25,8 @@ x-event-bus-env: &event-bus-env
   # Host paths for bind mounts into sandbox containers (must match the actual host paths)
   SANDBOX_OPENCODE_BIN: /home/cknudsen/.opencode/bin/opencode
   SANDBOX_OPENCODE_CONFIG: /home/cknudsen/.config/opencode
+  # HOST path to the claude CLI, bound into the reviewer sandbox for claude-code/* reviews.
+  SANDBOX_CLAUDE_BIN: ${SANDBOX_CLAUDE_BIN:-/home/cknudsen/.local/bin/claude}
   SANDBOX_NETWORK: forgejo_default
   # Coding Agent (Phase 3)
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
@@ -33,9 +35,9 @@ x-event-bus-env: &event-bus-env
   # Idea / Planner — free models; override MODEL_IDEA / MODEL_PLANNER for higher quality
   MODEL_IDEA: ${MODEL_IDEA:-openrouter/nvidia/nemotron-3-super-120b-a12b:free}
   MODEL_PLANNER: ${MODEL_PLANNER:-openrouter/nvidia/nemotron-3-super-120b-a12b:free}
-  # Claude Code subscription planning (optional): token from `claude setup-token`.
-  # Enables the "claude-code/*" subscription models for the IDEA + PLANNER roles
-  # only; the high-volume coder/reviewer fleet must stay on API/free models.
+  # Claude Code subscription (optional): token from `claude setup-token`.
+  # Enables the "claude-code/*" subscription models for the idea, planner, reviewer, and
+  # escalate roles. The coder/tester/security roles stay on API/free models.
   CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
   # Coding Agent — uses opencode with OpenRouter free model (no Anthropic key needed)
   MODEL_CODER: ${MODEL_CODER:-openrouter/nvidia/nemotron-3-super-120b-a12b:free}
