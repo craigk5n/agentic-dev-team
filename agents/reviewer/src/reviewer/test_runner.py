@@ -107,6 +107,20 @@ def _format_test_comment(verdict: dict) -> str:
     return "\n".join(lines)
 
 
+def _merge_browser_result(status: str, failures: list[str], summary: str,
+                          browser: dict) -> tuple[str, list[str], str]:
+    """Fold the HS-1 browser E2E result into the test verdict. A browser ``fail`` (blocking
+    console error or invisible control result) fails the verdict; ``skip`` is noted, never a
+    silent pass."""
+    b = browser.get("status")
+    if b == "fail":
+        note = "Browser E2E FAILED — " + (browser.get("summary") or "UI did not work in a real browser")
+        return "fail", (failures or []) + [note], (summary + " | " + note).strip(" |")
+    if b == "pass":
+        return status, failures, (summary + " | Browser E2E: " + (browser.get("summary") or "ok")).strip(" |")
+    return status, failures, (summary + f" | Browser E2E skipped ({browser.get('reason','')})").strip(" |")
+
+
 def _execute_tests(
     owner: str,
     repo: str,
@@ -114,6 +128,8 @@ def _execute_tests(
     head_ref: str,
     model: str,
     stack: str,
+    changed_paths: list[str] | None = None,
+    run_command: str = "",
 ) -> tuple[str, list[str], str]:
     """Clone + run the suite, returning (status, failures, summary).
 
@@ -122,6 +138,7 @@ def _execute_tests(
     A non-blocking ``warn`` defers to CI, which runs the authoritative per-stack
     suite in the correct image; only a real, parsed test failure returns ``fail``.
     """
+    browser: dict = {"status": "skip", "reason": "not run"}
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             git_ops.clone(settings.forgejo_clone_base, owner, repo, settings.effective_forgejo_token, tmpdir, branch=head_ref)
@@ -146,6 +163,15 @@ def _execute_tests(
                 return ("fail", [], f"Tests exceeded the {_TEST_TIMEOUT}s timeout.")
             combined = result.stdout + result.stderr
             returncode = result.returncode
+
+            # HS-1: while the repo + installed deps are still here, run a real-browser E2E
+            # check for UI stories. browser_verdict handles skip (non-UI / no launch / no
+            # browser) internally and never raises.
+            try:
+                from reviewer.browser_check import browser_verdict
+                browser = browser_verdict(tmpdir, list(changed_paths or []), run_command)
+            except Exception as exc:  # noqa: BLE001
+                browser = {"status": "skip", "reason": f"e2e error: {str(exc)[:100]}"}
     except Exception as exc:  # noqa: BLE001 — never wedge the gate on triage errors
         log.warning("test_runner_setup_failed", error=str(exc)[:200])
         return (
@@ -174,7 +200,28 @@ def _execute_tests(
     else:
         summary = f"Tests {'passed' if status == 'pass' else 'failed'}."
 
+    status, failures, summary = _merge_browser_result(status, failures, summary, browser)
     return (status, failures, summary)
+
+
+def _pr_changed_paths(owner: str, repo: str, pr_number: int) -> list[str]:
+    """Filenames changed in the PR (best-effort; empty on error → browser check skips)."""
+    try:
+        with ForgejoClient(settings.forgejo_base_url, settings.effective_forgejo_token) as fg:
+            return [f.get("filename", "") for f in fg.get_pr_files(owner, repo, pr_number)]
+    except Exception as exc:  # noqa: BLE001
+        log.warning("pr_files_fetch_failed", error=str(exc)[:120])
+        return []
+
+
+def _stack_run_command(stack: str) -> str:
+    """The stack's app-launch command for the E2E browser check, or "" (then it's derived
+    from pyproject / skipped)."""
+    try:
+        from event_bus.catalog import get_catalog
+        return getattr(get_catalog().get_stack(stack), "run_command", "") or ""
+    except Exception:
+        return ""
 
 
 def run_tests(
@@ -190,8 +237,12 @@ def run_tests(
     model = model_override or settings.model_tester
     log.info("test_runner_start", repo=repo_full_name, pr=pr_number, sha=head_sha[:8], model=model)
 
+    changed_paths = _pr_changed_paths(owner, repo, pr_number)
+    run_command = _stack_run_command(stack)
+
     status, failures, summary = _execute_tests(
         owner, repo, head_sha, head_ref, model, stack,
+        changed_paths=changed_paths, run_command=run_command,
     )
 
     verdict = {"role": "test_run", "status": status, "summary": summary, "failures": failures}

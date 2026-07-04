@@ -41,6 +41,10 @@ class StackDefinition(BaseModel):
     # Shell command the coding agent runs in-sandbox to verify its work before
     # opening the PR (TDD red->green). Empty = skip in-coder testing for this stack.
     test_command: str = ""
+    # Shell command that launches the app for the HS-1 browser E2E check (tester role). A
+    # literal `$PORT` is substituted with a chosen port; SERVER_HTTP_PORT/PORT are also set in
+    # the env. Empty = derive from a Python [project.scripts] entry point, else skip E2E.
+    run_command: str = ""
     # SDLC style used when none is explicitly chosen.
     default_sdlc: str = "standard"
     # Optional file globs used to auto-detect this stack (fallback path).

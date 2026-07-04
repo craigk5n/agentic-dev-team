@@ -12,6 +12,13 @@ RUN pip install --no-cache-dir semgrep
 RUN curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_x64.tar.gz \
     | tar -xz -C /usr/local/bin gitleaks
 
+# Playwright + Chromium for the HS-1 browser E2E check (tester role). --with-deps pulls the
+# system libraries Chromium needs. The browser check degrades gracefully (skips) if this is
+# ever absent, so it's safe to remove to slim the image.
+RUN pip install --no-cache-dir playwright \
+    && playwright install --with-deps chromium \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 # Docker SDK for SANDBOX_MODE=docker (spawns ephemeral containers via the host socket)
