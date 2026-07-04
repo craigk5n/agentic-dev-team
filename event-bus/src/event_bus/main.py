@@ -757,6 +757,16 @@ def _fetch_verdicts(pr_url: str) -> dict:
             raw = _redis_conn.get(key)
             if raw:
                 verdicts[role] = _json.loads(raw).get("status")  # "pass"|"warn"|"fail"
+        # The live per-role keys are short-lived and cleared by the gate on aggregation,
+        # so completed stories have none. Fall back to the durable aggregated snapshot
+        # (pr_verdict_final) for any role not currently live — keeps R/T/S on done cards.
+        if len(verdicts) < 3:
+            snap_raw = _redis_conn.get(f"pr_verdict_final:{owner}:{repo}:{pr_number}")
+            if snap_raw:
+                snap = _json.loads(snap_raw)  # {code_review, test_run, security}
+                for role, rkey in (("reviewer", "code_review"), ("tester", "test_run"), ("security", "security")):
+                    if role not in verdicts and snap.get(rkey):
+                        verdicts[role] = snap[rkey]
         return verdicts
     except Exception:
         return {}

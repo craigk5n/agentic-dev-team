@@ -12,6 +12,9 @@ from reviewer.verdicts import (
     store_and_check,
     aggregate_status,
     format_summary_comment,
+    store_final_verdicts,
+    _final_key,
+    _pr_key,
 )
 
 REPO = "alice/backend"
@@ -27,6 +30,32 @@ def _fill(r, statuses: dict):
     """Store verdicts for given role→status mapping."""
     for role, status in statuses.items():
         store_verdict(r, REPO, PR, role, {"role": role, "status": status, "summary": f"{role} {status}"})
+
+
+class TestStoreFinalVerdicts:
+    def test_snapshot_survives_clearing_per_role_keys(self, r):
+        all_verdicts = {
+            "code_review": {"status": "pass"},
+            "test_run": {"status": "pass"},
+            "security": {"status": "warn"},
+        }
+        store_final_verdicts(r, REPO, PR, all_verdicts)
+        # delete the ephemeral per-role keys (as the gate does)
+        pk = _pr_key(REPO, PR)
+        for role in ROLES:
+            r.delete(f"pr_verdict:{pk}:{role}")
+        snap = json.loads(r.get(_final_key(pk)))
+        assert snap == {"code_review": "pass", "test_run": "pass", "security": "warn"}
+
+    def test_missing_role_defaults_to_warn(self, r):
+        store_final_verdicts(r, REPO, PR, {"code_review": {"status": "fail"}})
+        snap = json.loads(r.get(_final_key(_pr_key(REPO, PR))))
+        assert snap["code_review"] == "fail"
+        assert snap["test_run"] == "warn" and snap["security"] == "warn"
+
+    def test_snapshot_has_long_ttl(self, r):
+        store_final_verdicts(r, REPO, PR, {"code_review": {"status": "pass"}})
+        assert r.ttl(_final_key(_pr_key(REPO, PR))) > 30 * 86_400
 
 
 class TestStoreVerdict:

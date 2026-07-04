@@ -1052,6 +1052,30 @@ class TestHelperFunctions:
         # "issues" not "pulls" — should fail the parts[-2] != "pulls" check
         assert _fetch_verdicts("http://x/owner/repo/issues/1") == {}
 
+    def test_fetch_verdicts_falls_back_to_final_snapshot(self, monkeypatch):
+        # When the live per-role keys are gone (gate cleared them), completed stories
+        # still show R/T/S from the durable pr_verdict_final snapshot.
+        import json
+        r = fakeredis.FakeRedis()
+        r.set("pr_verdict_final:owner:repo:1",
+              json.dumps({"code_review": "pass", "test_run": "pass", "security": "warn"}))
+        monkeypatch.setattr("event_bus.main._redis_conn", r)
+        from event_bus.main import _fetch_verdicts
+        v = _fetch_verdicts("http://x/owner/repo/pulls/1")
+        assert v == {"reviewer": "pass", "tester": "pass", "security": "warn"}
+
+    def test_fetch_verdicts_live_key_wins_over_snapshot(self, monkeypatch):
+        import json
+        r = fakeredis.FakeRedis()
+        r.set("pr_verdict:owner:repo:1:code_review", json.dumps({"status": "fail"}))  # live
+        r.set("pr_verdict_final:owner:repo:1",
+              json.dumps({"code_review": "pass", "test_run": "pass", "security": "pass"}))
+        monkeypatch.setattr("event_bus.main._redis_conn", r)
+        from event_bus.main import _fetch_verdicts
+        v = _fetch_verdicts("http://x/owner/repo/pulls/1")
+        assert v["reviewer"] == "fail"          # live in-flight verdict wins
+        assert v["tester"] == "pass" and v["security"] == "pass"  # snapshot fills the rest
+
     def test_fetch_verdicts_redis_exception_returns_empty(self, monkeypatch):
         m = MagicMock()
         m.get.side_effect = Exception("redis error")
