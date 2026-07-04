@@ -212,3 +212,29 @@ class TestStackUsage:
         with patch("litellm.completion_cost", return_value=0.0):
             record_usage(r, "idea", "m", resp)  # no stack (pre-stack)
         assert read_stack_usage(r, days=1) == []
+
+
+class TestProjectUsage:
+    def _rec(self, r, project, cost):
+        from reviewer.telemetry import record_usage
+        from unittest.mock import MagicMock
+        resp = MagicMock(); resp.usage.prompt_tokens = 100; resp.usage.completion_tokens = 40
+        resp.usage.cost = cost
+        record_usage(r, "planner", "m", resp, stack="python", project=project)
+
+    def test_records_and_reads_per_project(self):
+        import fakeredis
+        from reviewer.telemetry import read_project_usage
+        r = fakeredis.FakeRedis()
+        self._rec(r, "proj-a", 0.10); self._rec(r, "proj-a", 0.05); self._rec(r, "proj-b", 0.02)
+        rows = {x["project"]: x for x in read_project_usage(r, days=1)}
+        assert abs(rows["proj-a"]["cost_usd"] - 0.15) < 1e-6
+        assert rows["proj-a"]["calls"] == 2
+        assert abs(rows["proj-b"]["cost_usd"] - 0.02) < 1e-6
+
+    def test_no_project_writes_nothing(self):
+        import fakeredis
+        from reviewer.telemetry import read_project_usage
+        r = fakeredis.FakeRedis()
+        self._rec(r, "", 0.10)   # empty project → not attributed
+        assert read_project_usage(r, days=1) == []

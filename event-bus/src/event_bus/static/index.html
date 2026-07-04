@@ -611,7 +611,7 @@ button.approve-btn:hover { background: rgba(34,197,94,.25); }
 .dash-eta.dim { color: var(--muted); font-weight: 400; }
 .dash-live { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #34d399; text-transform: uppercase; letter-spacing: .08em; }
 .dash-live-dot { width: 8px; height: 8px; border-radius: 50%; background: #34d399; animation: runpulse 1.6s ease-out infinite; }
-.dash-grid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 16px; }
+.dash-grid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 16px; align-items: start; }
 .dash-col-head { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em;
   color: var(--muted); margin: 4px 2px 8px; display: flex; align-items: center; gap: 8px; }
 .dash-col-head.dash-attn { color: #f87171; } .dash-col-head.dash-next { color: #818cf8; margin-top: 18px; }
@@ -659,7 +659,15 @@ button.approve-btn:hover { background: rgba(34,197,94,.25); }
 @media (prefers-reduced-motion: reduce) {
   .dash-card, .dash-done-card.bloom, .tick, .board-item.state-flash, .dash-live-dot { animation: none; }
 }
-@media (max-width: 720px) { .dash-grid { grid-template-columns: 1fr; } }
+/* Collapse the two-column dashboard to a single column on tablets/phones (iPad
+   portrait 768 and landscape 1024 both land here) — with one active story the wide
+   left column was mostly empty, leaving a lot of whitespace. */
+@media (max-width: 1024px) {
+  #dashboard { max-width: 100%; }
+  .dash-grid { grid-template-columns: 1fr; gap: 4px; }
+  .dash-col-head.dash-next { margin-top: 14px; }
+  .dash-done-row { grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
+}
 
 /* ── Metrics tab ────────────────────────────────────────────────────────── */
 #metrics { max-width: 1100px; margin: 0 auto; }
@@ -1395,6 +1403,7 @@ button.code-btn:hover { background: rgba(59,130,246,.25); }
 
   <div class="role-grid" id="role-grid"></div>
   <div class="stack-cost" id="stack-cost"></div>
+  <div class="stack-cost" id="project-cost"></div>
 </section>
 
 <!-- ── Board ───────────────────────────────────────────────── -->
@@ -2107,6 +2116,17 @@ function renderTelemetry(data) {
       ? '<div class="stack-cost-title">Spend by stack</div>' + entries.map(([s, d]) => `
           <div class="metric"><span class="k"><span class="stack-badge">${escHtml(s)}</span></span>
           <span class="v">${fmtCost(d.cost_usd)} · ${fmt(d.calls || 0, 0)} calls</span></div>`).join('')
+      : '';
+  }
+
+  // Total spend by project
+  const byProject = (data.by_project || []).slice().sort((a, b) => (b.cost_usd || 0) - (a.cost_usd || 0));
+  const projEl = document.getElementById('project-cost');
+  if (projEl) {
+    projEl.innerHTML = byProject.length
+      ? '<div class="stack-cost-title">Spend by project</div>' + byProject.map(p => `
+          <div class="metric"><span class="k">${escHtml(p.title || p.project.slice(0, 8))}</span>
+          <span class="v">${fmtCost(p.cost_usd)} · ${fmt(p.calls || 0, 0)} calls</span></div>`).join('')
       : '';
   }
 }

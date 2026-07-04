@@ -1478,7 +1478,8 @@ async def _run_coding_agent(item_id: str, title: str, description: str, story_pr
     # Record coder usage. opencode runs as a subprocess and doesn't report exact token
     # counts, so cost is an ESTIMATE from the prompt + captured output priced at the
     # model's OpenRouter rate (free models → $0). Better than the previous $0/calls-only.
-    _record_coder_usage(coder_model or "opencode", story_prompt, description, result, stack.id)
+    _proj = (get_item(item_id) or {}).get("parent_id") or ""
+    _record_coder_usage(coder_model or "opencode", story_prompt, description, result, stack.id, _proj)
     if _redis_conn and coder_model:
         try:
             from event_bus.outcomes import record_latency
@@ -1491,7 +1492,7 @@ async def _run_coding_agent(item_id: str, title: str, description: str, story_pr
 
 
 def _record_coder_usage(model: str, story_prompt: str, description: str,
-                        result: dict, stack: str = "") -> None:
+                        result: dict, stack: str = "", project: str = "") -> None:
     """Record coder token/cost telemetry for one opencode run.
 
     opencode is a subprocess that doesn't surface exact token counts, so this is a
@@ -1530,6 +1531,13 @@ def _record_coder_usage(model: str, story_prompt: str, description: str,
             pipe.hincrby(skey, f"{stack}:output_tokens", out_tok)
             pipe.hincrby(skey, f"{stack}:calls", 1)
             pipe.expire(skey, 30 * 86_400)
+        if project:
+            pkey = f"telemetry:project:{date}"
+            pipe.hincrbyfloat(pkey, f"{project}:cost_usd", cost)
+            pipe.hincrby(pkey, f"{project}:input_tokens", in_tok)
+            pipe.hincrby(pkey, f"{project}:output_tokens", out_tok)
+            pipe.hincrby(pkey, f"{project}:calls", 1)
+            pipe.expire(pkey, 30 * 86_400)
         pipe.execute()
     except Exception:
         pass
@@ -2439,6 +2447,10 @@ async def get_telemetry(days: int = 7):
     summary = get_telemetry_summary(r, days=days)
     cfg = get_config(r)
     summary["free_quota"] = free_quota_status(r, cfg.limits.max_free_requests_daily)
+    # Resolve project ids → display titles for the per-project spend breakdown.
+    for row in summary.get("by_project", []):
+        item = get_item(row.get("project", "")) or {}
+        row["title"] = item.get("title") or row.get("project", "")[:8]
     return summary
 
 

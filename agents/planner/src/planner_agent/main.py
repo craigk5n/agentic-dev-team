@@ -35,6 +35,7 @@ def run_import(
         redis_conn=redis_conn,
         skip_epics=skip_epics,
         epics=epics,
+        project=item_id,
     )
     log.info("import_done", item_id=item_id, epics=len(plan.get("epics", [])),
              stories=len(plan.get("stories", [])))
@@ -75,6 +76,7 @@ def run_planner(
         stack=stack,
         decisions=decisions,
         redis_conn=redis_conn,
+        project=item_id,
     )
 
     log.info(

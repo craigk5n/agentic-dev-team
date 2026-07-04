@@ -151,7 +151,7 @@ def _supports_structured(redis_conn, model: str) -> bool:
 
 
 def _complete_json(messages, *, model, api_key, stack, redis_conn, max_tokens=None,
-                   timeout=None, attempts=None):
+                   timeout=None, attempts=None, project=""):
     """One LLM call returning parsed JSON, with a bounded timeout + retry. Raises the
     last error after the attempt budget so callers can fall back.
 
@@ -183,7 +183,7 @@ def _complete_json(messages, *, model, api_key, stack, redis_conn, max_tokens=No
                 if redis_conn is not None:
                     try:
                         from reviewer.telemetry import record_usage
-                        record_usage(redis_conn, "planner", model, resp, stack=stack)
+                        record_usage(redis_conn, "planner", model, resp, stack=stack, project=project)
                     except Exception:
                         pass
                 raw = resp.choices[0].message.content or ""
@@ -222,11 +222,13 @@ def decompose_idea(
     stack: str = "",
     decisions: str = "",
     redis_conn=None,
+    project: str = "",
 ) -> dict:
     """Return {project_name, module_name, epics, stories}. `stories` is the flat,
     globally-ordered list (epic by epic), each tagged with its `epic` name.
-    `decisions`: operator-locked design decisions the whole plan must honor."""
-    call = dict(model=model, api_key=api_key, stack=stack, redis_conn=redis_conn)
+    `decisions`: operator-locked design decisions the whole plan must honor.
+    `project`: idea/project id — attributes this planning spend to the project."""
+    call = dict(model=model, api_key=api_key, stack=stack, redis_conn=redis_conn, project=project)
     desc = (description or "")[:4000]
     if decisions:
         desc = f"{desc}\n\n{decisions}"   # ride along on every planning prompt's context
@@ -426,6 +428,7 @@ def normalize_plan(
     redis_conn=None,
     skip_epics: set[str] | None = None,
     epics: list[dict] | None = None,
+    project: str = "",
 ) -> dict:
     """Map an externally-authored plan (pasted PRD/markdown) onto our epic/story model.
 
@@ -447,7 +450,7 @@ def normalize_plan(
     """
     skip = {e.strip() for e in (skip_epics or set()) if e}
     resuming = bool(skip)
-    call = dict(model=model, api_key=api_key, stack=stack, redis_conn=redis_conn)
+    call = dict(model=model, api_key=api_key, stack=stack, redis_conn=redis_conn, project=project)
     plan = (plan_text or "")[:_MAX_PLAN_CHARS]
 
     # ── Pass 1: epic list only (names + descriptions) — tiny, truncation-proof ──
