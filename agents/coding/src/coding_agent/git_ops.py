@@ -69,6 +69,37 @@ def checkout_branch(repo_dir: str, branch_name: str) -> None:
     log.info("git_checkout", branch=branch_name)
 
 
+def remote_branch_exists(repo_dir: str, branch_name: str) -> bool:
+    """True if <branch> already exists on origin (a prior attempt for this story)."""
+    out = subprocess.run(
+        ["git", "ls-remote", "--heads", "origin", branch_name],
+        cwd=repo_dir, capture_output=True, text=True,
+    )
+    return out.returncode == 0 and bool(out.stdout.strip())
+
+
+def create_or_checkout_branch(repo_dir: str, branch_name: str) -> bool:
+    """Create <branch> from the current HEAD, or reuse it if it already exists on origin.
+
+    The branch name is deterministic per story, so a retry that recreates the branch
+    from a fresh clone of main would not contain commits a prior attempt already
+    pushed — the subsequent `git push` is then rejected as non-fast-forward
+    ("tip is behind its remote counterpart"). When the remote branch already exists we
+    check it out instead, so new work builds on top of it and the push fast-forwards.
+
+    Returns True when an existing remote branch was reused, False when a fresh branch
+    was created.
+    """
+    if remote_branch_exists(repo_dir, branch_name):
+        _run(["git", "fetch", "origin", branch_name], cwd=repo_dir)
+        _run(["git", "checkout", "-b", branch_name, f"origin/{branch_name}"], cwd=repo_dir)
+        log.info("git_branch_reused", branch=branch_name)
+        return True
+    _run(["git", "checkout", "-b", branch_name], cwd=repo_dir)
+    log.info("git_branch", branch=branch_name)
+    return False
+
+
 _PYTHON_GITIGNORE = """\
 __pycache__/
 *.py[cod]

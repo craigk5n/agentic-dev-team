@@ -148,3 +148,47 @@ def test_merge_base_branch_conflict_returns_false(tmp_path):
     (work / "a.txt").write_text("feature-side\n")
     _git(["commit", "-qam", "edit a on feature"], work)
     assert git_ops.merge_base_branch(str(work), base="main") is False  # conflict
+
+
+# ── create_or_checkout_branch / remote_branch_exists (real git repos) ─────────
+
+def _fresh_clone_on_main(tmp_path):
+    """A clone sitting on main, with origin already carrying a `feature` branch that
+    has a commit main doesn't — the exact shape that triggered the non-fast-forward."""
+    work = _make_origin_with_branch(tmp_path)  # currently on `feature`
+    _git(["checkout", "-q", "main"], work)
+    _git(["branch", "-q", "-D", "feature"], work)  # drop local feature: only origin has it
+    return work
+
+def test_remote_branch_exists_true_and_false(tmp_path):
+    work = _fresh_clone_on_main(tmp_path)
+    assert git_ops.remote_branch_exists(str(work), "feature") is True
+    assert git_ops.remote_branch_exists(str(work), "nope") is False
+
+def test_create_or_checkout_reuses_existing_remote_branch(tmp_path):
+    work = _fresh_clone_on_main(tmp_path)
+    reused = git_ops.create_or_checkout_branch(str(work), "feature")
+    assert reused is True
+    current = subprocess.run(["git", "branch", "--show-current"],
+                             cwd=work, capture_output=True, text=True).stdout.strip()
+    assert current == "feature"
+    # The prior attempt's file (b.txt, only on origin/feature) is present — proof we
+    # built on the remote branch, not a fresh copy of main.
+    assert (work / "b.txt").exists()
+
+def test_create_or_checkout_reused_branch_pushes_fast_forward(tmp_path):
+    """The regression guard: after reusing the branch, a new commit pushes cleanly."""
+    work = _fresh_clone_on_main(tmp_path)
+    git_ops.create_or_checkout_branch(str(work), "feature")
+    (work / "new.txt").write_text("more\n")
+    git_ops.configure_identity(str(work), "A", "a@b.com")
+    git_ops.commit_all(str(work), "add new")
+    git_ops.push(str(work), "feature")  # must NOT raise (was non-fast-forward before)
+
+def test_create_or_checkout_creates_fresh_when_absent(tmp_path):
+    work = _fresh_clone_on_main(tmp_path)
+    reused = git_ops.create_or_checkout_branch(str(work), "brand-new")
+    assert reused is False
+    current = subprocess.run(["git", "branch", "--show-current"],
+                             cwd=work, capture_output=True, text=True).stdout.strip()
+    assert current == "brand-new"

@@ -57,6 +57,22 @@ class ForgejoClient:
         log.info("forgejo_pr_created", repo=f"{owner}/{repo}", pr=pr.get("number"), url=pr.get("html_url"))
         return pr
 
+    def find_open_pr(self, owner: str, repo: str, head: str, base: str = "main") -> dict[str, Any] | None:
+        """Return the open PR whose head branch is <head>, or None.
+
+        Lets a re-run that reuses an existing story branch adopt the PR a prior
+        attempt already opened instead of failing create_pr with a duplicate error.
+        """
+        resp = self._http.get(
+            f"{self._base}/api/v1/repos/{owner}/{repo}/pulls",
+            params={"state": "open", "limit": 50},
+        )
+        resp.raise_for_status()
+        for pr in resp.json():
+            if (pr.get("head") or {}).get("ref") == head and (pr.get("base") or {}).get("ref") == base:
+                return pr
+        return None
+
     def post_pr_comment(self, owner: str, repo: str, pr_number: int, body: str) -> dict[str, Any]:
         resp = self._http.post(
             f"{self._base}/api/v1/repos/{owner}/{repo}/issues/{pr_number}/comments",

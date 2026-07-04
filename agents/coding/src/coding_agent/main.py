@@ -156,7 +156,10 @@ def run_coding_agent(
                 raise RuntimeError(f"Clone failed: {exc}") from exc
 
             git_ops.configure_identity(tmpdir, settings.git_author_name, settings.git_author_email)
-            git_ops.create_branch(tmpdir, branch)
+            # Idempotent: if a prior attempt for this story already pushed this branch,
+            # build on top of it rather than recreating from main (which would push
+            # non-fast-forward and wedge the story).
+            git_ops.create_or_checkout_branch(tmpdir, branch)
 
             model = model_override or settings.model_coder
             summary = run_opencode_agent(
@@ -229,13 +232,20 @@ def run_coding_agent(
             + (f"{_test_line}\n\n" if _test_line else "")
             + f"---\n_Work item: `{item_id}`_"
         )
-        pr = forgejo.create_pr(
-            owner=owner,
-            repo=repo_name,
-            title=f"[{item_id[:8]}] {title}",
-            body=pr_body,
-            head=branch,
-        )
+        # Reuse an open PR if a prior attempt already opened one on this branch;
+        # otherwise open a fresh PR. Prevents a duplicate-PR error on retries.
+        existing_pr = forgejo.find_open_pr(owner, repo_name, branch)
+        if existing_pr:
+            pr = existing_pr
+            log.info("reusing_existing_pr", item_id=item_id, pr=pr.get("number"))
+        else:
+            pr = forgejo.create_pr(
+                owner=owner,
+                repo=repo_name,
+                title=f"[{item_id[:8]}] {title}",
+                body=pr_body,
+                head=branch,
+            )
         pr_url = pr.get("html_url", "")
         pr_number = pr.get("number")
 

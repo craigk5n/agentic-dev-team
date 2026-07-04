@@ -13,6 +13,7 @@ def _make_forgejo(pr_url="http://git/org/repo/pulls/1"):
     forgejo.__enter__ = lambda s: s
     forgejo.__exit__ = MagicMock(return_value=False)
     forgejo.create_pr.return_value = {"number": 1, "html_url": pr_url}
+    forgejo.find_open_pr.return_value = None  # no pre-existing PR by default
     forgejo.post_pr_comment.return_value = {}
     return forgejo
 
@@ -24,7 +25,7 @@ class TestRunCodingAgent:
             patch("coding_agent.main.ForgejoClient", return_value=forgejo),
             patch("coding_agent.main.git_ops.clone"),
             patch("coding_agent.main.git_ops.configure_identity"),
-            patch("coding_agent.main.git_ops.create_branch"),
+            patch("coding_agent.main.git_ops.create_or_checkout_branch"),
             patch("coding_agent.main.git_ops.commit_all", return_value="a" * 40),
             patch("coding_agent.main.git_ops.push"),
             patch("coding_agent.main.run_opencode_agent", return_value="Implemented feature"),
@@ -44,7 +45,7 @@ class TestRunCodingAgent:
             patch("coding_agent.main.ForgejoClient", return_value=forgejo),
             patch("coding_agent.main.git_ops.clone"),
             patch("coding_agent.main.git_ops.configure_identity"),
-            patch("coding_agent.main.git_ops.create_branch"),
+            patch("coding_agent.main.git_ops.create_or_checkout_branch"),
             patch("coding_agent.main.git_ops.commit_all", return_value=""),  # no changes
             patch("coding_agent.main.run_opencode_agent", return_value=summary),
             patch("coding_agent.main.tempfile.TemporaryDirectory") as mock_td,
@@ -92,7 +93,7 @@ class TestRunCodingAgent:
             patch("coding_agent.main.ForgejoClient", return_value=forgejo),
             patch("coding_agent.main.git_ops.clone"),
             patch("coding_agent.main.git_ops.configure_identity"),
-            patch("coding_agent.main.git_ops.create_branch"),
+            patch("coding_agent.main.git_ops.create_or_checkout_branch"),
             patch("coding_agent.main.run_opencode_agent", side_effect=RuntimeError("LLM error")),
             patch("coding_agent.main.tempfile.TemporaryDirectory") as mock_td,
         ):
@@ -107,7 +108,7 @@ class TestRunCodingAgent:
             patch("coding_agent.main.ForgejoClient", return_value=forgejo),
             patch("coding_agent.main.git_ops.clone"),
             patch("coding_agent.main.git_ops.configure_identity"),
-            patch("coding_agent.main.git_ops.create_branch"),
+            patch("coding_agent.main.git_ops.create_or_checkout_branch"),
             patch("coding_agent.main.git_ops.commit_all", return_value="a" * 40),
             patch("coding_agent.main.git_ops.push"),
             patch("coding_agent.main.run_opencode_agent", return_value="done"),
@@ -120,13 +121,34 @@ class TestRunCodingAgent:
         assert forgejo.create_pr.call_args.kwargs["owner"] == "alice"
         assert forgejo.create_pr.call_args.kwargs["repo"] == "backend"
 
+    def test_reuses_existing_open_pr(self, tmp_path):
+        # A retry that reuses a story branch must adopt the PR a prior attempt opened
+        # rather than opening a duplicate.
+        forgejo = _make_forgejo()
+        forgejo.find_open_pr.return_value = {"number": 42, "html_url": "http://git/org/repo/pulls/42"}
+        with (
+            patch("coding_agent.main.ForgejoClient", return_value=forgejo),
+            patch("coding_agent.main.git_ops.clone"),
+            patch("coding_agent.main.git_ops.configure_identity"),
+            patch("coding_agent.main.git_ops.create_or_checkout_branch"),
+            patch("coding_agent.main.git_ops.commit_all", return_value="a" * 40),
+            patch("coding_agent.main.git_ops.push"),
+            patch("coding_agent.main.run_opencode_agent", return_value="done"),
+            patch("coding_agent.main.tempfile.TemporaryDirectory") as mock_td,
+        ):
+            mock_td.return_value.__enter__.return_value = str(tmp_path)
+            mock_td.return_value.__exit__.return_value = False
+            result = run_coding_agent(_UUID, "title", "desc")
+        assert result["pr_url"] == "http://git/org/repo/pulls/42"
+        forgejo.create_pr.assert_not_called()
+
     def test_model_override_used(self, tmp_path):
         forgejo = _make_forgejo()
         with (
             patch("coding_agent.main.ForgejoClient", return_value=forgejo),
             patch("coding_agent.main.git_ops.clone"),
             patch("coding_agent.main.git_ops.configure_identity"),
-            patch("coding_agent.main.git_ops.create_branch"),
+            patch("coding_agent.main.git_ops.create_or_checkout_branch"),
             patch("coding_agent.main.git_ops.commit_all", return_value="a" * 40),
             patch("coding_agent.main.git_ops.push"),
             patch("coding_agent.main.run_opencode_agent", return_value="done") as mock_agent,
@@ -242,7 +264,7 @@ class TestInCoderTdd:
             patch("coding_agent.main.ForgejoClient", return_value=_make_forgejo()),
             patch("coding_agent.main.git_ops.clone"),
             patch("coding_agent.main.git_ops.configure_identity"),
-            patch("coding_agent.main.git_ops.create_branch"),
+            patch("coding_agent.main.git_ops.create_or_checkout_branch"),
             patch("coding_agent.main.git_ops.commit_all", return_value="a" * 40),
             patch("coding_agent.main.git_ops.push"),
             patch("coding_agent.main.tempfile.TemporaryDirectory"),
@@ -309,7 +331,7 @@ class TestInstallBeforeTests:
             patch("coding_agent.main.ForgejoClient", return_value=forgejo),
             patch("coding_agent.main.git_ops.clone"),
             patch("coding_agent.main.git_ops.configure_identity"),
-            patch("coding_agent.main.git_ops.create_branch"),
+            patch("coding_agent.main.git_ops.create_or_checkout_branch"),
             patch("coding_agent.main.git_ops.commit_all", return_value="a" * 40),
             patch("coding_agent.main.git_ops.push"),
             patch("coding_agent.main.tempfile.TemporaryDirectory") as mock_td,

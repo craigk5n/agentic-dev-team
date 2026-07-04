@@ -45,6 +45,31 @@ def test_forgejo_create_pr():
     assert pr["number"] == 7
 
 
+def test_forgejo_find_open_pr_matches_head():
+    with respx.mock:
+        respx.get(f"{BASE_FORGEJO}/api/v1/repos/alice/backend/pulls").mock(
+            return_value=httpx.Response(200, json=[
+                {"number": 5, "head": {"ref": "other"}, "base": {"ref": "main"}},
+                {"number": 9, "head": {"ref": "story-1/add-login"}, "base": {"ref": "main"}},
+            ])
+        )
+        with ForgejoClient(BASE_FORGEJO, "token") as client:
+            pr = client.find_open_pr("alice", "backend", "story-1/add-login")
+    assert pr["number"] == 9
+
+
+def test_forgejo_find_open_pr_none_when_absent():
+    with respx.mock:
+        respx.get(f"{BASE_FORGEJO}/api/v1/repos/alice/backend/pulls").mock(
+            return_value=httpx.Response(200, json=[
+                {"number": 5, "head": {"ref": "other"}, "base": {"ref": "main"}},
+            ])
+        )
+        with ForgejoClient(BASE_FORGEJO, "token") as client:
+            pr = client.find_open_pr("alice", "backend", "story-1/add-login")
+    assert pr is None
+
+
 def test_forgejo_get_pr():
     with respx.mock:
         respx.get(f"{BASE_FORGEJO}/api/v1/repos/alice/backend/pulls/7").mock(
