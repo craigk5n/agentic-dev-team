@@ -312,6 +312,18 @@ class TestCallHardening:
                                  model="m", api_key="", stack="", redis_conn=None)
         assert out == {"ok": 1} and mock.call_count == 2
 
+    def test_complete_json_aborts_on_insufficient_credits(self):
+        # Out-of-credit is unrecoverable — abort immediately without burning the retries.
+        import pytest
+        from planner_agent.decomposer import _complete_json
+        with patch("planner_agent.decomposer.litellm.completion",
+                   side_effect=Exception("OpenRouter: requires more credits, or fewer max_tokens")) as mock, \
+             patch("planner_agent.decomposer.time.sleep"):
+            with pytest.raises(Exception, match="requires more credits"):
+                _complete_json([{"role": "user", "content": "x"}],
+                               model="m", api_key="", stack="", redis_conn=None)
+        assert mock.call_count == 1   # no retries on an unrecoverable credit error
+
     def test_complete_json_retries_empty_content(self):
         from planner_agent.decomposer import _complete_json
         with patch("planner_agent.decomposer.litellm.completion",

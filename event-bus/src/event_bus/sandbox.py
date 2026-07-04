@@ -43,6 +43,12 @@ _ROLE_ENV: dict[str, list[str]] = {
     "reviewer": [
         "FORGEJO_API_TOKEN", "FORGEJO_REVIEWER_TOKEN", "FORGEJO_BASE_URL", "FORGEJO_GIT_URL",
         "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY",
+        # Subscription (claude-code/*) reviewer routes through the claude CLI, which needs
+        # the OAuth token scoped into the sandbox. Unlike the planner (which runs
+        # in-process), the reviewer runs here in an isolated container. (CLAUDE_CODE_BIN is
+        # intentionally omitted — the binary is on the sandbox PATH and _scoped_env would
+        # otherwise inject an empty value that overrides the adapter's "claude" default.)
+        "CLAUDE_CODE_OAUTH_TOKEN",
         "MODEL_REVIEWER", "MODEL_TESTER", "MODEL_SECURITY",
         "REDIS_URL",
     ],

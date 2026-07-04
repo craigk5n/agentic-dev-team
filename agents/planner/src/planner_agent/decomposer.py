@@ -25,6 +25,17 @@ _MAX_ATTEMPTS = 3           # initial + 2 retries
 _RETRY_BACKOFF = 2.0        # seconds, ×attempt
 _RATE_LIMIT_BACKOFF = 20.0  # seconds — 429s need a real pause, not a short retry
 
+# Provider "out of credit / quota" markers — an unrecoverable failure (no point retrying).
+_CREDIT_ERROR_MARKERS = (
+    "insufficient credits", "requires more credits", "add more credits",
+    "quota exceeded", "insufficient_quota", "payment required",
+)
+
+
+def _looks_like_credit_error(text: str) -> bool:
+    low = (text or "").lower()
+    return any(mk in low for mk in _CREDIT_ERROR_MARKERS)
+
 # Bounds — plan size scales with scope, but stays bounded.
 _MIN_EPICS, _MAX_EPICS = 3, 8
 _MIN_STORIES, _MAX_STORIES = 2, 6
@@ -192,6 +203,11 @@ def _complete_json(messages, *, model, api_key, stack, redis_conn, max_tokens=No
             return json.loads(clean)   # empty/malformed → JSONDecodeError → retry
         except Exception as exc:       # timeout, provider error, or bad JSON
             last_exc = exc
+            # Out of provider credit/quota is unrecoverable — retrying can't refill the
+            # balance, so abort immediately with a clear error instead of burning attempts.
+            if _looks_like_credit_error(str(exc)):
+                log.error("planner_llm_insufficient_credits", model=model, error=str(exc)[:200])
+                raise
             # Rate limits (429 — common on subscription/Claude Code planning) need a
             # much longer pause than a transient hiccup; a short backoff just wastes the
             # attempt. If it doesn't clear, the caller aborts and the import is resumable.

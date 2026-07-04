@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 from coding_agent.opencode_agent import (
     run_opencode_agent, _clean, _looks_like_provider_error,
     _looks_like_model_not_found, ModelNotFoundError,
+    _looks_like_credit_error, InsufficientCreditsError,
 )
 
 
@@ -73,6 +74,27 @@ class TestRunOpencodeAgent:
         ):
             with pytest.raises(RuntimeError, match="provider error/rate-limit"):
                 run_opencode_agent("Story", "desc", str(tmp_path), "model")
+
+    def test_insufficient_credits_raises_distinct_error(self, tmp_path):
+        # Out-of-credit is a distinct, unrecoverable error (not a generic provider error),
+        # so the event bus can park the story instead of burning the retry cap.
+        proc = _make_proc(["calling model…\n",
+                           "OpenRouter: This request requires more credits, or fewer max_tokens\n"])
+        with (
+            patch("coding_agent.opencode_agent.shutil.which", return_value="/bin/opencode"),
+            patch("coding_agent.opencode_agent.subprocess.Popen", return_value=proc),
+        ):
+            with pytest.raises(InsufficientCreditsError):
+                run_opencode_agent("Story", "desc", str(tmp_path), "model")
+
+
+class TestCreditErrorDetection:
+    def test_detects_credit_markers(self):
+        assert _looks_like_credit_error("insufficient credits remaining") is True
+        assert _looks_like_credit_error("quota exceeded for today") is True
+
+    def test_ignores_generic_provider_errors(self):
+        assert _looks_like_credit_error("temporarily rate-limited upstream") is False
 
 
 class TestModelNotFound:

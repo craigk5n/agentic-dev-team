@@ -273,6 +273,16 @@ class TestSandboxDockerMode:
         # DEFAULT_REPO belongs to the coding-agent group, not reviewer
         assert "DEFAULT_REPO" not in env
 
+    def test_scoped_env_reviewer_includes_claude_code_token(self):
+        # The subscription reviewer needs the Claude Code OAuth token in the sandbox.
+        from event_bus.sandbox import _scoped_env
+        import os
+        with patch.dict(os.environ, {"CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-xyz"}):
+            env = _scoped_env("reviewer.code_review")
+        assert env.get("CLAUDE_CODE_OAUTH_TOKEN") == "sk-ant-xyz"
+        # CLAUDE_CODE_BIN must NOT be injected (empty value would override "claude" default)
+        assert "CLAUDE_CODE_BIN" not in env
+
     def test_scoped_env_coding_agent_includes_forgejo(self):
         from event_bus.sandbox import _scoped_env
         import os

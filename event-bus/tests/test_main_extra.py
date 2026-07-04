@@ -1826,10 +1826,34 @@ class TestAutoEscalate:
         assert resp.json()["escalated"] is False
         assert r.get("escalate_pr:o/r:9") is None    # no escalation when disabled
 
-    def test_escalate_model_rejects_claude_code(self, client, monkeypatch):
+    def test_claude_code_allowed_on_reviewer_and_escalate(self, client, monkeypatch):
+        # The reviewer verdict + a stalled story's escalation may use the subscription.
         monkeypatch.setattr("event_bus.main._redis_conn", fakeredis.FakeRedis())
-        resp = client.patch("/api/config", json={"models": {"escalate": "claude-code/opus"}})
-        assert resp.status_code == 422    # subscription can't run the coder fleet
+        assert client.patch("/api/config",
+                            json={"models": {"reviewer": "claude-code/sonnet"}}).status_code == 200
+        assert client.patch("/api/config",
+                            json={"models": {"escalate": "claude-code/opus"}}).status_code == 200
+
+    def test_claude_code_rejected_on_coder(self, client, monkeypatch):
+        # The opencode coder can't resolve claude-code models — reject to avoid a silent no-op.
+        monkeypatch.setattr("event_bus.main._redis_conn", fakeredis.FakeRedis())
+        resp = client.patch("/api/config", json={"models": {"coder": "claude-code/sonnet"}})
+        assert resp.status_code == 422
+
+
+class TestCreditExhaustionDetection:
+    def test_detects_in_error_field(self):
+        from event_bus.main import _looks_like_credit_exhaustion
+        assert _looks_like_credit_exhaustion(
+            {"status": "error", "error": "opencode rejected: requires more credits"}) is True
+
+    def test_detects_in_reason_field(self):
+        from event_bus.main import _looks_like_credit_exhaustion
+        assert _looks_like_credit_exhaustion({"reason": "quota exceeded"}) is True
+
+    def test_ignores_transient_errors(self):
+        from event_bus.main import _looks_like_credit_exhaustion
+        assert _looks_like_credit_exhaustion({"error": "connection reset by peer"}) is False
 
 
 class TestRunningJobsByPr:

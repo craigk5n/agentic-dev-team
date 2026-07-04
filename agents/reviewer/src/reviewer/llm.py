@@ -83,6 +83,13 @@ def complete(
     model supports it, so a capable model can't answer with prose — attacking the
     bad-JSON verdict failures ("please paste the diff", empty replies) on flaky models.
     """
+    # Subscription models (claude-code/*) route through the local ``claude`` CLI instead
+    # of litellm — they draw on the operator's Claude Code subscription and cost no
+    # OpenRouter credit. The adapter feeds the prompt on stdin and returns the text.
+    if (model or "").strip().startswith("claude-code"):
+        from planner_agent import claude_code
+        return claude_code.complete(messages, model=model)
+
     kwargs: dict = {
         "model": model,
         "messages": messages,

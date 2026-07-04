@@ -159,6 +159,18 @@ _STUCK_IN_REVIEW_SECS = 600      # verdicts are fast; 10 min ⇒ lost fan-out
 _WATCH_ATTEMPT_CAP = 3           # after this many auto-recoveries, hand it to the operator
 _CODER_ERROR_CAP = 5             # consecutive coder failures before flagging for a human
 
+# A coder failure whose message carries these markers means the model provider is out of
+# credit/quota — unrecoverable by retry, so the story is parked for the operator directly.
+_CREDIT_EXHAUSTION_MARKERS = (
+    "insufficient credit", "quota exceeded", "requires more credits",
+    "add more credits", "payment required", "insufficient_quota",
+)
+
+
+def _looks_like_credit_exhaustion(result: dict) -> bool:
+    text = (str((result or {}).get("error", "")) + str((result or {}).get("reason", ""))).lower()
+    return any(mk in text for mk in _CREDIT_EXHAUSTION_MARKERS)
+
 
 def _story_age_secs(item: dict) -> float:
     from datetime import datetime, timezone
@@ -1446,6 +1458,17 @@ async def _run_coding_agent(item_id: str, title: str, description: str, story_pr
             except Exception: pass
         ratelimit.clear(_redis_conn, coder_model)   # the model is healthy
         log.info("coding_agent_complete", id=item_id, pr=result.get("pr_url"))
+    elif result.get("status") == "error" and _looks_like_credit_exhaustion(result):
+        # Out of provider credit/quota — unrecoverable, retrying can't refill the balance.
+        # Park immediately for the operator (no retry-cap churn) and flag the attention tray.
+        log.error("coder_insufficient_credits", id=item_id, error=str(result.get("error", ""))[:200])
+        update_state(item_id, "changes-requested")
+        if _redis_conn:
+            try:
+                _redis_conn.setex(f"stuck:{item_id}", 86_400, b"1")
+                _redis_conn.delete(_err_key)  # not a transient streak — don't count it
+            except Exception: pass
+        _record_coder_outcome(item_id, "abandoned")
     elif result.get("status") == "error":
         # Agent crashed / the model failed (e.g. rate-limit) — retry, but cap the streak so
         # a persistently-failing story is flagged for a human instead of looping forever.
@@ -2255,14 +2278,20 @@ async def patch_runtime_config(request: Request):
         body = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="invalid JSON")
-    # claude-code (subscription) models are supported only by the idea/planner call
-    # paths; the high-volume roles would fail their litellm calls — and must not draw
-    # on the subscription anyway (weekly caps would hard-stop them).
+    # claude-code (subscription) models route through the local ``claude`` CLI. Allowed on
+    # the planning roles (idea/planner), the reviewer (its verdict call goes through the
+    # same adapter), and the escalate slot (a stalled story's reviewer then uses the
+    # subscription; the opencode coder can't resolve claude-code and safely falls back to
+    # its base model). The coder/tester/security roles can't use it, so reject those to
+    # avoid a silent no-op. NOTE: heavy subscription use can hit weekly caps — operator's
+    # deliberate choice when OpenRouter credit is unavailable.
+    _CLAUDE_CODE_OK = ("idea", "planner", "reviewer", "escalate")
     for role, val in (body.get("models") or {}).items():
-        if str(val).strip().startswith("claude-code") and role not in ("idea", "planner"):
+        if str(val).strip().startswith("claude-code") and role not in _CLAUDE_CODE_OK:
             raise HTTPException(
                 status_code=422,
-                detail=f"claude-code models are planning-only (idea/planner), not '{role}'",
+                detail=f"claude-code models can't run the '{role}' role "
+                       f"(allowed: {', '.join(_CLAUDE_CODE_OK)})",
             )
     return asdict(patch_config(_redis_or_503(), body))
 

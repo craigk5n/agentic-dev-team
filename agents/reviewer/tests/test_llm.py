@@ -84,6 +84,19 @@ class TestComplete:
             with pytest.raises(ValueError):
                 complete("m", [{"role": "user", "content": "q"}])
 
+    def test_claude_code_model_routes_to_subscription(self):
+        # claude-code/* models bypass litellm and go through the claude CLI adapter.
+        import sys, types
+        fake = types.ModuleType("planner_agent.claude_code")
+        fake.is_claude_code_model = lambda m: str(m).startswith("claude-code")
+        fake.complete = lambda messages, model="", timeout=90.0: "SUB-REVIEW"
+        pkg = types.ModuleType("planner_agent"); pkg.claude_code = fake
+        with patch.dict(sys.modules, {"planner_agent": pkg, "planner_agent.claude_code": fake}), \
+             patch("reviewer.llm.litellm.completion") as mock_litellm:
+            out = complete("claude-code/sonnet", [{"role": "user", "content": "review this"}])
+        assert out == "SUB-REVIEW"
+        mock_litellm.assert_not_called()   # subscription path, never touches litellm
+
 
 class TestCreditErrorDetection:
     def test_detects_by_message(self):

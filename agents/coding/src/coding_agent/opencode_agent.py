@@ -66,6 +66,24 @@ def _looks_like_model_not_found(output: str) -> bool:
     return any(mk in low for mk in _MODEL_NOT_FOUND_MARKERS)
 
 
+# A provider "out of credit / quota" rejection is unrecoverable — retrying can't fix an
+# empty balance. Surface it distinctly (a subset of the generic provider errors above) so
+# the caller parks the story for the operator instead of burning the retry cap.
+_CREDIT_ERROR_MARKERS = (
+    "insufficient credits", "quota exceeded", "requires more credits",
+    "add more credits", "payment required", "insufficient_quota",
+)
+
+
+class InsufficientCreditsError(RuntimeError):
+    """The model provider rejected the call for lack of credit/quota (operator action)."""
+
+
+def _looks_like_credit_error(output: str) -> bool:
+    low = (output or "").lower()
+    return any(mk in low for mk in _CREDIT_ERROR_MARKERS)
+
+
 def _clean(line: str) -> str:
     return _ANSI_ESCAPE.sub("", line).rstrip("\r")
 
@@ -200,6 +218,9 @@ def run_opencode_agent(
         # opencode can exit 0 even when the LLM call itself failed (e.g. a free-tier 429
         # surfaced as a provider error). Such a run produced NO real work — treat it as an
         # error so the story is retried, not silently committed as "no changes / done".
+        if _looks_like_credit_error(output):
+            raise InsufficientCreditsError(
+                f"opencode LLM call rejected for insufficient credit/quota: {output[-300:]}")
         if _looks_like_provider_error(output):
             raise RuntimeError(f"opencode LLM call failed (provider error/rate-limit): {output[-300:]}")
         log.info("opencode_done", story=story_title, model=use_model)
