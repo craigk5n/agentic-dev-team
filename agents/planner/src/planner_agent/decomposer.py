@@ -86,10 +86,13 @@ Rules:
   last. More for a substantial epic, fewer for a small one.
 - Each story is an independently shippable, testable vertical slice.
 {no_stub}
+- Each story description MUST (a) name the specific target file(s) to create or modify and
+  (b) state its acceptance criteria — the observable behavior that makes it "done". NEVER
+  emit a story with an empty or one-line description; an under-specified story is rejected.
 - Each story description MUST start with "repo: {default_repo}" on its own line.
 
 Respond ONLY with valid JSON (no markdown fences):
-{{"stories": [{{"title": "<title>", "description": "repo: {default_repo}\\n<2-3 sentences: what to implement and how>", "priority": "urgent"|"high"|"medium"|"low"|"none"}}]}}
+{{"stories": [{{"title": "<title>", "description": "repo: {default_repo}\\n<what to implement, the target file(s), and 2-4 acceptance criteria>", "priority": "urgent"|"high"|"medium"|"low"|"none"}}]}}
 """
 
 _IMPORT_CRITIC_PROMPT = """\
@@ -226,6 +229,119 @@ def _ensure_repo_prefix(desc: str, default_repo: str) -> str:
     return desc
 
 
+# ── HS-3: reject empty / under-specified stories at planning time ────────────
+# #117 shipped with an EMPTY description and the coder responded by deleting the
+# Dockerfile; #111 (thin) mass-deleted files. An under-specified story gives the coder
+# room to do damage. The floor is raised in two places: the story prompts now demand
+# named target files + acceptance criteria, and this post-assembly guardrail never lets
+# an empty-description story reach dispatch.
+_MIN_STORY_CHARS = 30
+_MIN_STORY_WORDS = 5
+# A filename-with-extension anywhere in the body (e.g. `src/app.py`, `Dockerfile.web`).
+_FILE_RE = re.compile(r"[\w./\-]+\.[A-Za-z0-9]{1,6}\b")
+
+
+def _story_body(description: str) -> str:
+    """The story description minus its leading ``repo: ...`` line (the real spec)."""
+    lines = (description or "").splitlines()
+    if lines and lines[0].strip().lower().startswith("repo:"):
+        lines = lines[1:]
+    return "\n".join(lines).strip()
+
+
+def story_defects(story: dict) -> list[str]:
+    """Classify why a story is under-specified, or ``[]`` if it's implementable.
+
+    ``empty-description`` is the dangerous class — the demonstrated #117 failure — and is
+    the only one this module hard-gates (redraft or drop). ``under-specified`` (too thin)
+    and ``no-named-target-file`` are advisory: logged, but the story is kept, because
+    dropping real scope is worse than dispatching a terse-but-present story.
+    """
+    body = _story_body(story.get("description", ""))
+    if not body:
+        return ["empty-description"]
+    defects: list[str] = []
+    if len(body) < _MIN_STORY_CHARS or len(body.split()) < _MIN_STORY_WORDS:
+        defects.append("under-specified")
+    if not _FILE_RE.search(body):
+        defects.append("no-named-target-file")
+    return defects
+
+
+_REDRAFT_PROMPT = """\
+This story has an EMPTY or unusable description and cannot be safely implemented. An
+under-specified story once led a coding agent to DELETE files it shouldn't have. Rewrite
+it into a concrete, self-contained, implementable story.
+
+Project: {title}
+Epic: {epic}
+Story title: {story_title}
+Current description: {current}
+
+The rewrite MUST:
+- Name the specific target file(s) to create or modify.
+- List 2-4 acceptance criteria describing the finished, observable behavior.
+- Deliver a working, independently testable slice — never a stub or a pure deletion.
+- Start the description with "repo: {default_repo}" on its own line.
+
+Respond ONLY with valid JSON (no markdown fences):
+{{"title": "<title>", "description": "repo: {default_repo}\\n<what to implement + acceptance criteria>", "priority": "high"|"medium"|"low"}}
+"""
+
+
+def _redraft_story(story: dict, *, project_title: str, default_repo: str, **call) -> dict | None:
+    """One LLM call to turn an empty/unusable story into an implementable one. Returns the
+    redrafted story (tags preserved) or ``None`` if the call fails or still yields nothing."""
+    try:
+        data = _complete_json(
+            [{"role": "system", "content": _SYSTEM},
+             {"role": "user", "content": _REDRAFT_PROMPT.format(
+                 title=project_title, epic=story.get("epic", ""),
+                 story_title=story.get("title", ""),
+                 current=(_story_body(story.get("description", "")) or "(empty)"),
+                 default_repo=default_repo)}],
+            max_tokens=1200, **call)
+    except Exception as exc:  # noqa: BLE001 — a failed redraft falls through to a drop
+        log.warning("story_redraft_failed", title=story.get("title", "")[:80], error=str(exc)[:120])
+        return None
+    desc = _ensure_repo_prefix(data.get("description", ""), default_repo)
+    if not _story_body(desc):
+        return None
+    return {**story,
+            "title": (data.get("title") or story.get("title", ""))[:200],
+            "description": desc,
+            "priority": data.get("priority", story.get("priority", "medium"))}
+
+
+def _finalize_stories(flat: list[dict], *, project_title: str, default_repo: str,
+                      **call) -> list[dict]:
+    """HS-3 guardrail applied to the assembled story list. Never dispatch an
+    empty-description story: redraft it once, and drop it (logged, never silent) if it
+    can't be salvaged. Thin / file-less stories are logged advisory but kept."""
+    out: list[dict] = []
+    dropped: list[str] = []
+    thin = 0
+    for s in flat:
+        defects = story_defects(s)
+        if "empty-description" in defects:
+            fixed = _redraft_story(s, project_title=project_title,
+                                   default_repo=default_repo, **call)
+            if fixed and "empty-description" not in story_defects(fixed):
+                log.info("story_redrafted", title=fixed["title"][:80])
+                out.append(fixed)
+            else:
+                dropped.append(s.get("title", "")[:80])
+            continue
+        if defects:
+            thin += 1
+        out.append(s)
+    if thin:
+        log.warning("underspecified_stories_kept", count=thin)
+    if dropped:
+        log.error("empty_stories_dropped", count=len(dropped), titles=dropped)
+    return out
+
+
 def decompose_idea(
     title: str,
     description: str,
@@ -319,6 +435,11 @@ def decompose_idea(
                 "priority": s.get("priority", "medium"),
                 "epic": epic["name"],
             })
+    if not flat:
+        return _fallback(title, default_repo)
+
+    # HS-3: never dispatch an empty-description story (redraft or drop).
+    flat = _finalize_stories(flat, project_title=project_name, default_repo=default_repo, **call)
     if not flat:
         return _fallback(title, default_repo)
 
@@ -427,6 +548,9 @@ for each. Rules:
 - Carry each story's concrete spec (schemas, endpoints, names, acceptance) FROM THE PLAN
   into its description so a coding agent can implement it without the original document.
   Summarize long code listings into their essential requirements — do not copy every line.
+- Each story description MUST name the specific target file(s) and its acceptance criteria.
+  NEVER emit a story with an empty or one-line description — an under-specified story is
+  rejected before dispatch.
 - Each story description MUST start with "repo: {default_repo}" on its own line.
 
 Respond ONLY with valid JSON (no markdown fences):
@@ -570,6 +694,9 @@ def normalize_plan(
             log.info("import_critic_done", added=added)
         except Exception as exc:
             log.warning("import_critic_failed", error=str(exc)[:120])
+
+    # HS-3: never dispatch an empty-description story (redraft or drop).
+    flat = _finalize_stories(flat, project_title=project_name, default_repo=default_repo, **call)
 
     log.info("plan_normalized", project=project_name, epics=len(epics),
              stories=len(flat), resumed=resuming)

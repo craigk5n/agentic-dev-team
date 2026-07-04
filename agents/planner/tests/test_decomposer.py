@@ -343,3 +343,71 @@ class TestCallHardening:
                 _complete_json([{"role": "user", "content": "x"}],
                                model="m", api_key="", stack="", redis_conn=None)
         assert mock.call_count == 3   # initial + 2 retries
+
+
+_EPICS_1 = {"project_name": "P", "epics": [{"name": "E1", "description": "d"}]}
+# A good story: non-empty, names a file, has criteria.
+_GOOD = {"title": "Good one",
+         "description": "repo: dev/app\nBuild the login form in templates/login.html with "
+                        "field validation; acceptance: submit posts, errors render inline.",
+         "priority": "high"}
+
+
+class TestStoryDefects:
+    def test_empty_description_is_flagged(self):
+        from planner_agent.decomposer import story_defects
+        assert story_defects({"description": "repo: dev/app\n"}) == ["empty-description"]
+        assert story_defects({"description": ""}) == ["empty-description"]
+
+    def test_thin_description_is_under_specified(self):
+        from planner_agent.decomposer import story_defects
+        d = story_defects({"description": "repo: dev/app\nAdd it."})
+        assert "under-specified" in d
+
+    def test_no_named_file_is_flagged_but_not_empty(self):
+        from planner_agent.decomposer import story_defects
+        d = story_defects({"description": "repo: dev/app\nImplement the whole checkout "
+                                          "flow end to end with all its acceptance behavior."})
+        assert "no-named-target-file" in d
+        assert "empty-description" not in d
+
+    def test_well_specified_story_has_no_defects(self):
+        from planner_agent.decomposer import story_defects
+        assert story_defects(_GOOD) == []
+
+    def test_story_body_strips_repo_line(self):
+        from planner_agent.decomposer import _story_body
+        assert _story_body("repo: dev/app\nreal spec here") == "real spec here"
+        assert _story_body("repo: dev/app") == ""
+
+
+class TestEmptyStoryGuardrail:
+    def test_empty_story_is_redrafted(self):
+        mix = {"stories": [_GOOD, {"title": "Empty one",
+                                   "description": "repo: dev/app\n", "priority": "medium"}]}
+        redraft = {"title": "Empty one (redrafted)",
+                   "description": "repo: dev/app\nImplement it in src/x.py; acceptance: a, b, c.",
+                   "priority": "medium"}
+        with patch("planner_agent.decomposer.litellm.completion",
+                   side_effect=_seq(_EPICS_1, mix, _NO_MISSING, redraft)):
+            plan = decompose_idea("T", "D", model="m", default_repo="dev/app")
+        titles = [s["title"] for s in plan["stories"]]
+        assert titles == ["Good one", "Empty one (redrafted)"]
+
+    def test_empty_story_dropped_when_redraft_fails(self):
+        mix = {"stories": [_GOOD, {"title": "Empty one",
+                                   "description": "repo: dev/app\n", "priority": "medium"}]}
+        with patch("planner_agent.decomposer.litellm.completion",
+                   side_effect=_seq(_EPICS_1, mix, _NO_MISSING)), \
+             patch("planner_agent.decomposer._redraft_story", return_value=None):
+            plan = decompose_idea("T", "D", model="m", default_repo="dev/app")
+        titles = [s["title"] for s in plan["stories"]]
+        assert titles == ["Good one"]           # empty one dropped, never dispatched
+
+    def test_thin_story_is_kept_not_dropped(self):
+        thin = {"stories": [{"title": "Thin one",
+                             "description": "repo: dev/app\nAdd it.", "priority": "low"}]}
+        with patch("planner_agent.decomposer.litellm.completion",
+                   side_effect=_seq(_EPICS_1, thin, _NO_MISSING)):
+            plan = decompose_idea("T", "D", model="m", default_repo="dev/app")
+        assert [s["title"] for s in plan["stories"]] == ["Thin one"]
