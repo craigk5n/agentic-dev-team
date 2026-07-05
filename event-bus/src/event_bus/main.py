@@ -1245,6 +1245,10 @@ def _augment_coder_prompt(story_prompt: str, stack, sdlc, guides=()) -> str:
     if getattr(stack, "security_checklist", "").strip():
         extra.append("Security requirements (the reviewer will block on these):\n"
                      + stack.security_checklist.strip())
+    # HS-4: the reviewer blocks unexpected deletions, so tell the coder up front.
+    extra.append("Do NOT delete or gut existing files unless this story explicitly asks "
+                 "for it. Removing tracked files the story didn't call for is blocked at "
+                 "review — edit in place and preserve unrelated code, config, and tests.")
     if sdlc.coder_directive.strip():
         extra.append("Development style:\n" + sdlc.coder_directive.strip())
     for g in guides:

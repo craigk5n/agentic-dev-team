@@ -8,10 +8,48 @@ import structlog
 
 from reviewer import git_ops, llm
 from reviewer.config import settings
+from reviewer.deletion_guard import deletion_guardrail
 from reviewer.forgejo_client import ForgejoClient
 from reviewer.verdicts import store_and_check, post_aggregated_and_gate
 
 log = structlog.get_logger()
+
+
+def _fetch_deletion_guard(forgejo: ForgejoClient, owner: str, repo: str,
+                          pr_number: int) -> dict:
+    """HS-4: compute the deletion guardrail from the PR's changed files + its story intent
+    (PR title/body, set by the coder from the story). Best-effort — any Forgejo error
+    yields a no-concern result so our own failure never blocks or crashes the review."""
+    try:
+        files = forgejo.get_pr_files(owner, repo, pr_number)
+        try:
+            pr = forgejo.get_pr(owner, repo, pr_number)
+            intent = f"{pr.get('title', '')}\n{pr.get('body', '')}"
+        except Exception:
+            intent = ""
+        return deletion_guardrail(files, intent)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("deletion_guard_skipped", error=str(exc)[:120])
+        return {"concern": False, "block": False, "removed": [], "gutted": [], "message": ""}
+
+
+def _apply_deletion_guard(verdict: dict, guard: dict) -> dict:
+    """Fold the deletion guardrail into the code-review verdict. An unexpected deletion is
+    a hard block (force ``fail``); an expected one is surfaced as a finding but not blocked.
+    Returns a new verdict dict (never mutates the input)."""
+    if not guard.get("concern"):
+        return verdict
+    findings = list(verdict.get("findings", []))
+    files = (guard.get("removed", []) + guard.get("gutted", []))
+    severity = "critical" if guard.get("block") else "low"
+    findings.insert(0, {"severity": severity, "file": files[0] if files else "?",
+                        "line": 0, "message": guard.get("message", "")})
+    new = {**verdict, "findings": findings}
+    if guard.get("block"):
+        new["status"] = "fail"
+        new["summary"] = ("Blocked: unexpected file deletion. " +
+                          (verdict.get("summary", "") or "")).strip()
+    return new
 
 
 def _format_review_comment(verdict: dict) -> str:
@@ -60,6 +98,19 @@ def run_code_review(
         git_ops.clone(settings.forgejo_clone_base, owner, repo, settings.effective_forgejo_token, tmpdir, branch=head_ref)
         diff = git_ops.get_diff(tmpdir, base_ref, head_sha)
 
+    # HS-4: deterministically detect unexpected file deletions before the LLM runs, so we
+    # can both surface them in the reviewer's prompt and block on them regardless of what
+    # the LLM notices.
+    with ForgejoClient(settings.forgejo_base_url, settings.effective_forgejo_token) as forgejo:
+        guard = _fetch_deletion_guard(forgejo, owner, repo, pr_number)
+    if guard.get("concern"):
+        task_prompt = (task_prompt or "") + (
+            "\n\n⚠️ Deletion notice — this PR removes existing files. Confirm every removal "
+            "is intended and safe:\n" + guard.get("message", ""))
+        log.info("deletion_guard", repo=repo_full_name, pr=pr_number,
+                 block=guard.get("block"), removed=len(guard.get("removed", [])),
+                 gutted=len(guard.get("gutted", [])))
+
     if not diff.strip():
         verdict = {"status": "pass", "summary": "No diff detected.", "findings": []}
     else:
@@ -82,6 +133,8 @@ def run_code_review(
             return {"status": "error", "role": "code_review", "reason": "insufficient_credits",
                     "detail": str(exc)[:300], "operator_action": True}
 
+    # HS-4: an unexpected deletion forces a blocking verdict even if the LLM passed it.
+    verdict = _apply_deletion_guard(verdict, guard)
     verdict["role"] = "code_review"
 
     with ForgejoClient(settings.forgejo_base_url, settings.effective_forgejo_token) as forgejo:

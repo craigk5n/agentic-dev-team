@@ -96,6 +96,74 @@ class TestRunCodeReview:
         assert fg.post_pr_comment.call_count >= 2
 
 
+class TestDeletionGuardIntegration:
+    def _forgejo_with_files(self, files, pr):
+        fg = _make_forgejo()
+        fg.get_pr_files.return_value = files
+        fg.get_pr.return_value = pr
+        return fg
+
+    def test_unexpected_deletion_forces_fail(self):
+        # LLM passes, but the PR deletes a tracked file and the story is not a refactor →
+        # the verdict is forced to fail (blocked).
+        r = fakeredis.FakeRedis()
+        fg = self._forgejo_with_files(
+            [{"filename": "Dockerfile", "status": "deleted", "additions": 0, "deletions": 20}],
+            {"title": "Add health endpoint", "body": "repo: alice/backend"},
+        )
+        with (
+            patch("reviewer.code_review.git_ops.clone"),
+            patch("reviewer.code_review.git_ops.get_diff", return_value="diff --git"),
+            patch("reviewer.code_review.llm.review_diff",
+                  return_value={"status": "pass", "summary": "looks fine", "findings": []}),
+            patch("reviewer.code_review.ForgejoClient", return_value=fg),
+            patch("reviewer.code_review.redis.from_url", return_value=r),
+        ):
+            from reviewer.code_review import run_code_review
+            result = run_code_review("alice/backend", 7, "a" * 40)
+
+        assert result["status"] == "fail"
+        assert any(f.get("severity") == "critical" for f in result["findings"])
+        assert "Dockerfile" in result["findings"][0]["message"]
+
+    def test_expected_deletion_does_not_block(self):
+        r = fakeredis.FakeRedis()
+        fg = self._forgejo_with_files(
+            [{"filename": "legacy.py", "status": "deleted", "additions": 0, "deletions": 30}],
+            {"title": "Refactor: remove legacy adapter", "body": ""},
+        )
+        with (
+            patch("reviewer.code_review.git_ops.clone"),
+            patch("reviewer.code_review.git_ops.get_diff", return_value="diff --git"),
+            patch("reviewer.code_review.llm.review_diff",
+                  return_value={"status": "pass", "summary": "ok", "findings": []}),
+            patch("reviewer.code_review.ForgejoClient", return_value=fg),
+            patch("reviewer.code_review.redis.from_url", return_value=r),
+        ):
+            from reviewer.code_review import run_code_review
+            result = run_code_review("alice/backend", 7, "a" * 40)
+
+        assert result["status"] == "pass"          # allowed — refactor intent
+
+    def test_forgejo_error_does_not_block(self):
+        # If fetching PR files fails, the guard must not block or crash the review.
+        r = fakeredis.FakeRedis()
+        fg = _make_forgejo()
+        fg.get_pr_files.side_effect = RuntimeError("forgejo down")
+        with (
+            patch("reviewer.code_review.git_ops.clone"),
+            patch("reviewer.code_review.git_ops.get_diff", return_value="diff --git"),
+            patch("reviewer.code_review.llm.review_diff",
+                  return_value={"status": "pass", "summary": "ok", "findings": []}),
+            patch("reviewer.code_review.ForgejoClient", return_value=fg),
+            patch("reviewer.code_review.redis.from_url", return_value=r),
+        ):
+            from reviewer.code_review import run_code_review
+            result = run_code_review("alice/backend", 7, "a" * 40)
+
+        assert result["status"] == "pass"
+
+
 class TestFormatReviewComment:
     def test_renders_finding_with_inline_suggestion(self):
         from reviewer.code_review import _format_review_comment
