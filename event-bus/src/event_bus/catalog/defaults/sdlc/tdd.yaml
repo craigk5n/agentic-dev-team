@@ -8,6 +8,10 @@ planner_directive: |
   Do NOT create separate "write failing tests" / "implement" stories: a test-only PR
   is red by design and would block merge. Phrase each story test-first, e.g.
   "Implement X (test-first): add tests covering <behavior>, then the code to pass them".
+  Secure by default: when porting or adopting existing behavior, never plan an insecure
+  default (auth-off-when-unset / "empty credentials = allow", 0.0.0.0 binds, default
+  passwords, permissive CORS). Plan security-relevant behavior deny/closed by default, with
+  any open mode behind an explicit opt-in flag, and cover the secure default in the tests.
 coder_directive: |
   Work test-first (red-green-refactor) within this one story: write the tests first
   and run them to confirm they fail, then write the minimal code to make them pass,

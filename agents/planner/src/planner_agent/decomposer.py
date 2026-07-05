@@ -54,6 +54,20 @@ The target repository is ALREADY scaffolded (build files, test harness, CI exist
 - NEVER a story that only declares a signature, stub, or placeholder: it fails review
   and cannot be fixed within its own scope."""
 
+# HS-8: the planner must not prescribe a vulnerability. #15 told the coder "empty
+# credentials = auth open (matches the Go implementation)"; the reviewer then flagged it as
+# a critical bypass, plan and review fought, and it shipped. When porting/adopting behavior,
+# security-relevant defaults must be planned secure-by-default, not silently reproduced.
+_SECURE_DEFAULTS = """\
+- SECURE BY DEFAULT: when porting or adopting behavior from an existing implementation or
+  spec, do NOT reproduce insecure defaults. Any security-relevant behavior — auth/authz
+  disabled or bypassed when a value is unset ("empty credentials = allow"), binding to
+  0.0.0.0, permissive CORS/CSRF, a default or hardcoded password/token, disabled
+  TLS/verification — must be planned deny/closed by default, with any open or insecure mode
+  behind an explicit opt-in config flag. If the source system is insecure, the story must
+  call out the SECURE default (state it explicitly) rather than silently porting the
+  insecure one — otherwise the coder builds it and the reviewer blocks it."""
+
 _EPICS_PROMPT = """\
 Break this project into EPICS — the major feature areas needed to deliver it in full.
 
@@ -86,6 +100,7 @@ Rules:
   last. More for a substantial epic, fewer for a small one.
 - Each story is an independently shippable, testable vertical slice.
 {no_stub}
+{secure_defaults}
 - Each story description MUST (a) name the specific target file(s) to create or modify and
   (b) state its acceptance criteria — the observable behavior that makes it "done". NEVER
   emit a story with an empty or one-line description; an under-specified story is rejected.
@@ -393,7 +408,7 @@ def decompose_idea(
                      epic_desc=epic["description"], other_epics=others,
                      style_block=_style_block(sdlc_directive, best_practices),
                      min_s=_MIN_STORIES, max_s=_MAX_STORIES, no_stub=_NO_STUB,
-                     default_repo=default_repo)}],
+                     secure_defaults=_SECURE_DEFAULTS, default_repo=default_repo)}],
                 **call)
             stories = data.get("stories", [])[:_MAX_STORIES]
         except Exception as exc:
@@ -545,6 +560,7 @@ Find EVERY story/task in this section that belongs to the epic and produce one s
 for each. Rules:
 - The target repo is ALREADY scaffolded — OMIT pure setup/scaffolding stories.
 {no_stub}
+{secure_defaults}
 - Carry each story's concrete spec (schemas, endpoints, names, acceptance) FROM THE PLAN
   into its description so a coding agent can implement it without the original document.
   Summarize long code listings into their essential requirements — do not copy every line.
@@ -633,7 +649,8 @@ def normalize_plan(
                 [{"role": "system", "content": _SYSTEM},
                  {"role": "user", "content": _NORMALIZE_STORIES_PROMPT.format(
                      plan=section, epic_name=epic["name"], epic_desc=epic["description"],
-                     no_stub=_NO_STUB, default_repo=default_repo)}],
+                     no_stub=_NO_STUB, secure_defaults=_SECURE_DEFAULTS,
+                     default_repo=default_repo)}],
                 max_tokens=_IMPORT_STORY_TOKENS, timeout=_IMPORT_TIMEOUT,
                 attempts=_IMPORT_ATTEMPTS, **call)
             stories = data.get("stories", [])

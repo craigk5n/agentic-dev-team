@@ -4,6 +4,10 @@ planner_directive: |
   Front-load a single "Write the design/spec" story that captures interfaces,
   data shapes, and acceptance criteria before any implementation stories. Later
   implementation stories must reference and conform to that spec.
+  Secure by default: when porting or adopting existing behavior, never plan an insecure
+  default (auth-off-when-unset / "empty credentials = allow", 0.0.0.0 binds, default
+  passwords, permissive CORS). Plan security-relevant behavior deny/closed by default, with
+  any open mode behind an explicit opt-in flag — capture the secure default in the spec.
 coder_directive: |
   Implement strictly to the documented spec; if the spec is ambiguous, note it in
   the PR rather than guessing.

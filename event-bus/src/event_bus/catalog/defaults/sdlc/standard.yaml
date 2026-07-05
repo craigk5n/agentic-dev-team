@@ -4,5 +4,9 @@ planner_directive: |
   Decompose the work feature-first into small, independently shippable stories.
   Each story should deliver a vertical slice of functionality with its own tests
   included in the same story.
+  Secure by default: when porting or adopting existing behavior, never plan an insecure
+  default (auth-off-when-unset / "empty credentials = allow", 0.0.0.0 binds, default
+  passwords, permissive CORS). Plan security-relevant behavior deny/closed by default, with
+  any open mode behind an explicit opt-in flag — state the secure default in the story.
 coder_directive: ""
 story_ordering: Dependencies first; each story self-contained with its tests.

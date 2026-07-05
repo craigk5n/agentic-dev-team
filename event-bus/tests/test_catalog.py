@@ -125,6 +125,15 @@ class TestDefaults:
         ids = set(load_sdlc().keys())
         assert {"standard", "tdd", "spec-first"} <= ids
 
+    def test_sdlc_directives_require_secure_defaults(self):
+        # HS-8: every SDLC's planner directive must carry the secure-by-default guidance so
+        # the plan never prescribes an insecure port (auth-off-when-unset, 0.0.0.0, etc.).
+        sdlc = load_sdlc()
+        for sid in ("standard", "tdd", "spec-first"):
+            d = sdlc[sid].planner_directive.lower()
+            assert "secure by default" in d, f"{sid} missing secure-default guidance"
+            assert "opt-in" in d, f"{sid} should require an opt-in flag for open modes"
+
     def test_python_stack_shape(self):
         py = load_stacks()["python"]
         assert "pytest" in py.ci_workflow

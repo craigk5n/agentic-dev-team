@@ -411,3 +411,26 @@ class TestEmptyStoryGuardrail:
                    side_effect=_seq(_EPICS_1, thin, _NO_MISSING)):
             plan = decompose_idea("T", "D", model="m", default_repo="dev/app")
         assert [s["title"] for s in plan["stories"]] == ["Thin one"]
+
+
+class TestSecureDefaultsDirective:
+    def test_decompose_stories_prompt_carries_secure_defaults(self):
+        # HS-8: the stories-generation prompt must tell the planner to plan secure-by-default
+        # (not silently port an insecure behavior like "empty credentials = allow").
+        with patch("planner_agent.decomposer.litellm.completion",
+                   side_effect=_seq(_EPICS_1, {"stories": [_GOOD]}, _NO_MISSING)) as m:
+            decompose_idea("Auth", "Port the Go auth service", model="m", default_repo="dev/app")
+        stories_prompt = m.call_args_list[1].kwargs["messages"][1]["content"].lower()
+        assert "secure by default" in stories_prompt
+        assert "empty credentials = allow" in stories_prompt
+
+    def test_normalize_stories_prompt_carries_secure_defaults(self):
+        # The port/import path (how DEVHUB was planned) must carry it too — SDLC directives
+        # don't reach normalize_plan, so the directive lives in the prompt itself.
+        epics = [{"name": "Auth", "description": "port auth"}]
+        with patch("planner_agent.decomposer.litellm.completion",
+                   side_effect=_seq({"stories": [_GOOD]}, {"missing": []})) as m:
+            normalize_plan("A pasted plan porting the Go auth behavior. " * 5,
+                           model="m", default_repo="dev/app", epics=epics)
+        stories_prompt = m.call_args_list[0].kwargs["messages"][1]["content"].lower()
+        assert "secure by default" in stories_prompt
