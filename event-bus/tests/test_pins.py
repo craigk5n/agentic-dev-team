@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import types
+from unittest.mock import AsyncMock
 
 import fakeredis
 import pytest
@@ -249,3 +250,54 @@ class TestReplayInRunPlanner:
 
         assert called["planner"] is False   # no silent fall back to fresh planning
         assert created == []                 # nothing persisted
+
+
+# ── Story 1.3: operator control to select replay ───────────────────────────────
+
+_IDEA = {"id": "armX", "type": "idea", "title": "W", "description": "d",
+         "state": "pending-approval"}
+
+
+class TestReplayEndpoint:
+    def test_happy_path_sets_marker_and_triggers_planner(self, client, monkeypatch):
+        pins.write_pin("srcpin", CANNED_PLAN, "m")           # into isolated pins_dir
+        monkeypatch.setattr(m, "get_item", lambda _id: dict(_IDEA))
+        monkeypatch.setattr(m, "update_state", lambda *a, **k: None)
+        monkeypatch.setattr(m, "_run_planner", AsyncMock())
+
+        resp = client.post("/api/items/armX/replay", json={"pin": "srcpin"})
+
+        assert resp.status_code == 202
+        assert resp.json()["pin"] == "srcpin"
+        m._redis_conn.set.assert_any_call("plan_replay:armX", "srcpin")
+        m._run_planner.assert_called_once()
+
+    def test_invalid_pin_rejected_422(self, client, monkeypatch):
+        monkeypatch.setattr(m, "get_item", lambda _id: dict(_IDEA))
+        monkeypatch.setattr(m, "_run_planner", AsyncMock())
+        resp = client.post("/api/items/armX/replay", json={"pin": "does-not-exist"})
+        assert resp.status_code == 422
+        assert "invalid pin" in resp.json()["detail"]
+        m._run_planner.assert_not_called()
+
+    def test_missing_pin_rejected_422(self, client, monkeypatch):
+        monkeypatch.setattr(m, "get_item", lambda _id: dict(_IDEA))
+        resp = client.post("/api/items/armX/replay", json={})
+        assert resp.status_code == 422
+
+    def test_unknown_item_404(self, client, monkeypatch):
+        monkeypatch.setattr(m, "get_item", lambda _id: None)
+        resp = client.post("/api/items/none/replay", json={"pin": "x"})
+        assert resp.status_code == 404
+
+    def test_non_idea_rejected_409(self, client, monkeypatch):
+        monkeypatch.setattr(m, "get_item", lambda _id: {"id": "s1", "type": "story"})
+        resp = client.post("/api/items/s1/replay", json={"pin": "x"})
+        assert resp.status_code == 409
+
+    def test_provenance_surfaced_on_get(self, client, monkeypatch):
+        monkeypatch.setattr(m, "get_item", lambda _id: {"id": "armX", "type": "idea"})
+        m._redis_conn.get.return_value = b"srcpin"
+        resp = client.get("/api/items/armX")
+        assert resp.status_code == 200
+        assert resp.json().get("replay_pin") == "srcpin"

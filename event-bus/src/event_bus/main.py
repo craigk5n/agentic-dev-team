@@ -838,6 +838,15 @@ async def get_work_item(item_id: str):
     item = get_item(item_id)
     if not item:
         raise HTTPException(status_code=404, detail="item not found")
+    # Provenance: surface the replay pin if this build was started from one (Story 1.3).
+    try:
+        raw = _redis_conn.get(_PLAN_REPLAY_KEY.format(item_id)) if _redis_conn is not None else None
+        if isinstance(raw, (bytes, bytearray)):
+            item = {**item, "replay_pin": raw.decode()}
+        elif isinstance(raw, str):
+            item = {**item, "replay_pin": raw}
+    except Exception:
+        pass
     return item
 
 
@@ -911,6 +920,36 @@ async def approve_item(item_id: str, request: Request):
     # Kick off planner in the background so the response returns immediately
     asyncio.create_task(_run_planner(item_id, item["title"], item["description"] or ""))
     return updated
+
+
+@app.post("/api/items/{item_id}/replay", status_code=status.HTTP_202_ACCEPTED)
+async def replay_item(item_id: str, request: Request):
+    """Start a build for an idea by *replaying* a pinned plan instead of calling the
+    planner LLM (Story 1.3). Body: ``{"pin": "<item-id-or-path>"}``. Holds the story
+    tree constant across experiment arms. Validates the pin before committing."""
+    item = get_item(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="item not found")
+    if item.get("type") != "idea":
+        raise HTTPException(status_code=409, detail="replay applies to ideas only")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    pin_ref = (body.get("pin") or "").strip() if isinstance(body, dict) else ""
+    if not pin_ref:
+        raise HTTPException(status_code=422, detail="missing 'pin' reference")
+    # Validate the pin loads before spending a build on it.
+    from event_bus import pins
+    try:
+        pins.load_pin(pin_ref)
+    except pins.PinError as exc:
+        raise HTTPException(status_code=422, detail=f"invalid pin: {exc}")
+    _redis_or_503().set(_PLAN_REPLAY_KEY.format(item_id), pin_ref)
+    update_state(item_id, "approved")
+    log.info("replay_requested", id=item_id, pin=pin_ref)
+    asyncio.create_task(_run_planner(item_id, item["title"], item["description"] or ""))
+    return {"status": "replaying", "id": item_id, "pin": pin_ref}
 
 
 def _slugify(text: str) -> str:
