@@ -59,14 +59,41 @@ ci_workflow: |
               FRESH=/tmp/freshenv/bin
               "$FRESH/python" -m pip install -q --upgrade pip
               "$FRESH/python" -m pip install -q pytest pytest-asyncio
-              if ! "$FRESH/python" -m pip install -q . ; then
-                echo "::error:: clean 'pip install .' failed — fix pyproject build backend / dependencies"
-                exit 1
+              # HS-6: prefer the committed lockfile so the versions CI validates are EXACTLY
+              # what a later runtime `pip install` gets. A fresh resolve pulls newer
+              # transitive deps than CI tested — the starlette/anyio/mcp drift that broke the
+              # DEVHUB build after a green CI.
+              if [ -f requirements.lock ]; then
+                echo "Installing pinned dependencies from requirements.lock…"
+                if ! "$FRESH/python" -m pip install -q -r requirements.lock; then
+                  echo "::error:: install from requirements.lock failed — regenerate it (pip freeze --exclude-editable > requirements.lock) and commit"
+                  exit 1
+                fi
+                "$FRESH/python" -m pip install -q --no-deps -e . || true
+                LOCK_USED=1
+              else
+                if ! "$FRESH/python" -m pip install -q -e . ; then
+                  echo "::error:: clean 'pip install' failed — fix pyproject build backend / dependencies"
+                  exit 1
+                fi
+                LOCK_USED=
               fi
-              "$FRESH/python" -m pip install -q '.[dev]' 2>/dev/null || true
+              # Keep the project editable so --exclude-editable drops it from the lock below.
+              "$FRESH/python" -m pip install -q -e '.[dev]' 2>/dev/null || true
               [ -f requirements.txt ] && "$FRESH/python" -m pip install -q -r requirements.txt || true
-              echo "Running tests against declared dependencies only (isolated venv)…"
+              echo "Running tests against ${LOCK_USED:+locked }dependencies (isolated venv)…"
               "$FRESH/python" -m pytest -q
+              # HS-6: regenerate the lock from the resolved env; WARN (never fail) if the
+              # committed lock is missing or stale, so the coder/operator commits a fresh one.
+              "$FRESH/python" -m pip freeze --exclude-editable > /tmp/requirements.lock.new 2>/dev/null || true
+              if [ -f requirements.lock ]; then
+                if ! diff -q requirements.lock /tmp/requirements.lock.new >/dev/null 2>&1; then
+                  echo "::warning:: requirements.lock is stale — run 'pip freeze --exclude-editable > requirements.lock' and commit the update."
+                fi
+              elif [ -s /tmp/requirements.lock.new ]; then
+                echo "::warning:: no requirements.lock committed — add one so runtime installs match CI. Generated lock:"
+                cat /tmp/requirements.lock.new
+              fi
             else
               echo "venv unavailable — falling back to the in-image runner (deps not isolated)"
               python3 -m pytest -q
@@ -125,6 +152,36 @@ scaffold:
   tests/test_smoke.py: |
     def test_smoke():
         assert True
+  .forgejo/workflows/deps-bump.yml: |
+    name: deps-bump
+    # HS-6: opt-in / scheduled dependency bump check. Installs the LATEST resolvable
+    # versions (ignoring requirements.lock) and runs the suite, so version drift or a
+    # needed security bump is caught on a cadence instead of in production. It does NOT
+    # commit — from a green run, regenerate and commit the lock as instructed below.
+    on:
+      workflow_dispatch:
+      schedule:
+        - cron: "0 6 * * 1"   # weekly, Monday 06:00 UTC
+    jobs:
+      bump:
+        runs-on: ubuntu-latest
+        container: dev-agents/coder-python:latest
+        steps:
+          - uses: actions/checkout@v4
+          - name: Install latest deps and test
+            run: |
+              set -euo pipefail
+              python3 -m venv /tmp/bumpenv
+              B=/tmp/bumpenv/bin
+              "$B/python" -m pip install -q --upgrade pip
+              "$B/python" -m pip install -q pytest pytest-asyncio
+              "$B/python" -m pip install -q -e '.[dev]' 2>/dev/null || "$B/python" -m pip install -q -e .
+              [ -f requirements.txt ] && "$B/python" -m pip install -q -U -r requirements.txt || true
+              echo "Testing against the latest resolvable dependencies (lock ignored)…"
+              "$B/python" -m pytest -q
+              echo "If green, refresh the lock and commit it:"
+              echo "  pip freeze --exclude-editable > requirements.lock"
+              "$B/python" -m pip freeze --exclude-editable
   .gitignore: |
     __pycache__/
     *.py[cod]
@@ -160,6 +217,12 @@ best_practices_prompt: |
   [tool.pytest.ini_options] sections intact. Pin deps and prefer well-maintained libraries
   with no known advisories — imported dependencies are scanned for known vulnerabilities
   with pip-audit in CI, which will fail the build if any are found.
+  When you add or change dependencies, also commit a LOCKFILE so the exact versions CI
+  validated are what a later runtime install gets (this prevents "green in CI, broke on
+  deploy" version drift): in a clean venv run
+  `pip freeze --exclude-editable > requirements.lock` and commit requirements.lock. CI
+  installs from it when present. If the app ships its own Dockerfile/runtime install, install
+  from requirements.lock there too so production matches CI exactly.
 
 security_checklist: |
   Apply these BEFORE opening the PR — the reviewer will block on any of them:

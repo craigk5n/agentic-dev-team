@@ -131,6 +131,25 @@ class TestDefaults:
         assert "pyproject.toml" in py.scaffold
         assert py.best_practices_prompt
 
+    def test_python_ci_installs_from_lockfile(self):
+        # HS-6: the fresh-venv gate must install from requirements.lock when present so the
+        # versions CI validates are exactly what a runtime install gets (no version drift).
+        wf = load_stacks()["python"].ci_workflow
+        assert "requirements.lock" in wf
+        assert "pip install -q -r requirements.lock" in wf
+        # And it must regenerate + warn on a stale/missing lock (never silently pass).
+        assert "pip freeze --exclude-editable" in wf
+
+    def test_python_scaffold_ships_deps_bump_workflow(self):
+        # HS-6: an opt-in / scheduled bump job that tests against the latest versions.
+        scaffold = load_stacks()["python"].scaffold
+        assert ".forgejo/workflows/deps-bump.yml" in scaffold
+        bump = scaffold[".forgejo/workflows/deps-bump.yml"]
+        assert "workflow_dispatch" in bump and "schedule" in bump
+
+    def test_python_prompt_requires_lockfile(self):
+        assert "requirements.lock" in load_stacks()["python"].best_practices_prompt
+
     def test_python_security_checklist_covers_the_failure_classes(self):
         # HS-2: the checklist must name the boundaries the DEVHUB build kept failing on
         # (shell/template/URL sinks, auth, secrets, local-first assets, deletions).
@@ -242,3 +261,12 @@ class TestStyleGuides:
         assert not c.has_style_guide("nope")
         got = c.get_style_guides(["google-python", "nope", "human-voice"])
         assert [g.id for g in got] == ["google-python", "human-voice"]  # unknown dropped
+
+
+class TestDefaultCiWorkflowLockAware:
+    def test_fallback_installs_from_lock(self):
+        # HS-6: the stack-agnostic fallback workflow also prefers requirements.lock.
+        from event_bus.ci_workflow import default_ci_workflow
+        wf = default_ci_workflow()
+        assert "requirements.lock" in wf
+        assert "pip install --quiet -r requirements.lock" in wf

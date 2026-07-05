@@ -39,6 +39,9 @@ jobs:
             echo "::group::Python project"
             python3 -m ensurepip --upgrade >/dev/null 2>&1 || true
             python3 -m pip install --quiet --upgrade pip
+            # HS-6: install from the committed lockfile first so versions match what was
+            # validated (avoids fresh-resolve version drift), then any extra requirements.
+            if [ -f requirements.lock ]; then python3 -m pip install --quiet -r requirements.lock; fi
             if [ -f requirements.txt ]; then python3 -m pip install --quiet -r requirements.txt; fi
             if [ -f pyproject.toml ]; then python3 -m pip install --quiet -e . || true; fi
             python3 -m pip install --quiet pytest
