@@ -17,6 +17,13 @@ from event_bus.config import settings
 # Bump when the pin envelope shape changes; replay validates against this.
 PIN_SCHEMA_VERSION = 1
 
+# Refuse to load a pin larger than this (defends replay against a runaway/corrupt file).
+MAX_PIN_BYTES = 5_000_000
+
+
+class PinError(Exception):
+    """A pin is missing, malformed, oversized, or an unsupported version."""
+
 
 def pins_dir() -> Path:
     """Resolve the configured base directory for pins (read at call time)."""
@@ -51,3 +58,50 @@ def write_pin(item_id: str, plan: dict, planner_model: str | None,
     tmp.write_text(json.dumps(payload, indent=2))
     tmp.replace(path)  # atomic on POSIX; never leaves a half-written pin
     return path
+
+
+def validate_pin(envelope: dict) -> dict:
+    """Validate a pin envelope; raise PinError on any structural problem. Returns the
+    envelope unchanged on success."""
+    if not isinstance(envelope, dict):
+        raise PinError("pin is not a JSON object")
+    version = envelope.get("version")
+    if version != PIN_SCHEMA_VERSION:
+        raise PinError(f"unsupported pin version: {version!r} (expected {PIN_SCHEMA_VERSION})")
+    plan = envelope.get("plan")
+    if not isinstance(plan, dict):
+        raise PinError("pin.plan is missing or not an object")
+    stories = plan.get("stories")
+    if not isinstance(stories, list) or not stories:
+        raise PinError("pin.plan.stories must be a non-empty list")
+    for i, story in enumerate(stories):
+        if not isinstance(story, dict) or not str(story.get("title", "")).strip():
+            raise PinError(f"pin.plan.stories[{i}] is missing a title")
+    return envelope
+
+
+def read_pin(path: Path | str) -> dict:
+    """Read + validate a pin file, returning the full envelope. Fails fast (PinError)
+    on missing, oversized, unreadable, or malformed pins."""
+    path = Path(path)
+    if not path.is_file():
+        raise PinError(f"pin not found: {path}")
+    size = path.stat().st_size
+    if size > MAX_PIN_BYTES:
+        raise PinError(f"pin too large: {size} bytes (max {MAX_PIN_BYTES})")
+    try:
+        envelope = json.loads(path.read_text())
+    except (ValueError, OSError) as exc:
+        raise PinError(f"pin unreadable: {exc}") from exc
+    return validate_pin(envelope)
+
+
+def load_pin(ref: str, base_dir: Path | None = None) -> dict:
+    """Resolve a pin reference (an item id, or a path ending in .json / an existing
+    file) and return its plan dict, ready for replay. Raises PinError if invalid."""
+    p = Path(ref)
+    if p.suffix == ".json" or (p.exists() and p.is_file()):
+        path = p
+    else:
+        path = pin_path(str(ref), base_dir)
+    return read_pin(path)["plan"]

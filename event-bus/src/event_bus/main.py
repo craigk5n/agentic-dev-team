@@ -1041,6 +1041,21 @@ async def _run_planner(item_id: str, title: str, description: str) -> None:
         set_repo(item_id, repo_full)
         log.info("idea_repo_set", idea=item_id, repo=repo_full)
 
+    # Replay path (Story 1.2): if a pin is designated for this item, execute it
+    # verbatim instead of calling the planner LLM. A present-but-broken pin aborts
+    # the build rather than silently falling back to fresh planning.
+    try:
+        replay_plan = _load_replay_plan(item_id)
+    except Exception as exc:
+        log.error("plan_replay_failed", id=item_id, error=str(exc)[:200])
+        return
+    if replay_plan is not None:
+        plan = _rebase_replay_plan(replay_plan, repo_full)
+        log.info("plan_replayed", id=item_id, stories=len(plan.get("stories", [])),
+                 repo=repo_full)
+        _persist_plan(item_id, plan, repo_full, stack, sdlc, model, cfg)
+        return
+
     try:
         from planner_agent.main import run_planner
         plan = await asyncio.to_thread(
@@ -1060,6 +1075,41 @@ async def _run_planner(item_id: str, title: str, description: str) -> None:
         return
 
     _persist_plan(item_id, plan, repo_full, stack, sdlc, model, cfg)
+
+
+_PLAN_REPLAY_KEY = "plan_replay:{}"
+
+
+def _load_replay_plan(item_id: str) -> dict | None:
+    """Return the pinned plan designated for replay for this item, or None for the
+    normal (LLM) planning path. The replay source is a pin ref (an item id or path)
+    set by the operator under Redis key ``plan_replay:{item_id}`` (Story 1.3).
+
+    Raises on a *present but broken* pin so the caller aborts rather than silently
+    planning fresh — a silent fallback would corrupt an experiment arm."""
+    raw = _redis_or_503().get(_PLAN_REPLAY_KEY.format(item_id))
+    if not raw:
+        return None
+    ref = raw.decode() if isinstance(raw, (bytes, bytearray)) else str(raw)
+    from event_bus import pins
+    return pins.load_pin(ref)
+
+
+def _rebase_replay_plan(plan: dict, repo_full: str) -> dict:
+    """Return a copy of a pinned plan with each story's leading ``repo:`` description
+    prefix rebased to ``repo_full`` so a replay in a different repo is internally
+    consistent. The story tree (titles, order, epics, priorities) is unchanged."""
+    if not repo_full:
+        return plan
+    new_stories = []
+    for story in plan.get("stories", []):
+        desc = story.get("description", "")
+        lines = desc.split("\n")
+        if lines and lines[0].startswith("repo:"):
+            lines[0] = f"repo: {repo_full}"
+            desc = "\n".join(lines)
+        new_stories.append({**story, "description": desc})
+    return {**plan, "stories": new_stories}
 
 
 def _write_plan_pin(item_id: str, plan: dict, model: str) -> None:
