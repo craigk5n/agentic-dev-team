@@ -21,3 +21,6 @@ infra/.env
 
 # local docs
 *.local.md
+
+# Generated plan pins (experiment artifacts)
+experiments/pins/

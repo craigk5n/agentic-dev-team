@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     # Fallback repo used when a story has no repo set and the planner didn't provision one
     default_repo: str = "devadmin/sandbox"
 
+    # Directory where planner decompositions are frozen ("pinned") for later replay.
+    # Default is repo-relative; override with PINS_DIR to a mounted volume in containers.
+    pins_dir: str = "experiments/pins"
+
     # Max coding agents running in parallel; extras queue in ready state
     max_coding_agents: int = 2
 

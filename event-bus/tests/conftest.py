@@ -26,6 +26,13 @@ def sign_forgejo(payload: bytes, secret: str = "test-secret") -> str:
 
 # ── fixtures ──────────────────────────────────────────────────────────────────
 
+@pytest.fixture(autouse=True)
+def _isolate_pins(tmp_path_factory, monkeypatch):
+    """Redirect plan-pin writes to a throwaway dir so no test pollutes the repo tree.
+    Tests that assert on pins override settings.pins_dir themselves."""
+    monkeypatch.setattr(settings, "pins_dir", str(tmp_path_factory.mktemp("pins")))
+
+
 @pytest.fixture()
 def mock_queue() -> MagicMock:
     q = MagicMock(spec=Queue)

@@ -1062,6 +1062,18 @@ async def _run_planner(item_id: str, title: str, description: str) -> None:
     _persist_plan(item_id, plan, repo_full, stack, sdlc, model, cfg)
 
 
+def _write_plan_pin(item_id: str, plan: dict, model: str) -> None:
+    """Freeze the generated plan to experiments/pins/ for later replay (Story 1.1).
+    Side-effect only — a pin write must never affect build behavior, so all errors are
+    swallowed and logged."""
+    try:
+        from event_bus import pins
+        path = pins.write_pin(item_id, plan, model)
+        log.info("plan_pinned", id=item_id, path=str(path))
+    except Exception as exc:
+        log.warning("plan_pin_failed", id=item_id, error=str(exc)[:200])
+
+
 def _persist_plan(item_id: str, plan: dict, repo_full: str, stack, sdlc,
                   model: str, cfg, seq_offset: int = 0) -> None:
     """Create the plan's epic-tagged stories and apply the plan-approval gate. Shared by
@@ -1069,6 +1081,10 @@ def _persist_plan(item_id: str, plan: dict, repo_full: str, stack, sdlc,
     continues sequence numbering when appending to an existing plan (resume)."""
     item = get_item(item_id) or {}
     stories = plan.get("stories", [])
+    # Freeze the full decomposition to a pin for later replay (Story 1.1). Only the
+    # initial plan (seq_offset == 0) — resume appends must not clobber the full pin.
+    if seq_offset == 0:
+        _write_plan_pin(item_id, plan, model)
     idea_guides = [g for g in (item.get("style_guides") or "").split(",") if g]
     # Plan-approval gate: when ON, every story is parked in backlog until the operator
     # approves the plan; when OFF, the first story starts immediately (legacy behavior).
