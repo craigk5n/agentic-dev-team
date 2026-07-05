@@ -31,6 +31,7 @@ def record_usage(
     response,
     stack: str = "",
     project: str = "",
+    story: str = "",
 ) -> None:
     """
     Record token usage and estimated USD cost from a litellm completion response.
@@ -38,8 +39,9 @@ def record_usage(
 
     When `stack` is given, the same metrics are also accumulated in a per-stack
     hash (telemetry:stack:{date}). When `project` (a project/idea id) is given, they
-    are also accumulated per-project (telemetry:project:{date}) so total spend can be
-    attributed to a project.
+    are also accumulated per-project (telemetry:project:{date}). When `story` (a work-item
+    id) is given, they are accumulated per-story (telemetry:story:{date}) so a story's
+    verdict spend can be summed with its coder spend (HS-9).
     """
     try:
         usage = getattr(response, "usage", None)
@@ -87,6 +89,16 @@ def record_usage(
             pipe.hincrby(pkey, f"{project}:output_tokens", out_tok)
             pipe.hincrby(pkey, f"{project}:calls", 1)
             pipe.expire(pkey, _TTL_SECONDS)
+
+        if story:
+            # HS-9: per-story spend (item ids are UUIDs, no ':') so a story's total cost is
+            # its coder spend + its PR verdict spend, both keyed by the same item id.
+            tkey = f"telemetry:story:{date}"
+            pipe.hincrbyfloat(tkey, f"{story}:cost_usd", cost)
+            pipe.hincrby(tkey, f"{story}:input_tokens", in_tok)
+            pipe.hincrby(tkey, f"{story}:output_tokens", out_tok)
+            pipe.hincrby(tkey, f"{story}:calls", 1)
+            pipe.expire(tkey, _TTL_SECONDS)
 
         pipe.execute()
 
@@ -149,6 +161,37 @@ def read_project_usage(r: "redis.Redis", days: int = 30) -> list[dict]:
             project, metric = parts
             entry = totals.setdefault(project, {
                 "project": project, "cost_usd": 0.0,
+                "input_tokens": 0, "output_tokens": 0, "calls": 0})
+            if metric == "cost_usd":
+                entry["cost_usd"] += float(val)
+            elif metric in ("input_tokens", "output_tokens", "calls"):
+                entry[metric] += int(val)
+    return sorted(totals.values(), key=lambda x: x["cost_usd"], reverse=True)
+
+
+def read_story_usage(r: "redis.Redis", days: int = 30) -> list[dict]:
+    """
+    Return per-story cost/usage totals summed over the last `days` days (HS-9).
+    Each entry: {story, cost_usd, input_tokens, output_tokens, calls} where `story` is the
+    work-item id (the caller resolves it to a display title).
+    """
+    totals: dict[str, dict] = {}
+    today = time.time()
+    for offset in range(days):
+        date = time.strftime("%Y-%m-%d", time.gmtime(today - offset * 86_400))
+        try:
+            raw = r.hgetall(f"telemetry:story:{date}")
+        except Exception:
+            continue
+        for k, v in (raw or {}).items():
+            field = k.decode() if isinstance(k, bytes) else k
+            val = v.decode() if isinstance(v, bytes) else v
+            parts = field.rsplit(":", 1)
+            if len(parts) != 2:
+                continue
+            story, metric = parts
+            entry = totals.setdefault(story, {
+                "story": story, "cost_usd": 0.0,
                 "input_tokens": 0, "output_tokens": 0, "calls": 0})
             if metric == "cost_usd":
                 entry["cost_usd"] += float(val)

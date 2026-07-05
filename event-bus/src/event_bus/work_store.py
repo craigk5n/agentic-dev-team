@@ -315,6 +315,25 @@ def find_item_by_pr_url(pr_url: str) -> dict | None:
     return None
 
 
+def find_story_id_by_pr(repo_full_name: str, pr_number: int) -> str:
+    """Return the story item id whose PR is repo_full_name#pr_number, or "" (HS-9 per-story
+    cost attribution). Matches the stored pr_url's path ending in /{owner}/{repo}/pulls/{n},
+    independent of host and of the story's current state."""
+    if not repo_full_name or not pr_number:
+        return ""
+    suffix = f"/{repo_full_name}/pulls/{pr_number}"
+    from urllib.parse import urlparse
+    with _lock:
+        rows = get_db().execute(
+            "SELECT id, pr_url FROM work_items WHERE type='story' AND pr_url IS NOT NULL "
+            "AND pr_url != ''"
+        ).fetchall()
+    for row in rows:
+        if urlparse(row["pr_url"]).path.endswith(suffix):
+            return row["id"]
+    return ""
+
+
 def unlock_next_story(item_id: str) -> dict | None:
     """Transition the next backlog story to ready after item_id completes.
 

@@ -130,6 +130,7 @@ def _execute_tests(
     stack: str,
     changed_paths: list[str] | None = None,
     run_command: str = "",
+    story_id: str = "",
 ) -> tuple[str, list[str], str]:
     """Clone + run the suite, returning (status, failures, summary).
 
@@ -190,6 +191,7 @@ def _execute_tests(
                 model=model,
                 api_key=settings.effective_api_key,
                 stack=stack,
+                story=story_id,
             )
             status = llm_result.get("status", "fail")
             failures = llm_result.get("failures", [])
@@ -232,6 +234,7 @@ def run_tests(
     head_ref: str = "",
     model_override: str = "",
     stack: str = "",
+    story_id: str = "",
 ) -> dict:
     owner, repo = repo_full_name.split("/", 1)
     model = model_override or settings.model_tester
@@ -242,7 +245,7 @@ def run_tests(
 
     status, failures, summary = _execute_tests(
         owner, repo, head_sha, head_ref, model, stack,
-        changed_paths=changed_paths, run_command=run_command,
+        changed_paths=changed_paths, run_command=run_command, story_id=story_id,
     )
 
     verdict = {"role": "test_run", "status": status, "summary": summary, "failures": failures}

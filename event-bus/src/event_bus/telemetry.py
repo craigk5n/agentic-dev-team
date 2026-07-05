@@ -25,14 +25,17 @@ def get_telemetry_summary(r: "redis.Redis", days: int = 7) -> dict:
     Return aggregated telemetry: costs, tokens, rejections, and current concurrency.
     """
     try:
-        from reviewer.telemetry import read_all, read_stack_usage, read_project_usage
+        from reviewer.telemetry import (read_all, read_stack_usage, read_project_usage,
+                                         read_story_usage)
         llm_records = read_all(r, days=days)
         stack_records = read_stack_usage(r, days=days)
         project_records = read_project_usage(r, days=days)
+        story_records = read_story_usage(r, days=days)
     except ImportError:
         llm_records = []
         stack_records = []
         project_records = []
+        story_records = []
 
     from event_bus.limits import get_concurrency, get_rejected, get_rate_window_count
 
@@ -95,6 +98,18 @@ def get_telemetry_summary(r: "redis.Redis", days: int = 7) -> dict:
                 "calls": rec["calls"],
             }
             for rec in project_records
+        ],
+        # HS-9: per-story spend (coder + verdict), keyed by story item id — answers
+        # "which stories cost the most". The API layer resolves the title.
+        "by_story": [
+            {
+                "story": rec["story"],
+                "cost_usd": round(rec["cost_usd"], 6),
+                "input_tokens": rec["input_tokens"],
+                "output_tokens": rec["output_tokens"],
+                "calls": rec["calls"],
+            }
+            for rec in story_records
         ],
         "daily": llm_records,
     }

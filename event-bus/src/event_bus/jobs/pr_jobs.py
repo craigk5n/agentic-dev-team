@@ -114,6 +114,7 @@ def run_code_reviewer(
     system_prompt: str = "",
     task_prompt: str = "",
     stack: str = "",
+    story_id: str = "",
 ) -> dict:
     r, lim = _redis_and_limits()
     from event_bus.limits import acquire_slot, release_slot
@@ -138,6 +139,7 @@ def run_code_reviewer(
             system_prompt=system_prompt,
             task_prompt=task_prompt,
             stack=stack,
+            story_id=story_id,
         )
         _capture_verdict(r, "reviewer", model_override, prior, res, (_t.monotonic() - t0) * 1000)
         # Out-of-credit is unrecoverable — surface it to the operator once (guarded so the
@@ -169,6 +171,7 @@ def run_tester(
     head_ref: str = "",
     model_override: str = "",
     stack: str = "",
+    story_id: str = "",
 ) -> dict:
     r, lim = _redis_and_limits()
     from event_bus.limits import acquire_slot, release_slot
@@ -191,6 +194,7 @@ def run_tester(
             head_ref=head_ref,
             model_override=model_override,
             stack=stack,
+            story_id=story_id,
         )
         _capture_verdict(r, "tester", model_override, prior, res, (_t.monotonic() - t0) * 1000)
         return res

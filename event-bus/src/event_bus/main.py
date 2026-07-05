@@ -1544,7 +1544,8 @@ async def _run_coding_agent(item_id: str, title: str, description: str, story_pr
     # counts, so cost is an ESTIMATE from the prompt + captured output priced at the
     # model's OpenRouter rate (free models → $0). Better than the previous $0/calls-only.
     _proj = (get_item(item_id) or {}).get("parent_id") or ""
-    _record_coder_usage(coder_model or "opencode", story_prompt, description, result, stack.id, _proj)
+    _record_coder_usage(coder_model or "opencode", story_prompt, description, result,
+                        stack.id, _proj, item_id)
     if _redis_conn and coder_model:
         try:
             from event_bus.outcomes import record_latency
@@ -1557,28 +1558,42 @@ async def _run_coding_agent(item_id: str, title: str, description: str, story_pr
 
 
 def _record_coder_usage(model: str, story_prompt: str, description: str,
-                        result: dict, stack: str = "", project: str = "") -> None:
+                        result: dict, stack: str = "", project: str = "",
+                        item_id: str = "") -> None:
     """Record coder token/cost telemetry for one opencode run.
 
-    opencode is a subprocess that doesn't surface exact token counts, so this is a
-    best-effort ESTIMATE: tokens ≈ chars/4 over the prompt sent and the captured output,
-    priced at the model's OpenRouter per-token rate (free models → $0). It under-counts
-    opencode's internal multi-turn context, but it makes coder spend visible in telemetry
-    and feed the daily cost cap instead of silently reporting $0. Written in the same
-    telemetry:llm:{date} schema as the litellm-backed roles so it aggregates uniformly."""
+    HS-9: prefer opencode's REAL usage when its output carries a token/cost footer
+    (parse_opencode_usage); otherwise fall back to a best-effort ESTIMATE — tokens ≈ chars/4
+    over the prompt sent and the captured output, priced at the model's OpenRouter per-token
+    rate (free models → $0). Written in the same telemetry:llm:{date} schema as the
+    litellm-backed roles, plus per-stack, per-project, and per-story (telemetry:story:{date},
+    keyed by item id) so a story's coder spend sums with its verdict spend."""
     if _redis_conn is None:
         return
     try:
-        in_tok = (len(story_prompt or "") + len(description or "")) // 4
-        out_tok = len(str((result or {}).get("summary") or "")) // 4
-        cost = 0.0
+        summary = str((result or {}).get("summary") or "")
+        est_in = (len(story_prompt or "") + len(description or "")) // 4
+        est_out = len(summary) // 4
+        # Real usage from opencode's output, when present, wins over the estimate.
+        real = {}
         try:
-            from event_bus.models_catalog import get_model_meta
-            meta = get_model_meta(_redis_conn, model) or {}
-            cost = (in_tok * float(meta.get("price_prompt") or 0.0)
-                    + out_tok * float(meta.get("price_completion") or 0.0))
+            from coding_agent.opencode_agent import parse_opencode_usage
+            real = parse_opencode_usage(summary)
         except Exception:
-            pass
+            real = {}
+        in_tok = int(real.get("input_tokens", est_in))
+        out_tok = int(real.get("output_tokens", est_out))
+        cost = real.get("cost_usd")
+        if cost is None:
+            cost = 0.0
+            try:
+                from event_bus.models_catalog import get_model_meta
+                meta = get_model_meta(_redis_conn, model) or {}
+                cost = (in_tok * float(meta.get("price_prompt") or 0.0)
+                        + out_tok * float(meta.get("price_completion") or 0.0))
+            except Exception:
+                pass
+        cost = float(cost)
         import time
         date = time.strftime("%Y-%m-%d", time.gmtime())
         key = f"telemetry:llm:{date}"
@@ -1603,6 +1618,13 @@ def _record_coder_usage(model: str, story_prompt: str, description: str,
             pipe.hincrby(pkey, f"{project}:output_tokens", out_tok)
             pipe.hincrby(pkey, f"{project}:calls", 1)
             pipe.expire(pkey, 30 * 86_400)
+        if item_id:
+            tkey = f"telemetry:story:{date}"
+            pipe.hincrbyfloat(tkey, f"{item_id}:cost_usd", cost)
+            pipe.hincrby(tkey, f"{item_id}:input_tokens", in_tok)
+            pipe.hincrby(tkey, f"{item_id}:output_tokens", out_tok)
+            pipe.hincrby(tkey, f"{item_id}:calls", 1)
+            pipe.expire(tkey, 30 * 86_400)
         pipe.execute()
     except Exception:
         pass
@@ -2522,6 +2544,10 @@ async def get_telemetry(days: int = 7):
     for row in summary.get("by_project", []):
         item = get_item(row.get("project", "")) or {}
         row["title"] = item.get("title") or row.get("project", "")[:8]
+    # HS-9: resolve story ids → titles for the per-story spend breakdown.
+    for row in summary.get("by_story", []):
+        item = get_item(row.get("story", "")) or {}
+        row["title"] = item.get("title") or row.get("story", "")[:8]
     return summary
 
 

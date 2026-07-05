@@ -373,3 +373,21 @@ class TestProjectLifecycle:
         assert p["story_count"] == 2 and p["stories_done"] == 1 and p["archived"] is False
         ws.set_archived(idea["id"], True)
         assert ws.list_projects()[0]["archived"] is True
+
+
+class TestFindStoryByPr:
+    def test_matches_by_repo_and_pr(self):
+        idea = ws.create_item(item_type="idea", title="Idea")
+        story = ws.create_item(item_type="story", title="S", parent_id=idea["id"],
+                               repo="acme/hub")
+        ws.set_pr_url(story["id"], "https://forge.example/acme/hub/pulls/7")
+        assert ws.find_story_id_by_pr("acme/hub", 7) == story["id"]
+
+    def test_no_match_returns_empty(self):
+        assert ws.find_story_id_by_pr("acme/hub", 99) == ""
+        assert ws.find_story_id_by_pr("", 7) == ""
+
+    def test_does_not_match_other_pr_number(self):
+        story = ws.create_item(item_type="story", title="S", repo="acme/hub")
+        ws.set_pr_url(story["id"], "https://forge.example/acme/hub/pulls/7")
+        assert ws.find_story_id_by_pr("acme/hub", 8) == ""

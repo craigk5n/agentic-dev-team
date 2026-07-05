@@ -1998,6 +1998,37 @@ class TestRecordCoderUsage:
         assert float(h[f"{pfx}:cost_usd"]) == 0.0
         assert int(h[f"{pfx}:calls"]) == 1
 
+    def test_per_story_recorded_by_item_id(self, monkeypatch):
+        # HS-9: coder spend is also keyed by the story item id.
+        import event_bus.main as m
+        import fakeredis, time
+        r = fakeredis.FakeRedis(decode_responses=True)
+        monkeypatch.setattr(m, "_redis_conn", r)
+        monkeypatch.setattr("event_bus.models_catalog.get_model_meta",
+                            lambda *_a, **_k: {"price_prompt": 0.0, "price_completion": 0.0})
+        m._record_coder_usage("free/model", "y" * 400, "z" * 400,
+                              {"summary": "x" * 4000}, stack="python", project="idea-1",
+                              item_id="story-7")
+        skey = f"telemetry:story:{time.strftime('%Y-%m-%d', time.gmtime())}"
+        h = r.hgetall(skey)
+        assert int(h["story-7:calls"]) == 1
+        assert int(h["story-7:output_tokens"]) == 1000
+
+    def test_prefers_real_opencode_usage_over_estimate(self, monkeypatch):
+        # HS-9: when opencode's output carries real token/cost, use it (not chars/4).
+        import event_bus.main as m
+        import fakeredis, time
+        r = fakeredis.FakeRedis(decode_responses=True)
+        monkeypatch.setattr(m, "_redis_conn", r)
+        result = {"summary": "Implemented. 2,000 input tokens, 800 output tokens. cost: $0.05"}
+        m._record_coder_usage("openrouter/paid", "y" * 400, "z" * 400, result,
+                              stack="python", item_id="story-8")
+        skey = f"telemetry:story:{time.strftime('%Y-%m-%d', time.gmtime())}"
+        h = r.hgetall(skey)
+        assert int(h["story-8:input_tokens"]) == 2000   # real, not 200 (estimate)
+        assert int(h["story-8:output_tokens"]) == 800   # real, not 1000
+        assert abs(float(h["story-8:cost_usd"]) - 0.05) < 1e-9  # real cost, not meta-priced
+
 
 class TestPostMergeCICancellation:
     def _fj(self, runs):

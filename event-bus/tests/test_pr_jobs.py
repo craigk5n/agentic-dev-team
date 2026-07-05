@@ -39,7 +39,7 @@ class TestPrJobWrappers:
         mock.assert_called_once_with(
             repo_full_name="alice/backend", pr_number=7,
             head_sha="a" * 40, base_ref="main", head_ref="", model_override="",
-            system_prompt="", task_prompt="", stack="",
+            system_prompt="", task_prompt="", stack="", story_id="",
         )
         assert result["status"] == "pass"
 
@@ -54,6 +54,7 @@ class TestPrJobWrappers:
         mock.assert_called_once_with(
             repo_full_name="alice/backend", pr_number=7,
             head_sha="a" * 40, base_ref="main", head_ref="", model_override="", stack="",
+            story_id="",
         )
         assert result["status"] == "pass"
 

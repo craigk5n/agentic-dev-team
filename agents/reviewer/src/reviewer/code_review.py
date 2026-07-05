@@ -89,6 +89,7 @@ def run_code_review(
     system_prompt: str = "",
     task_prompt: str = "",
     stack: str = "",
+    story_id: str = "",
 ) -> dict:
     owner, repo = repo_full_name.split("/", 1)
     model = model_override or settings.model_reviewer
@@ -122,6 +123,7 @@ def run_code_review(
                 system_prompt=system_prompt,
                 task_prompt=task_prompt,
                 stack=stack,
+                story=story_id,
             )
         except llm.InsufficientCreditsError as exc:
             # Out of provider credit/quota — an unrecoverable, operator-actionable state,

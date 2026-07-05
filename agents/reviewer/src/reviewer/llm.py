@@ -76,6 +76,7 @@ def complete(
     temperature: float = 0.0,
     telemetry_role: str = "",
     telemetry_stack: str = "",
+    telemetry_story: str = "",
     structured: bool = False,
 ) -> str:
     """
@@ -120,7 +121,8 @@ def complete(
             import redis as _redis
             from reviewer.telemetry import record_usage
             r = _redis.from_url(settings.redis_url, decode_responses=False)
-            record_usage(r, telemetry_role, model, resp, stack=telemetry_stack)
+            record_usage(r, telemetry_role, model, resp, stack=telemetry_stack,
+                         story=telemetry_story)
         except Exception as exc:
             log.debug("telemetry_skipped", role=telemetry_role, error=str(exc))
 
@@ -167,6 +169,7 @@ def review_diff(
     system_prompt: str = "",
     task_prompt: str = "",
     stack: str = "",
+    story: str = "",
 ) -> dict:
     """Call the LLM to review a git diff. Returns a structured verdict dict."""
     truncated = diff[:_MAX_DIFF_CHARS]
@@ -185,6 +188,7 @@ def review_diff(
         api_key=api_key,
         telemetry_role="reviewer",
         telemetry_stack=stack,
+        telemetry_story=story,
         structured=True,
     )
     return _parse_json_response(raw, role="code_review")
@@ -212,6 +216,7 @@ def summarise_test_output(
     api_key: str = "",
     task_prompt: str = "",
     stack: str = "",
+    story: str = "",
 ) -> dict:
     """Ask the LLM to parse raw test output into a structured verdict."""
     truncated = output[:_MAX_DIFF_CHARS]
@@ -226,6 +231,7 @@ def summarise_test_output(
         api_key=api_key,
         telemetry_role="tester",
         telemetry_stack=stack,
+        telemetry_story=story,
         structured=True,
     )
     return _parse_json_response(raw, role="test_run")

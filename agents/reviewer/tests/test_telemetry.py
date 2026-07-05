@@ -238,3 +238,46 @@ class TestProjectUsage:
         r = fakeredis.FakeRedis()
         self._rec(r, "", 0.10)   # empty project → not attributed
         assert read_project_usage(r, days=1) == []
+
+
+class TestPerStoryUsage:
+    def test_records_and_reads_per_story(self):
+        import fakeredis
+        from reviewer.telemetry import record_usage, read_story_usage
+        r = fakeredis.FakeRedis()
+        resp = MagicMock()
+        resp.usage.prompt_tokens = 100
+        resp.usage.completion_tokens = 40
+        resp.usage.cost = 0.002
+        record_usage(r, "reviewer", "m", resp, stack="python", story="story-9")
+        rows = read_story_usage(r, days=1)
+        assert rows == [{"story": "story-9", "cost_usd": 0.002,
+                         "input_tokens": 100, "output_tokens": 40, "calls": 1}]
+
+    def test_sums_coder_and_verdict_for_same_story(self):
+        # HS-9: coder spend + verdict spend keyed by the same story id must sum.
+        import fakeredis
+        from reviewer.telemetry import record_usage, read_story_usage
+        r = fakeredis.FakeRedis()
+        for cost, ptok, ctok in [(0.01, 500, 200), (0.002, 100, 40)]:
+            resp = MagicMock()
+            resp.usage.prompt_tokens = ptok
+            resp.usage.completion_tokens = ctok
+            resp.usage.cost = cost
+            record_usage(r, "reviewer", "m", resp, story="story-9")
+        rows = read_story_usage(r, days=1)
+        assert len(rows) == 1
+        assert abs(rows[0]["cost_usd"] - 0.012) < 1e-9
+        assert rows[0]["input_tokens"] == 600 and rows[0]["calls"] == 2
+
+    def test_no_story_writes_nothing_to_story_hash(self):
+        import fakeredis, time
+        from reviewer.telemetry import record_usage
+        r = fakeredis.FakeRedis()
+        resp = MagicMock()
+        resp.usage.prompt_tokens = 10
+        resp.usage.completion_tokens = 5
+        resp.usage.cost = 0.0001
+        record_usage(r, "reviewer", "m", resp)  # no story
+        date = time.strftime("%Y-%m-%d", time.gmtime())
+        assert not r.hgetall(f"telemetry:story:{date}")

@@ -22,6 +22,33 @@ DEFAULT_TIMEOUT = 900  # 15 minutes per story
 
 _ANSI_ESCAPE = re.compile(r'\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 
+# HS-9: opencode's `run` output sometimes carries a usage/cost footer. Parse it when present
+# so per-story coder cost is REAL rather than a chars/4 estimate. Best-effort — patterns are
+# permissive and absence just falls back to the estimate.
+_COST_RE = re.compile(r"(?:cost|spent|total)[^\n$]*\$\s*([0-9]+(?:\.[0-9]+)?)", re.I)
+_IN_TOK_RE = re.compile(r"([0-9][0-9,]*)\s*(?:input|prompt)\s*tokens?", re.I)
+_OUT_TOK_RE = re.compile(r"([0-9][0-9,]*)\s*(?:output|completion)\s*tokens?", re.I)
+
+
+def parse_opencode_usage(text: str) -> dict:
+    """Extract real token/cost usage from opencode output, or ``{}`` if none is present.
+
+    Returns any of {"input_tokens", "output_tokens", "cost_usd"} that could be parsed. The
+    caller prefers these real numbers over the chars/4 estimate when available."""
+    out: dict = {}
+    if not text:
+        return out
+    m = _IN_TOK_RE.search(text)
+    if m:
+        out["input_tokens"] = int(m.group(1).replace(",", ""))
+    m = _OUT_TOK_RE.search(text)
+    if m:
+        out["output_tokens"] = int(m.group(1).replace(",", ""))
+    m = _COST_RE.search(text)
+    if m:
+        out["cost_usd"] = float(m.group(1))
+    return out
+
 # Phrases OpenRouter/providers emit when an LLM call fails (rate limit, provider outage,
 # no available endpoint). Specific enough not to collide with normal code the agent writes.
 _PROVIDER_ERROR_MARKERS = (

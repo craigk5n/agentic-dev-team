@@ -273,3 +273,20 @@ class TestProviderErrorDetection:
                 "Story", "desc", str(tmp_path), "model", log_line=bad_callback
             )
         assert "line" in result
+
+
+class TestParseOpencodeUsage:
+    def test_parses_tokens_and_cost(self):
+        from coding_agent.opencode_agent import parse_opencode_usage
+        u = parse_opencode_usage("Done. 1,234 input tokens, 567 output tokens. Total cost: $0.0421")
+        assert u == {"input_tokens": 1234, "output_tokens": 567, "cost_usd": 0.0421}
+
+    def test_parses_prompt_completion_variants(self):
+        from coding_agent.opencode_agent import parse_opencode_usage
+        u = parse_opencode_usage("900 prompt tokens and 100 completion tokens used")
+        assert u["input_tokens"] == 900 and u["output_tokens"] == 100
+
+    def test_empty_when_no_usage(self):
+        from coding_agent.opencode_agent import parse_opencode_usage
+        assert parse_opencode_usage("Implementation complete") == {}
+        assert parse_opencode_usage("") == {}

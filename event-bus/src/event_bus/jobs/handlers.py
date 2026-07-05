@@ -112,6 +112,15 @@ def handle_pr_event(
              model_security=config.models.security or "default",
              rejected=rejected_roles)
 
+    # HS-9: resolve the story this PR belongs to so verdict spend is attributed per-story
+    # (summed with the coder spend). Best-effort — "" if not found yet.
+    story_id = ""
+    try:
+        from event_bus.work_store import find_story_id_by_pr
+        story_id = find_story_id_by_pr(repo_full_name, pr_number)
+    except Exception as exc:
+        log.debug("pr_story_lookup_failed", error=str(exc)[:120])
+
     q = Queue("agent-jobs", connection=r)
     base_kwargs = dict(repo_full_name=repo_full_name, pr_number=pr_number,
                        head_sha=head_sha, base_ref=base_ref, head_ref=head_ref)
@@ -142,11 +151,11 @@ def handle_pr_event(
                               model_override=reviewer_model,
                               system_prompt=reviewer_system_prompt,
                               task_prompt=reviewer_task_prompt,
-                              stack=stack_id, retry=retry, job_timeout=420))
+                              stack=stack_id, story_id=story_id, retry=retry, job_timeout=420))
     if tester_ok:
         jobs.append(q.enqueue(run_tester, **base_kwargs,
                               model_override=config.models.tester,
-                              stack=stack_id, retry=retry))
+                              stack=stack_id, story_id=story_id, retry=retry))
     if security_ok:
         jobs.append(q.enqueue(run_security_scanner, **base_kwargs,
                               model_override=config.models.security, retry=retry))
