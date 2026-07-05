@@ -137,6 +137,25 @@ def apply_gate(
         log.info("gate_blocked_security", repo=repo_full_name, pr=pr_number)
         return {"gate_status": "blocked", "reason": "security_fail"}
 
+    # Gate 1b (HS-5): selected Semgrep categories block regardless of the scan's own
+    # severity. The DEVHUB SRI defect was flagged on every UI story but only as a warning,
+    # so it slipped past Gate 1. An independent flag escalates those categories to blocking.
+    if gates.get("block_security_categories", True):
+        blocking = all_verdicts.get("security", {}).get("blocking_categories") or []
+        if blocking:
+            msg = (
+                "⛔ **Merge blocked** — high-impact security categories were found and must "
+                "be resolved regardless of severity: **" + ", ".join(blocking) + "**.\n\n"
+                "See the security scan comment above. Fix the findings and push a new commit, "
+                "or set `gate.block_security_categories = false` in `/api/config` to override."
+            )
+            with ForgejoClient(settings.forgejo_base_url, settings.effective_forgejo_token) as fj:
+                fj.post_pr_comment(owner, repo, pr_number, msg)
+            log.info("gate_blocked_security_category", repo=repo_full_name, pr=pr_number,
+                     categories=blocking)
+            return {"gate_status": "blocked", "reason": "security_category",
+                    "categories": blocking}
+
     # Gate 2: human PR merge approval
     if gates.get("pr_merge_approval", False):
         pending_key = f"{_PENDING_PREFIX}{owner}:{repo}:{pr_number}"

@@ -247,3 +247,59 @@ class TestMergeabilityGate:
             result = apply_gate(r, "owner/repo", 1, _verdicts("pass"))
         assert result["gate_status"] == "merged"
         ctx.update_pr_branch.assert_called_once()
+
+
+def _verdicts_cats(categories, security_status="warn"):
+    v = _verdicts(security_status)
+    v["security"]["blocking_categories"] = categories
+    return v
+
+
+class TestBlockSecurityCategories:
+    def test_blocks_on_category_even_when_severity_is_warn(self):
+        # The DEVHUB case: SRI flagged only as a warning, but the category must block.
+        r = _make_redis({"security_signoff": True, "pr_merge_approval": False,
+                         "block_security_categories": True})
+        with patch("reviewer.gate.ForgejoClient") as mock_fj:
+            ctx = MagicMock()
+            mock_fj.return_value.__enter__.return_value = ctx
+            from reviewer.gate import apply_gate
+            result = apply_gate(r, "owner/repo", 1, _verdicts_cats(["missing-sri"], "warn"))
+        assert result["gate_status"] == "blocked"
+        assert result["reason"] == "security_category"
+        assert result["categories"] == ["missing-sri"]
+        ctx.merge_pr.assert_not_called()
+
+    def test_blocks_even_when_security_status_pass(self):
+        # Independent of Semgrep severity — a blocking category set on a 'pass' verdict blocks.
+        r = _make_redis({"security_signoff": True, "pr_merge_approval": False,
+                         "block_security_categories": True})
+        with patch("reviewer.gate.ForgejoClient") as mock_fj:
+            ctx = MagicMock()
+            mock_fj.return_value.__enter__.return_value = ctx
+            from reviewer.gate import apply_gate
+            result = apply_gate(r, "owner/repo", 1, _verdicts_cats(["template-xss"], "pass"))
+        assert result["gate_status"] == "blocked"
+        assert result["reason"] == "security_category"
+
+    def test_flag_off_allows_merge_despite_category(self):
+        r = _make_redis({"security_signoff": False, "pr_merge_approval": False,
+                         "block_security_categories": False})
+        with patch("reviewer.gate.ForgejoClient") as mock_fj:
+            ctx = MagicMock()
+            ctx.merge_pr.return_value = {"merged": True}
+            mock_fj.return_value.__enter__.return_value = ctx
+            from reviewer.gate import apply_gate
+            result = apply_gate(r, "owner/repo", 1, _verdicts_cats(["missing-sri"], "warn"))
+        assert result["gate_status"] == "merged"
+
+    def test_no_categories_does_not_block(self):
+        r = _make_redis({"security_signoff": True, "pr_merge_approval": False,
+                         "block_security_categories": True})
+        with patch("reviewer.gate.ForgejoClient") as mock_fj:
+            ctx = MagicMock()
+            ctx.merge_pr.return_value = {"merged": True}
+            mock_fj.return_value.__enter__.return_value = ctx
+            from reviewer.gate import apply_gate
+            result = apply_gate(r, "owner/repo", 1, _verdicts_cats([], "pass"))
+        assert result["gate_status"] == "merged"

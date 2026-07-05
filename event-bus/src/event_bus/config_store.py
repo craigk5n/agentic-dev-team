@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 _KEY = "runtime_config"
 _GATE_FIELDS = {"pr_merge_approval", "security_signoff", "free_models_only", "plan_approval",
-                "auto_escalate"}  # idea_approval is always ON
+                "auto_escalate", "block_security_categories"}  # idea_approval is always ON
 _MODEL_ROLES = {"idea", "planner", "coder", "reviewer", "tester", "security", "escalate"}
 
 
@@ -30,6 +30,11 @@ class GateConfig:
     # When ON, a story that exhausts its recode cap escalates coder+reviewer to a stronger
     # model (models.escalate) for one more round before being flagged for a human.
     auto_escalate: bool = False
+    # HS-5: when ON, selected Semgrep categories (missing SRI/integrity, template XSS sinks,
+    # hardcoded secrets) BLOCK the merge regardless of Semgrep's own severity. These are the
+    # web-facing defects that shipped as mere warnings in the DEVHUB build. Default ON — the
+    # relevant findings only occur in web code, so non-web stacks are unaffected in practice.
+    block_security_categories: bool = True
 
 
 @dataclass

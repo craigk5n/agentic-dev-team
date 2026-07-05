@@ -28,6 +28,16 @@ class TestConfigStore:
         assert config.gates.pr_merge_approval is True
         assert config.gates.security_signoff is True  # untouched
 
+    def test_block_security_categories_defaults_on_and_is_patchable(self):
+        # HS-5: the category-blocking gate defaults ON and can be toggled via /api/config.
+        r = fakeredis.FakeRedis()
+        from event_bus.config_store import get_config, patch_config
+        assert get_config(r).gates.block_security_categories is True
+        config = patch_config(r, {"gates": {"block_security_categories": False}})
+        assert config.gates.block_security_categories is False
+        # persists across reads
+        assert get_config(r).gates.block_security_categories is False
+
     def test_patch_config_updates_model(self):
         r = fakeredis.FakeRedis()
         from event_bus.config_store import patch_config
@@ -110,16 +120,17 @@ class TestPatchConfig:
                             headers={"Content-Type": "application/json"})
         assert resp.status_code == 400
 
-    def test_claude_code_models_are_planning_only(self, client, monkeypatch):
+    def test_claude_code_models_are_subscription_eligible_roles_only(self, client, monkeypatch):
         monkeypatch.setattr("event_bus.main._redis_conn", fakeredis.FakeRedis())
-        # allowed on the planning roles…
+        # allowed on the subscription-eligible roles (idea/planner/reviewer/escalate)…
         ok = client.patch("/api/config", json={"models": {
-            "idea": "claude-code/sonnet", "planner": "claude-code/opus"}})
+            "idea": "claude-code/sonnet", "planner": "claude-code/opus",
+            "reviewer": "claude-code/sonnet"}})
         assert ok.status_code == 200
         # …rejected on the high-volume roles (would break litellm + burn the subscription)
-        bad = client.patch("/api/config", json={"models": {"reviewer": "claude-code/sonnet"}})
+        bad = client.patch("/api/config", json={"models": {"coder": "claude-code/sonnet"}})
         assert bad.status_code == 422
-        assert "planning-only" in bad.json()["detail"]
+        assert "coder" in bad.json()["detail"]
 
     def test_patch_all_roles(self, client, monkeypatch):
         monkeypatch.setattr("event_bus.main._redis_conn", fakeredis.FakeRedis())

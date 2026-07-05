@@ -82,6 +82,46 @@ def _semgrep_severity(finding: dict) -> str:
     return {"ERROR": "high", "WARNING": "medium", "INFO": "low"}.get(raw, "low")
 
 
+# HS-5: Semgrep categories that must BLOCK a merge for web-facing code regardless of the
+# tool's own severity. Semgrep flagged the DEVHUB SRI defect on every UI story, but only as
+# WARNING, and security_signoff blocks on "fail" — so the exact defect that broke the UI
+# shipped. These markers escalate the specific, high-impact web categories to blocking.
+_BLOCKING_CATEGORY_MARKERS = {
+    "missing-sri": ("integrity", "subresource", "missing-integrity", "sri"),
+    "template-xss": ("xss", "cross-site-scripting", "mark_safe", "safestring", "autoescape",
+                     "dangerouslysetinnerhtml", "v-html", "innerhtml", "raw-html", "|safe"),
+    "hardcoded-secret": ("hardcoded", "hard-coded", "hardcoded-secret", "generic-api-key",
+                         "private-key", "aws-secret", "detected-secret"),
+}
+
+
+def _finding_haystack(f: dict) -> str:
+    """Lowercased blob of a Semgrep finding's rule id, message, and metadata to match
+    category markers against."""
+    extra = f.get("extra", {}) or {}
+    meta = extra.get("metadata", {}) or {}
+
+    def _flat(v) -> str:
+        return " ".join(str(x) for x in v) if isinstance(v, (list, tuple)) else str(v or "")
+
+    parts = [f.get("check_id", ""), extra.get("message", ""),
+             _flat(meta.get("category")), _flat(meta.get("cwe")), _flat(meta.get("owasp"))]
+    return " ".join(parts).lower()
+
+
+def _classify_blocking_categories(semgrep_findings: list, secret_findings: list) -> list[str]:
+    """The sorted set of blocking security categories present in this scan (HS-5)."""
+    found: set[str] = set()
+    for f in semgrep_findings or []:
+        hay = _finding_haystack(f)
+        for cat, markers in _BLOCKING_CATEGORY_MARKERS.items():
+            if any(m in hay for m in markers):
+                found.add(cat)
+    if secret_findings:
+        found.add("hardcoded-secret")   # gitleaks hit is always a hardcoded secret
+    return sorted(found)
+
+
 def _format_security_comment(semgrep_findings: list, secret_findings: list, errors: list[str]) -> tuple[str, str]:
     """Returns (markdown_comment, status)."""
     icons = {"high": "🔴", "medium": "🟡", "low": "🔵", "critical": "🔴"}
@@ -144,6 +184,17 @@ def run_security_scan(
     errors = [e for e in (semgrep_err, gitleaks_err) if e]
     comment, status = _format_security_comment(semgrep_findings, secret_findings, errors)
 
+    # HS-5: flag high-impact web categories that must block regardless of Semgrep severity.
+    # The verdict carries the list; the merge gate decides whether to block (honors the
+    # gate.block_security_categories flag), keeping the policy decision in one place.
+    blocking_categories = _classify_blocking_categories(semgrep_findings, secret_findings)
+    if blocking_categories:
+        comment += (
+            "\n\n> ⛔ **Blocking categories detected:** " + ", ".join(blocking_categories)
+            + ".\n> These block the merge regardless of severity "
+            "(`gate.block_security_categories`). Fix them or disable the flag to override."
+        )
+
     total = len(semgrep_findings) + len(secret_findings)
     summary = (
         f"No security issues found." if total == 0
@@ -155,6 +206,7 @@ def run_security_scan(
         "summary": summary,
         "semgrep_count": len(semgrep_findings),
         "secret_count": len(secret_findings),
+        "blocking_categories": blocking_categories,
     }
 
     with ForgejoClient(settings.forgejo_base_url, settings.effective_forgejo_token) as forgejo:
