@@ -71,6 +71,13 @@ def handle_pr_event(
                 "\n\nSecurity requirements to enforce (flag any violation as a blocking "
                 "finding):\n" + stack.security_checklist.strip()
             )
+        # HS-7: verify the project's NFRs (local-first / offline-capable) — the assertions
+        # are reconciled once at approval and enforced on every PR, not re-decided per story.
+        from event_bus import nfrs as nfr_catalog
+        from event_bus.work_store import get_nfrs_for_repo
+        nfr_assertions = nfr_catalog.assertions(get_nfrs_for_repo(repo_full_name))
+        if nfr_assertions:
+            reviewer_task_prompt += "\n\n" + nfr_assertions
         # Make the reviewer check adherence to the project's chosen style guides.
         from event_bus.work_store import get_style_guides_for_repo
         for g in cat.get_style_guides(get_style_guides_for_repo(repo_full_name)):

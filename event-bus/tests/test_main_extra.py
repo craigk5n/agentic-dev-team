@@ -1510,12 +1510,29 @@ class TestCoderStackContext:
         assert "Stack conventions" in out and "PEP 8" in out
         assert "Development style" in out and "red" in out.lower()
 
-    def test_augment_noop_for_generic_standard(self):
+    def test_augment_generic_standard_only_adds_universal_deletion_guard(self):
+        # generic/standard has no stack conventions or SDLC directive, so the only addition
+        # is the universal HS-4 "no unexpected deletions" guardrail (always present).
         from event_bus.main import _augment_coder_prompt
         from event_bus.catalog import get_catalog
         c = get_catalog()
         out = _augment_coder_prompt("base", c.get_stack("generic"), c.get_sdlc("standard"))
-        assert out == "base"
+        assert out.startswith("base")
+        assert "Do NOT delete or gut existing files" in out
+        assert "Stack conventions" not in out and "Development style" not in out
+
+    def test_augment_injects_nfr_reconciliation_note(self):
+        # HS-7: a project NFR (local-first) adds a single reconciliation note to the prompt.
+        from event_bus.main import _augment_coder_prompt
+        from event_bus.catalog import get_catalog
+        c = get_catalog()
+        out = _augment_coder_prompt("base", c.get_stack("generic"), c.get_sdlc("standard"),
+                                    nfrs=["local-first"])
+        assert "Project NFRs" in out
+        assert "CDN" in out and ("loopback" in out.lower() or "lan" in out.lower())
+        # no NFRs → no NFR block
+        out2 = _augment_coder_prompt("base", c.get_stack("generic"), c.get_sdlc("standard"))
+        assert "Project NFRs" not in out2
 
     def test_augment_injects_security_checklist_for_python(self):
         # HS-2: the coder gets the security requirements up front (before review).

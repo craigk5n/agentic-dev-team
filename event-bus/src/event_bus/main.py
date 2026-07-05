@@ -46,8 +46,10 @@ from event_bus.work_store import (
     unlock_next_story, find_item_by_pr_url, get_repo_for_story, set_stack_sdlc,
     get_stack_sdlc_for_story, set_style_guides, get_style_guides_for_story,
     set_archived, delete_item_tree, list_projects, set_planning_inputs,
+    get_nfrs_for_story, get_nfrs_for_repo,
     STATE_COLORS, get_db
 )
+from event_bus import nfrs as nfr_catalog
 from event_bus.telemetry import get_telemetry_summary, render_prometheus
 from event_bus.events.forgejo import ForgejoPREvent, ForgejoReviewEvent
 from event_bus.signatures import verify_forgejo
@@ -727,8 +729,16 @@ async def import_plan(request: Request):
         state="approved", stack=stack, sdlc=sdlc, style_guides=guides,
         planner_model=planner_model,
     )
+    # HS-7: capture NFRs from the pasted plan (an explicit `nfrs` list overrides detection),
+    # so local-first / offline-capable is reconciled once and enforced across every story.
+    req_nfrs = body.get("nfrs")
+    imported_nfrs = ([n for n in req_nfrs if nfr_catalog.is_known(n)]
+                     if isinstance(req_nfrs, list)
+                     else nfr_catalog.detect_nfrs(f"{title} {plan_text}"))
+    if imported_nfrs:
+        set_planning_inputs(item["id"], nfrs=",".join(imported_nfrs))
     log.info("plan_imported", id=item["id"], title=title, chars=len(plan_text),
-             stack=stack, sdlc=sdlc, model=planner_model or "default")
+             stack=stack, sdlc=sdlc, model=planner_model or "default", nfrs=imported_nfrs)
     asyncio.create_task(_run_import(item["id"]))
     return item
 
@@ -877,10 +887,20 @@ async def approve_item(item_id: str, request: Request):
         decisions = []
     for d in decisions:
         d["chosen"] = (answers.get(d["id"]) or d.get("recommended") or "").strip()
+    # HS-7: capture the project's NFRs (local-first / offline-capable) from the idea text so
+    # they're reconciled once and enforced in every story's coder + reviewer prompt. An
+    # explicit `nfrs` list in the request overrides detection.
+    req_nfrs = body.get("nfrs")
+    if isinstance(req_nfrs, list):
+        detected = [n for n in req_nfrs if nfr_catalog.is_known(n)]
+    else:
+        detected = nfr_catalog.detect_nfrs(
+            f"{item.get('title','')} {item.get('description','')} {item.get('prompt','')}")
     set_planning_inputs(
         item_id,
         design_decisions=_json.dumps(decisions) if decisions else None,
         planner_model=planner_model or None,
+        nfrs=",".join(detected) if detected else None,
     )
 
     updated = update_state(item_id, "approved")
@@ -1237,8 +1257,8 @@ def _coder_context(item_id: str):
     return cat.get_stack(stack_id), cat.get_sdlc(sdlc_id)
 
 
-def _augment_coder_prompt(story_prompt: str, stack, sdlc, guides=()) -> str:
-    """Prepend stack conventions + SDLC coder directive + style guides to the prompt."""
+def _augment_coder_prompt(story_prompt: str, stack, sdlc, guides=(), nfrs=()) -> str:
+    """Prepend stack conventions + SDLC coder directive + style guides + project NFRs."""
     extra = []
     if stack.best_practices_prompt.strip():
         extra.append("Stack conventions:\n" + stack.best_practices_prompt.strip())
@@ -1249,6 +1269,10 @@ def _augment_coder_prompt(story_prompt: str, stack, sdlc, guides=()) -> str:
     extra.append("Do NOT delete or gut existing files unless this story explicitly asks "
                  "for it. Removing tracked files the story didn't call for is blocked at "
                  "review — edit in place and preserve unrelated code, config, and tests.")
+    # HS-7: the project's NFRs, reconciled once (not re-decided per story).
+    nfr_note = nfr_catalog.reconciliation_note(nfrs)
+    if nfr_note:
+        extra.append(nfr_note)
     if sdlc.coder_directive.strip():
         extra.append("Development style:\n" + sdlc.coder_directive.strip())
     for g in guides:
@@ -1428,7 +1452,8 @@ async def _run_coding_agent(item_id: str, title: str, description: str, story_pr
     # Resolve the story's stack/SDLC → augment the prompt (5.3) + pick the image (5.2)
     stack, sdlc = _coder_context(item_id)
     guides = get_catalog().get_style_guides(get_style_guides_for_story(item_id))
-    story_prompt = _augment_coder_prompt(story_prompt, stack, sdlc, guides)
+    story_prompt = _augment_coder_prompt(story_prompt, stack, sdlc, guides,
+                                         nfrs=get_nfrs_for_story(item_id))
     log_cb = _make_log_cb(item_id)
     log.info("coding_agent_dispatch", id=item_id, mode=settings.sandbox_mode,
              stack=stack.id, coder_image=stack.coder_image)

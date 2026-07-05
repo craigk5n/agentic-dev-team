@@ -83,7 +83,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
                             ("stack", "TEXT"), ("sdlc", "TEXT"), ("stack_rationale", "TEXT"),
                             ("style_guides", "TEXT"), ("archived_at", "TEXT"),
                             ("epic", "TEXT"), ("design_decisions", "TEXT"),
-                            ("planner_model", "TEXT"), ("started_at", "TEXT")]:
+                            ("planner_model", "TEXT"), ("started_at", "TEXT"),
+                            ("nfrs", "TEXT")]:
         try:
             conn.execute(f"ALTER TABLE work_items ADD COLUMN {col} {definition}")
             conn.commit()
@@ -184,6 +185,31 @@ def get_style_guides_for_repo(repo: str) -> list[str]:
             (repo,),
         ).fetchone()
     return _parse_guides(row["style_guides"]) if row else []
+
+
+def get_nfrs_for_story(item_id: str) -> list[str]:
+    """Return the NFR ids for a story (HS-7), inheriting from its parent idea when unset."""
+    item = get_item(item_id)
+    if not item:
+        return []
+    nfrs = _parse_guides(item.get("nfrs"))
+    if not nfrs and item.get("parent_id"):
+        parent = get_item(item["parent_id"]) or {}
+        nfrs = _parse_guides(parent.get("nfrs"))
+    return nfrs
+
+
+def get_nfrs_for_repo(repo: str) -> list[str]:
+    """Return the NFR ids for a repo (HS-7) — all its items share the idea's NFRs."""
+    if not repo:
+        return []
+    with _lock:
+        row = get_db().execute(
+            "SELECT nfrs FROM work_items "
+            "WHERE repo=? AND nfrs IS NOT NULL AND nfrs != '' LIMIT 1",
+            (repo,),
+        ).fetchone()
+    return _parse_guides(row["nfrs"]) if row else []
 
 
 def get_stack_sdlc_for_story(item_id: str) -> tuple[str | None, str | None]:
@@ -311,14 +337,17 @@ def unlock_next_story(item_id: str) -> dict | None:
 
 
 def set_planning_inputs(item_id: str, design_decisions: str | None = None,
-                        planner_model: str | None = None) -> dict | None:
-    """Persist the operator's answered design decisions (JSON) and chosen planner
-    model on an idea at approval, so the planner can use them."""
+                        planner_model: str | None = None,
+                        nfrs: str | None = None) -> dict | None:
+    """Persist the operator's answered design decisions (JSON), chosen planner model, and
+    detected NFR ids (CSV) on an idea at approval, so the planner/coder/reviewer can use them."""
     sets, vals = [], []
     if design_decisions is not None:
         sets.append("design_decisions=?"); vals.append(design_decisions or None)
     if planner_model is not None:
         sets.append("planner_model=?"); vals.append(planner_model or None)
+    if nfrs is not None:
+        sets.append("nfrs=?"); vals.append(nfrs or None)
     if not sets:
         return get_item(item_id)
     with _lock:
