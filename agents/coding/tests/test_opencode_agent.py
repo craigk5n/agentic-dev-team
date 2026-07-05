@@ -8,6 +8,7 @@ from coding_agent.opencode_agent import (
     run_opencode_agent, _clean, _looks_like_provider_error,
     _looks_like_model_not_found, ModelNotFoundError,
     _looks_like_credit_error, InsufficientCreditsError,
+    parse_opencode_json_usage, extract_opencode_json_summary,
 )
 
 
@@ -290,3 +291,95 @@ class TestParseOpencodeUsage:
         from coding_agent.opencode_agent import parse_opencode_usage
         assert parse_opencode_usage("Implementation complete") == {}
         assert parse_opencode_usage("") == {}
+
+
+# ── Story 3.1: real opencode usage from --format json ──────────────────────────
+
+def _amsg(mid, cost, i, o, r=0, model="anthropic/claude-sonnet-4-6"):
+    import json
+    return json.dumps({"type": "message.updated", "properties": {"info": {
+        "id": mid, "role": "assistant", "modelID": model, "cost": cost,
+        "tokens": {"input": i, "output": o, "reasoning": r,
+                   "cache": {"read": 0, "write": 0}}}}})
+
+
+def _text_part(pid, mid, text, synthetic=False):
+    import json
+    return json.dumps({"type": "message.part.updated", "properties": {"part": {
+        "id": pid, "type": "text", "messageID": mid, "text": text,
+        "synthetic": synthetic}}})
+
+
+_JSON_STREAM = "\n".join([
+    _amsg("m1", 0.01, 100, 50),                 # streaming update (superseded)
+    _amsg("m1", 0.02, 200, 120, r=10),          # latest state for m1 wins
+    _amsg("m2", 0.03, 80, 40),                   # second assistant turn
+    '{"type":"message.updated","properties":{"info":{"id":"u1","role":"user"}}}',
+    "not json at all",                           # tolerated
+    _text_part("p1", "m1", "Implemented the widget."),
+    _text_part("pu", "u1", "the original prompt"),   # user part — excluded
+])
+
+
+class TestParseOpencodeJsonUsage:
+    def test_sums_deduped_across_assistant_messages(self):
+        u = parse_opencode_json_usage(_JSON_STREAM)
+        assert u["input_tokens"] == 280 and u["output_tokens"] == 160
+        assert u["reasoning_tokens"] == 10
+        assert u["cost_usd"] == pytest.approx(0.05)
+        assert u["model"] == "anthropic/claude-sonnet-4-6"
+
+    def test_empty_or_no_assistant_returns_empty(self):
+        assert parse_opencode_json_usage("") == {}
+        assert parse_opencode_json_usage("junk\nmore junk") == {}
+
+
+class TestExtractOpencodeJsonSummary:
+    def test_joins_assistant_text_parts_only(self):
+        assert extract_opencode_json_summary(_JSON_STREAM) == "Implemented the widget."
+
+    def test_empty_when_none(self):
+        assert extract_opencode_json_summary("") == ""
+
+
+class TestUsageOut:
+    def test_json_mode_populates_real_usage_and_summary(self, tmp_path):
+        proc = _make_proc([l + "\n" for l in _JSON_STREAM.splitlines()])
+        usage: dict = {}
+        with (
+            patch("coding_agent.opencode_agent.shutil.which", return_value="/bin/opencode"),
+            patch("coding_agent.opencode_agent.subprocess.Popen", return_value=proc) as popen,
+        ):
+            summary = run_opencode_agent("S", "d", str(tmp_path), "model-x",
+                                         usage_source="json", usage_out=usage)
+        assert usage["source"] == "json"
+        assert usage["input_tokens"] == 280 and usage["cost_usd"] == pytest.approx(0.05)
+        assert usage["model_used"] == "model-x"
+        assert summary == "Implemented the widget."
+        assert "--format" in popen.call_args.args[0] and "json" in popen.call_args.args[0]
+
+    def test_text_mode_records_model_used_but_no_source(self, tmp_path):
+        proc = _make_proc(["did some work\n"])
+        usage: dict = {}
+        with (
+            patch("coding_agent.opencode_agent.shutil.which", return_value="/bin/opencode"),
+            patch("coding_agent.opencode_agent.subprocess.Popen", return_value=proc) as popen,
+        ):
+            run_opencode_agent("S", "d", str(tmp_path), "model-x",
+                               usage_source="text", usage_out=usage)
+        assert usage["model_used"] == "model-x"
+        assert "source" not in usage
+        assert "--format" not in popen.call_args.args[0]
+
+    def test_usage_out_records_fallback_model(self, tmp_path):
+        # First model unresolved → falls back; usage_out must reflect the model that ran.
+        proc_bad = _make_proc(["ProviderModelNotFoundError: no such model\n"])
+        proc_ok = _make_proc(["ok\n"])
+        usage: dict = {}
+        with (
+            patch("coding_agent.opencode_agent.shutil.which", return_value="/bin/opencode"),
+            patch("coding_agent.opencode_agent.subprocess.Popen", side_effect=[proc_bad, proc_ok]),
+        ):
+            run_opencode_agent("S", "d", str(tmp_path), "bad-model",
+                               fallback_model="good-model", usage_out=usage)
+        assert usage["model_used"] == "good-model"

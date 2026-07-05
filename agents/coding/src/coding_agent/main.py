@@ -136,6 +136,10 @@ def run_coding_agent(
     """
     log.info("coding_agent_start", item_id=item_id, title=title)
 
+    # Accumulates real coder usage across the initial run + any TDD-retry runs, so the
+    # event-bus can attribute true per-story cost (Story 3.1) instead of a chars/4 guess.
+    usage_acc: dict = {}
+
     repo_full = _extract_repo(description) or settings.default_repo
     owner, repo_name = repo_full.split("/", 1)
     branch = _branch_name(item_id, title)
@@ -171,6 +175,8 @@ def run_coding_agent(
                 prompt_template=story_prompt,
                 log_line=log_line,
                 fallback_model=settings.model_coder,
+                usage_source=settings.coder_usage_source,
+                usage_out=usage_acc,
             )
 
             # In-coder TDD: run the stack's tests and iterate (red->green) before the PR.
@@ -201,6 +207,8 @@ def run_coding_agent(
                         prompt_template=story_prompt,
                         log_line=log_line,
                         fallback_model=settings.model_coder,
+                        usage_source=settings.coder_usage_source,
+                        usage_out=usage_acc,
                     )
                 log.info("in_coder_tests", item_id=item_id, status=test_status)
 
@@ -214,9 +222,11 @@ def run_coding_agent(
                 if len(s) < 40 or s == "Implementation complete":
                     log.warning("coder_empty_run", item_id=item_id, summary_len=len(s))
                     return {"status": "error", "item_id": item_id,
-                            "error": "coder produced no output or changes (likely model error/rate-limit)"}
+                            "error": "coder produced no output or changes (likely model error/rate-limit)",
+                            "usage": usage_acc}
                 log.warning("no_changes_committed", item_id=item_id)
-                return {"status": "no_changes", "item_id": item_id, "summary": summary}
+                return {"status": "no_changes", "item_id": item_id, "summary": summary,
+                        "usage": usage_acc}
 
             git_ops.push(tmpdir, branch)
 
@@ -269,6 +279,7 @@ def run_coding_agent(
         "sha": sha,
         "summary": summary,
         "test_status": test_status,
+        "usage": usage_acc,
     }
 
 

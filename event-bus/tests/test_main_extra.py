@@ -2030,6 +2030,62 @@ class TestRecordCoderUsage:
         assert abs(float(h["story-8:cost_usd"]) - 0.05) < 1e-9  # real cost, not meta-priced
 
 
+class TestRecordCoderUsageStory31:
+    """Story 3.1: real JSON usage preferred; model-fallback priced correctly; provenance."""
+
+    def _redis(self, monkeypatch):
+        import event_bus.main as m
+        import fakeredis
+        r = fakeredis.FakeRedis(decode_responses=True)
+        monkeypatch.setattr(m, "_redis_conn", r)
+        return m, r
+
+    def test_json_usage_recorded_verbatim_and_keyed_by_model_used(self, monkeypatch):
+        import time
+        m, r = self._redis(monkeypatch)
+        result = {"summary": "done", "usage": {
+            "source": "json", "input_tokens": 5000, "output_tokens": 1200,
+            "cost_usd": 0.42, "model_used": "openrouter/anthropic/claude-sonnet-4-6"}}
+        m._record_coder_usage("openrouter/requested", "y" * 400, "z" * 400, result,
+                              stack="python", item_id="story-9")
+        key = f"telemetry:llm:{time.strftime('%Y-%m-%d', time.gmtime())}"
+        h = r.hgetall(key)
+        pfx = "coder:openrouter/anthropic/claude-sonnet-4-6"  # AC3: actual model, not requested
+        assert int(h[f"{pfx}:input_tokens"]) == 5000
+        assert int(h[f"{pfx}:output_tokens"]) == 1200
+        assert abs(float(h[f"{pfx}:cost_usd"]) - 0.42) < 1e-9  # real cost, no meta lookup
+        skey = f"telemetry:story:{time.strftime('%Y-%m-%d', time.gmtime())}"
+        assert r.hgetall(skey)["story-9:input_tokens"] == "5000"
+
+    def test_model_fallback_priced_against_actual_model(self, monkeypatch):
+        import time
+        m, r = self._redis(monkeypatch)
+        seen = {}
+
+        def _meta(_r, model):
+            seen["model"] = model
+            return {"price_prompt": 1e-6, "price_completion": 2e-6}
+
+        monkeypatch.setattr("event_bus.models_catalog.get_model_meta", _meta)
+        result = {"summary": "x" * 400, "usage": {"model_used": "actual/fallback"}}
+        m._record_coder_usage("requested/model", "y" * 400, "z" * 400, result, item_id="story-10")
+        assert seen["model"] == "actual/fallback"  # priced against the model that ran (AC3)
+        key = f"telemetry:llm:{time.strftime('%Y-%m-%d', time.gmtime())}"
+        assert "coder:actual/fallback:calls" in r.hgetall(key)
+
+    def test_provenance_flag_json_vs_estimate(self, monkeypatch):
+        m, r = self._redis(monkeypatch)
+        monkeypatch.setattr("event_bus.models_catalog.get_model_meta", lambda *_a, **_k: {})
+        m._record_coder_usage("mdl", "y" * 400, "z" * 400,
+                              {"summary": "done", "usage": {
+                                  "source": "json", "input_tokens": 1, "output_tokens": 1,
+                                  "cost_usd": 0.0, "model_used": "mdl"}}, item_id="s-json")
+        assert r.get("coder_cost_src:s-json") == "json"
+        m._record_coder_usage("mdl", "y" * 400, "z" * 400, {"summary": "no footer here"},
+                              item_id="s-est")
+        assert r.get("coder_cost_src:s-est") == "estimate"
+
+
 class TestPostMergeCICancellation:
     def _fj(self, runs):
         from unittest.mock import MagicMock

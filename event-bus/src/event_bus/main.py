@@ -1676,33 +1676,53 @@ def _record_coder_usage(model: str, story_prompt: str, description: str,
     if _redis_conn is None:
         return
     try:
+        usage = (result or {}).get("usage") or {}
+        # AC3: price + label the model the coder ACTUALLY used (fallback-aware), not the
+        # originally-requested one, so a model-fallback run isn't mispriced.
+        model_used = usage.get("model_used") or model
         summary = str((result or {}).get("summary") or "")
-        est_in = (len(story_prompt or "") + len(description or "")) // 4
-        est_out = len(summary) // 4
-        # Real usage from opencode's output, when present, wins over the estimate.
-        real = {}
-        try:
-            from coding_agent.opencode_agent import parse_opencode_usage
-            real = parse_opencode_usage(summary)
-        except Exception:
+        if usage.get("source") == "json":
+            # Real per-turn usage captured from opencode's JSON event stream (Story 3.1) —
+            # includes all internal tool-call turns, killing the ~3x undercount.
+            in_tok = int(usage.get("input_tokens") or 0)
+            out_tok = int(usage.get("output_tokens") or 0)
+            cost = float(usage.get("cost_usd") or 0.0)
+            source = "json"
+        else:
+            # Text path: opencode's formatted footer when present, else a chars/4 ESTIMATE.
+            est_in = (len(story_prompt or "") + len(description or "")) // 4
+            est_out = len(summary) // 4
             real = {}
-        in_tok = int(real.get("input_tokens", est_in))
-        out_tok = int(real.get("output_tokens", est_out))
-        cost = real.get("cost_usd")
-        if cost is None:
-            cost = 0.0
             try:
-                from event_bus.models_catalog import get_model_meta
-                meta = get_model_meta(_redis_conn, model) or {}
-                cost = (in_tok * float(meta.get("price_prompt") or 0.0)
-                        + out_tok * float(meta.get("price_completion") or 0.0))
+                from coding_agent.opencode_agent import parse_opencode_usage
+                real = parse_opencode_usage(summary)
+            except Exception:
+                real = {}
+            in_tok = int(real.get("input_tokens", est_in))
+            out_tok = int(real.get("output_tokens", est_out))
+            cost = real.get("cost_usd")
+            source = "text-real" if "cost_usd" in real else "estimate"
+            if cost is None:
+                cost = 0.0
+                try:
+                    from event_bus.models_catalog import get_model_meta
+                    meta = get_model_meta(_redis_conn, model_used) or {}
+                    cost = (in_tok * float(meta.get("price_prompt") or 0.0)
+                            + out_tok * float(meta.get("price_completion") or 0.0))
+                except Exception:
+                    pass
+            cost = float(cost)
+        # Provenance (AC2, surfaced by Story 3.3): flag whether this story's coder cost is
+        # measured or estimated so estimates aren't silently mixed with real spend.
+        if item_id:
+            try:
+                _redis_conn.setex(f"coder_cost_src:{item_id}", 30 * 86_400, source)
             except Exception:
                 pass
-        cost = float(cost)
         import time
         date = time.strftime("%Y-%m-%d", time.gmtime())
         key = f"telemetry:llm:{date}"
-        prefix = f"coder:{model}"
+        prefix = f"coder:{model_used}"
         pipe = _redis_conn.pipeline()
         pipe.hincrbyfloat(key, f"{prefix}:cost_usd", cost)
         pipe.hincrby(key, f"{prefix}:input_tokens", in_tok)

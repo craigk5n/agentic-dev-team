@@ -7,6 +7,7 @@ opencode handles all file reads/writes/commands inside the repo directory.
 """
 
 from __future__ import annotations
+import json as _json
 import os
 import re
 import shutil
@@ -48,6 +49,86 @@ def parse_opencode_usage(text: str) -> dict:
     if m:
         out["cost_usd"] = float(m.group(1))
     return out
+
+
+def parse_opencode_json_usage(text: str) -> dict:
+    """Sum REAL token/cost usage across every assistant message in an
+    ``opencode run --format json`` event stream (JSONL) — this captures all internal
+    tool-call turns, not just the final message, killing the ~3x undercount.
+
+    Schema (from @opencode-ai/sdk, verified): events ``{type:"message.updated",
+    properties:{info: AssistantMessage}}`` where AssistantMessage carries
+    ``cost: number`` and ``tokens:{input,output,reasoning,cache:{read,write}}``.
+    Streaming emits the same message id repeatedly, so we keep the latest state per id
+    then sum. Returns {} if the stream carries no assistant usage."""
+    if not text:
+        return {}
+    msgs: dict[str, dict] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line[0] != "{":
+            continue
+        try:
+            evt = _json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(evt, dict) or evt.get("type") != "message.updated":
+            continue
+        info = (evt.get("properties") or {}).get("info") or {}
+        if info.get("role") != "assistant" or not info.get("id"):
+            continue
+        toks = info.get("tokens") or {}
+        msgs[info["id"]] = {  # latest state wins
+            "cost": float(info.get("cost") or 0.0),
+            "input": int(toks.get("input") or 0),
+            "output": int(toks.get("output") or 0),
+            "reasoning": int(toks.get("reasoning") or 0),
+            "model": info.get("modelID") or "",
+        }
+    if not msgs:
+        return {}
+    model = next((m["model"] for m in reversed(list(msgs.values())) if m["model"]), "")
+    return {
+        "input_tokens": sum(m["input"] for m in msgs.values()),
+        "output_tokens": sum(m["output"] for m in msgs.values()),
+        "reasoning_tokens": sum(m["reasoning"] for m in msgs.values()),
+        "cost_usd": sum(m["cost"] for m in msgs.values()),
+        "model": model,
+    }
+
+
+def extract_opencode_json_summary(text: str) -> str:
+    """Join assistant-authored text parts from an opencode JSON event stream into a
+    human-readable summary (the JSON stream is not itself readable). Excludes user and
+    synthetic parts. Returns '' if none found."""
+    if not text:
+        return ""
+    assistant_ids: set[str] = set()
+    parts: dict[str, str] = {}       # part id -> latest text
+    part_msg: dict[str, str] = {}    # part id -> owning message id
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line[0] != "{":
+            continue
+        try:
+            evt = _json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(evt, dict):
+            continue
+        props = evt.get("properties") or {}
+        if evt.get("type") == "message.updated":
+            info = props.get("info") or {}
+            if info.get("role") == "assistant" and info.get("id"):
+                assistant_ids.add(info["id"])
+        elif evt.get("type") == "message.part.updated":
+            part = props.get("part") or {}
+            if part.get("type") == "text" and part.get("id") and not part.get("synthetic"):
+                parts[part["id"]] = part.get("text") or ""
+                part_msg[part["id"]] = part.get("messageID") or ""
+    ordered = [txt for pid, txt in parts.items()
+               if part_msg.get(pid) in assistant_ids and txt.strip()]
+    return "\n".join(ordered).strip()
 
 # Phrases OpenRouter/providers emit when an LLM call fails (rate limit, provider outage,
 # no available endpoint). Specific enough not to collide with normal code the agent writes.
@@ -126,6 +207,8 @@ def run_opencode_agent(
     prompt_template: str = "",
     log_line: Callable[[str], None] | None = None,
     fallback_model: str = "",
+    usage_source: str = "text",
+    usage_out: dict | None = None,
 ) -> str:
     """
     Run opencode non-interactively on the given repo and story.
@@ -136,6 +219,12 @@ def run_opencode_agent(
     (ModelNotFoundError), transparently retry once with this known-good model instead of
     failing. Lets an unavailable escalate/override model degrade gracefully to the base
     coder model rather than wedging the story.
+
+    ``usage_source`` — "text" (default, proven path: human-formatted output) or "json"
+    (runs with ``--format json`` and captures REAL per-turn token/cost usage). When a
+    dict is passed as ``usage_out`` it is populated in place with the model actually used
+    (``model_used``, fallback-aware) and, in json mode, accumulated real usage
+    ({input_tokens, output_tokens, reasoning_tokens, cost_usd, source:"json"}).
     """
     opencode_bin = shutil.which("opencode")
     if not opencode_bin:
@@ -200,7 +289,10 @@ def run_opencode_agent(
         env["OPENROUTER_API_KEY"] = openrouter_api_key
 
     def _invoke(use_model: str) -> str:
-        cmd = [opencode_bin, "run", "--dir", repo_dir, "--model", use_model, prompt]
+        cmd = [opencode_bin, "run", "--dir", repo_dir, "--model", use_model]
+        if usage_source == "json":
+            cmd += ["--format", "json"]
+        cmd.append(prompt)
         log.info("opencode_start", model=use_model, repo=repo_dir, story=story_title)
         proc = subprocess.Popen(
             cmd,
@@ -250,8 +342,25 @@ def run_opencode_agent(
                 f"opencode LLM call rejected for insufficient credit/quota: {output[-300:]}")
         if _looks_like_provider_error(output):
             raise RuntimeError(f"opencode LLM call failed (provider error/rate-limit): {output[-300:]}")
+
+        # Record which model actually ran (fallback-aware) + real usage in json mode.
+        # Accumulates across calls so TDD-retry invocations sum into one story total.
+        if usage_out is not None:
+            usage_out["model_used"] = use_model
+            if usage_source == "json":
+                u = parse_opencode_json_usage(output)
+                if u:
+                    for k in ("input_tokens", "output_tokens", "reasoning_tokens"):
+                        usage_out[k] = usage_out.get(k, 0) + u[k]
+                    usage_out["cost_usd"] = usage_out.get("cost_usd", 0.0) + u["cost_usd"]
+                    usage_out["source"] = "json"
+
+        if usage_source == "json":
+            summary = extract_opencode_json_summary(output) or "Implementation complete"
+        else:
+            summary = output.strip() or "Implementation complete"
         log.info("opencode_done", story=story_title, model=use_model)
-        return output.strip() or "Implementation complete"
+        return summary
 
     try:
         return _invoke(model)

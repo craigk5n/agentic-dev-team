@@ -8,6 +8,11 @@ class Settings(BaseSettings):
     model_coder: str = "openrouter/nvidia/nemotron-3-super-120b-a12b:free"
     openrouter_api_key: str = ""
 
+    # Coder usage capture: "text" (default, proven human-format path) or "json"
+    # (runs opencode with --format json to capture REAL per-turn token/cost usage).
+    # Default OFF until validated against a live opencode run in the real environment.
+    coder_usage_source: str = "text"
+
     forgejo_api_token: str = ""
     # Least-privilege coder-bot identity — used for branch/commit/PR ops so the
     # coding agent doesn't act as the admin. Falls back to forgejo_api_token if unset.
