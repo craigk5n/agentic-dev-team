@@ -58,6 +58,28 @@ def get_telemetry_summary(r: "redis.Redis", days: int = 7) -> dict:
 
     total_cost = sum(v["cost_usd"] for v in by_role.values())
 
+    # Story 3.3: coder-cost provenance per story (measured vs estimated), read from the
+    # flag _record_coder_usage writes. Lets analyses filter out estimated spend.
+    def _coder_cost_source(story_id: str) -> str:
+        try:
+            v = r.get(f"coder_cost_src:{story_id}")
+            if isinstance(v, (bytes, bytearray)):
+                v = v.decode()
+            return v or "unknown"
+        except Exception:
+            return "unknown"
+
+    # Reconciliation report: total spend vs spend attributed to a story. A large
+    # unattributed share flags an attribution gap (e.g. the coder black-box undercount).
+    story_total = sum(rec.get("cost_usd", 0.0) for rec in story_records)
+    reconciliation = {
+        "total_usd": round(total_cost, 6),
+        "story_attributed_usd": round(story_total, 6),
+        "unattributed_usd": round(total_cost - story_total, 6),
+        "unattributed_pct": round((total_cost - story_total) / total_cost * 100, 2)
+        if total_cost else 0.0,
+    }
+
     # Daily spend vs. the configured cap (the cost backstop)
     from event_bus.config_store import get_config
     from event_bus.cost_guard import today_spend
@@ -110,9 +132,12 @@ def get_telemetry_summary(r: "redis.Redis", days: int = 7) -> dict:
                 "input_tokens": rec["input_tokens"],
                 "output_tokens": rec["output_tokens"],
                 "calls": rec["calls"],
+                "coder_cost_source": _coder_cost_source(rec["story"]),
             }
             for rec in story_records
         ],
+        # Story 3.3: attribution reconciliation (total vs per-story-attributed spend).
+        "reconciliation": reconciliation,
         # Story 5.1: per-run spend for experiment arms, keyed by run id.
         "by_run": [
             {
@@ -131,6 +156,11 @@ def get_telemetry_summary(r: "redis.Redis", days: int = 7) -> dict:
 def render_prometheus(r: "redis.Redis") -> str:
     """
     Render current metrics in Prometheus text exposition format.
+
+    Story 3.3 decision: per-story cost is deliberately NOT exported here. Story ids are
+    unbounded and high-cardinality — a label per story would blow up the Prometheus
+    time-series count. Per-story spend (with its measured/estimated provenance) is served
+    JSON-only via GET /api/telemetry `by_story`, which is the right surface for it.
     """
     from event_bus.limits import get_concurrency, get_rejected, get_rate_window_count
 
