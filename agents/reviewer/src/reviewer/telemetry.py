@@ -32,6 +32,7 @@ def record_usage(
     stack: str = "",
     project: str = "",
     story: str = "",
+    run: str = "",
 ) -> None:
     """
     Record token usage and estimated USD cost from a litellm completion response.
@@ -99,6 +100,15 @@ def record_usage(
             pipe.hincrby(tkey, f"{story}:output_tokens", out_tok)
             pipe.hincrby(tkey, f"{story}:calls", 1)
             pipe.expire(tkey, _TTL_SECONDS)
+
+        if run:
+            # Story 5.1: per-run spend for experiment arms (run ids have no ':').
+            rkey = f"telemetry:run:{date}"
+            pipe.hincrbyfloat(rkey, f"{run}:cost_usd", cost)
+            pipe.hincrby(rkey, f"{run}:input_tokens", in_tok)
+            pipe.hincrby(rkey, f"{run}:output_tokens", out_tok)
+            pipe.hincrby(rkey, f"{run}:calls", 1)
+            pipe.expire(rkey, _TTL_SECONDS)
 
         pipe.execute()
 
@@ -192,6 +202,34 @@ def read_story_usage(r: "redis.Redis", days: int = 30) -> list[dict]:
             story, metric = parts
             entry = totals.setdefault(story, {
                 "story": story, "cost_usd": 0.0,
+                "input_tokens": 0, "output_tokens": 0, "calls": 0})
+            if metric == "cost_usd":
+                entry["cost_usd"] += float(val)
+            elif metric in ("input_tokens", "output_tokens", "calls"):
+                entry[metric] += int(val)
+    return sorted(totals.values(), key=lambda x: x["cost_usd"], reverse=True)
+
+
+def read_run_usage(r: "redis.Redis", days: int = 30) -> list[dict]:
+    """Return per-run cost/usage totals summed over the last `days` days (Story 5.1).
+    Each entry: {run, cost_usd, input_tokens, output_tokens, calls}."""
+    totals: dict[str, dict] = {}
+    today = time.time()
+    for offset in range(days):
+        date = time.strftime("%Y-%m-%d", time.gmtime(today - offset * 86_400))
+        try:
+            raw = r.hgetall(f"telemetry:run:{date}")
+        except Exception:
+            continue
+        for k, v in (raw or {}).items():
+            field = k.decode() if isinstance(k, bytes) else k
+            val = v.decode() if isinstance(v, bytes) else v
+            parts = field.rsplit(":", 1)
+            if len(parts) != 2:
+                continue
+            run, metric = parts
+            entry = totals.setdefault(run, {
+                "run": run, "cost_usd": 0.0,
                 "input_tokens": 0, "output_tokens": 0, "calls": 0})
             if metric == "cost_usd":
                 entry["cost_usd"] += float(val)

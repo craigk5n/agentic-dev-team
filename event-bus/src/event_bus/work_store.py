@@ -84,7 +84,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
                             ("style_guides", "TEXT"), ("archived_at", "TEXT"),
                             ("epic", "TEXT"), ("design_decisions", "TEXT"),
                             ("planner_model", "TEXT"), ("started_at", "TEXT"),
-                            ("nfrs", "TEXT")]:
+                            ("nfrs", "TEXT"), ("run_id", "TEXT")]:
         try:
             conn.execute(f"ALTER TABLE work_items ADD COLUMN {col} {definition}")
             conn.commit()
@@ -110,6 +110,7 @@ def create_item(
     epic: str = "",
     design_decisions: str = "",
     planner_model: str = "",
+    run_id: str = "",
     item_id: Optional[str] = None,
     created_at: Optional[str] = None,
 ) -> dict:
@@ -122,12 +123,12 @@ def create_item(
             """INSERT INTO work_items
                (id, type, title, prompt, description, state, parent_id, sequence,
                 model_used, repo, stack, sdlc, stack_rationale, style_guides, epic,
-                design_decisions, planner_model, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                design_decisions, planner_model, run_id, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (item_id, item_type, title, prompt, description, state, parent_id,
              sequence, model_used, repo or None, stack or None, sdlc or None,
              stack_rationale or None, guides_csv, epic or None,
-             design_decisions or None, planner_model or None, now, now),
+             design_decisions or None, planner_model or None, run_id or None, now, now),
         )
         db.commit()
     return get_item(item_id)
@@ -423,6 +424,17 @@ def delete_item_tree(idea_id: str) -> int:
         )
         db.commit()
         return cur.rowcount
+
+
+def list_items_by_run(run_id: str) -> list[dict]:
+    """Return all work items tagged with ``run_id`` (experiment scoping, Story 5.1)."""
+    if not run_id:
+        return []
+    with _lock:
+        rows = get_db().execute(
+            "SELECT * FROM work_items WHERE run_id=? ORDER BY created_at DESC", (run_id,)
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def list_projects() -> list[dict]:

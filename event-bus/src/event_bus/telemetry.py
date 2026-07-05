@@ -26,16 +26,18 @@ def get_telemetry_summary(r: "redis.Redis", days: int = 7) -> dict:
     """
     try:
         from reviewer.telemetry import (read_all, read_stack_usage, read_project_usage,
-                                         read_story_usage)
+                                         read_story_usage, read_run_usage)
         llm_records = read_all(r, days=days)
         stack_records = read_stack_usage(r, days=days)
         project_records = read_project_usage(r, days=days)
         story_records = read_story_usage(r, days=days)
+        run_records = read_run_usage(r, days=days)
     except ImportError:
         llm_records = []
         stack_records = []
         project_records = []
         story_records = []
+        run_records = []
 
     from event_bus.limits import get_concurrency, get_rejected, get_rate_window_count
 
@@ -110,6 +112,17 @@ def get_telemetry_summary(r: "redis.Redis", days: int = 7) -> dict:
                 "calls": rec["calls"],
             }
             for rec in story_records
+        ],
+        # Story 5.1: per-run spend for experiment arms, keyed by run id.
+        "by_run": [
+            {
+                "run": rec["run"],
+                "cost_usd": round(rec["cost_usd"], 6),
+                "input_tokens": rec["input_tokens"],
+                "output_tokens": rec["output_tokens"],
+                "calls": rec["calls"],
+            }
+            for rec in run_records
         ],
         "daily": llm_records,
     }
