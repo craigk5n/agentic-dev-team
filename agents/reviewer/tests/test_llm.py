@@ -92,7 +92,7 @@ class TestComplete:
         calls = {}
         fake = types.ModuleType("planner_agent.claude_code")
         fake.is_claude_code_model = lambda m: str(m).startswith("claude-code")
-        def _fake_complete(messages, model="", timeout=90.0):
+        def _fake_complete(messages, model="", timeout=90.0, usage_out=None):
             calls["timeout"] = timeout
             return "SUB-REVIEW"
         fake.complete = _fake_complete

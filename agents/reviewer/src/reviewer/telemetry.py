@@ -60,60 +60,59 @@ def record_usage(
 
         in_tok = int(getattr(usage, "prompt_tokens", 0) or 0)
         out_tok = int(getattr(usage, "completion_tokens", 0) or 0)
-
-        # UTC to match read_all() (time.gmtime); otherwise the write/read keys
-        # diverge once local time crosses the UTC day boundary.
-        date = time.strftime("%Y-%m-%d", time.gmtime())
-        key = f"telemetry:llm:{date}"
-        prefix = f"{role}:{model}"
-
-        pipe = r.pipeline()
-        pipe.hincrbyfloat(key, f"{prefix}:cost_usd", cost)
-        pipe.hincrby(key, f"{prefix}:input_tokens", in_tok)
-        pipe.hincrby(key, f"{prefix}:output_tokens", out_tok)
-        pipe.hincrby(key, f"{prefix}:calls", 1)
-        pipe.expire(key, _TTL_SECONDS)
-
-        if stack:
-            skey = f"telemetry:stack:{date}"
-            pipe.hincrbyfloat(skey, f"{stack}:cost_usd", cost)
-            pipe.hincrby(skey, f"{stack}:input_tokens", in_tok)
-            pipe.hincrby(skey, f"{stack}:output_tokens", out_tok)
-            pipe.hincrby(skey, f"{stack}:calls", 1)
-            pipe.expire(skey, _TTL_SECONDS)
-
-        if project:
-            # project ids are UUIDs (no ':'), so the {project}:{metric} field parses cleanly.
-            pkey = f"telemetry:project:{date}"
-            pipe.hincrbyfloat(pkey, f"{project}:cost_usd", cost)
-            pipe.hincrby(pkey, f"{project}:input_tokens", in_tok)
-            pipe.hincrby(pkey, f"{project}:output_tokens", out_tok)
-            pipe.hincrby(pkey, f"{project}:calls", 1)
-            pipe.expire(pkey, _TTL_SECONDS)
-
-        if story:
-            # HS-9: per-story spend (item ids are UUIDs, no ':') so a story's total cost is
-            # its coder spend + its PR verdict spend, both keyed by the same item id.
-            tkey = f"telemetry:story:{date}"
-            pipe.hincrbyfloat(tkey, f"{story}:cost_usd", cost)
-            pipe.hincrby(tkey, f"{story}:input_tokens", in_tok)
-            pipe.hincrby(tkey, f"{story}:output_tokens", out_tok)
-            pipe.hincrby(tkey, f"{story}:calls", 1)
-            pipe.expire(tkey, _TTL_SECONDS)
-
-        if run:
-            # Story 5.1: per-run spend for experiment arms (run ids have no ':').
-            rkey = f"telemetry:run:{date}"
-            pipe.hincrbyfloat(rkey, f"{run}:cost_usd", cost)
-            pipe.hincrby(rkey, f"{run}:input_tokens", in_tok)
-            pipe.hincrby(rkey, f"{run}:output_tokens", out_tok)
-            pipe.hincrby(rkey, f"{run}:calls", 1)
-            pipe.expire(rkey, _TTL_SECONDS)
-
-        pipe.execute()
-
+        _accumulate_usage(r, role, model, cost, in_tok, out_tok,
+                          stack=stack, project=project, story=story, run=run)
         log.debug("telemetry_recorded", role=role, model=model, stack=stack,
                   project=project, cost_usd=round(cost, 6))
+    except Exception as exc:
+        log.warning("telemetry_write_failed", role=role, model=model, error=str(exc))
+
+
+def _accumulate_usage(r, role: str, model: str, cost: float, in_tok: int, out_tok: int,
+                      stack: str = "", project: str = "", story: str = "", run: str = "") -> None:
+    """Write one usage record across every telemetry dimension in a single pipeline.
+    Shared by record_usage (litellm responses) and record_subscription_usage (claude-code).
+
+    UTC date to match read_all() (time.gmtime); otherwise write/read keys diverge across
+    the UTC day boundary."""
+    date = time.strftime("%Y-%m-%d", time.gmtime())
+    pipe = r.pipeline()
+    key = f"telemetry:llm:{date}"
+    prefix = f"{role}:{model}"
+    pipe.hincrbyfloat(key, f"{prefix}:cost_usd", cost)
+    pipe.hincrby(key, f"{prefix}:input_tokens", in_tok)
+    pipe.hincrby(key, f"{prefix}:output_tokens", out_tok)
+    pipe.hincrby(key, f"{prefix}:calls", 1)
+    pipe.expire(key, _TTL_SECONDS)
+    # Per-stack/project/story/run rollups (ids have no ':' so {val}:{metric} parses cleanly).
+    for dim, val in (("stack", stack), ("project", project), ("story", story), ("run", run)):
+        if not val:
+            continue
+        dkey = f"telemetry:{dim}:{date}"
+        pipe.hincrbyfloat(dkey, f"{val}:cost_usd", cost)
+        pipe.hincrby(dkey, f"{val}:input_tokens", in_tok)
+        pipe.hincrby(dkey, f"{val}:output_tokens", out_tok)
+        pipe.hincrby(dkey, f"{val}:calls", 1)
+        pipe.expire(dkey, _TTL_SECONDS)
+    pipe.execute()
+
+
+def record_subscription_usage(r, role: str, model: str, usage: dict,
+                              stack: str = "", project: str = "", story: str = "",
+                              run: str = "") -> None:
+    """Record Claude Code subscription usage (Story 3.2). Tokens are always captured;
+    cost is the CLI's ``total_cost_usd`` when known, else 0 (subscription/unpriced) — we
+    never fabricate a price for subscription spend. ``usage`` = {input_tokens,
+    output_tokens, cost_usd, cost_known}."""
+    try:
+        usage = usage or {}
+        in_tok = int(usage.get("input_tokens") or 0)
+        out_tok = int(usage.get("output_tokens") or 0)
+        cost = float(usage.get("cost_usd") or 0.0) if usage.get("cost_known") else 0.0
+        _accumulate_usage(r, role, model, cost, in_tok, out_tok,
+                          stack=stack, project=project, story=story, run=run)
+        log.debug("subscription_telemetry_recorded", role=role, model=model,
+                  in_tok=in_tok, out_tok=out_tok, cost_usd=round(cost, 6))
     except Exception as exc:
         log.warning("telemetry_write_failed", role=role, model=model, error=str(exc))
 

@@ -41,14 +41,16 @@ def model_alias(model: str) -> str:
     return alias if alias in _ALIASES else "sonnet"
 
 
-def complete(messages: list[dict], *, model: str, timeout: float = 90.0) -> str:
+def complete(messages: list[dict], *, model: str, timeout: float = 90.0,
+             usage_out: dict | None = None) -> str:
     """One text completion via the claude CLI. Returns the raw response text.
 
     The prompt is fed on stdin (avoids argv size limits for large plans). The CLI's
     ``--output-format json`` envelope carries the text in ``result`` plus usage
-    metadata, which we log (subscription usage has no per-token dollar cost to record).
-    Raises RuntimeError on CLI/auth errors and TimeoutError on timeout — both retried
-    by the caller's existing retry loop.
+    metadata. When a dict is passed as ``usage_out`` it is populated with
+    {input_tokens, output_tokens, cost_usd, cost_known, source:"subscription"} so the
+    caller can attribute subscription spend to telemetry (Story 3.2). Raises RuntimeError
+    on CLI/auth errors and TimeoutError on timeout — both retried by the caller's loop.
     """
     # Planning calls are a single system+user pair; fold them into one prompt.
     prompt = "\n\n".join(m.get("content", "") for m in messages if m.get("content"))
@@ -80,7 +82,15 @@ def complete(messages: list[dict], *, model: str, timeout: float = 90.0) -> str:
         raise RuntimeError(f"claude CLI error result: {str(envelope)[:300]}")
 
     usage = envelope.get("usage") or {}
+    cost = envelope.get("total_cost_usd")
+    if usage_out is not None:
+        usage_out["input_tokens"] = int(usage.get("input_tokens") or 0)
+        usage_out["output_tokens"] = int(usage.get("output_tokens") or 0)
+        usage_out["cost_usd"] = float(cost) if cost is not None else 0.0
+        usage_out["cost_known"] = cost is not None
+        usage_out["source"] = "subscription"
     log.info("claude_code_completion", model=model_alias(model),
              input_tokens=usage.get("input_tokens"), output_tokens=usage.get("output_tokens"),
-             duration_ms=envelope.get("duration_ms"), num_turns=envelope.get("num_turns"))
+             cost_usd=cost, duration_ms=envelope.get("duration_ms"),
+             num_turns=envelope.get("num_turns"))
     return envelope.get("result") or ""

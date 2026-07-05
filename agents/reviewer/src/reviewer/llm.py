@@ -94,7 +94,22 @@ def complete(
     # OpenRouter credit. The adapter feeds the prompt on stdin and returns the text.
     if (model or "").strip().startswith("claude-code"):
         from planner_agent import claude_code
-        return claude_code.complete(messages, model=model, timeout=_CLAUDE_CODE_TIMEOUT)
+        cc_usage: dict = {}
+        text = claude_code.complete(messages, model=model, timeout=_CLAUDE_CODE_TIMEOUT,
+                                    usage_out=cc_usage)
+        # Story 3.2: attribute subscription spend (tokens always; cost when the CLI
+        # reports total_cost_usd) so by_story no longer shows $0/0-tokens for claude-code.
+        if telemetry_role and cc_usage:
+            try:
+                from reviewer.config import settings
+                import redis as _redis
+                from reviewer.telemetry import record_subscription_usage
+                r = _redis.from_url(settings.redis_url, decode_responses=False)
+                record_subscription_usage(r, telemetry_role, model, cc_usage,
+                                          stack=telemetry_stack, story=telemetry_story)
+            except Exception as exc:
+                log.debug("telemetry_skipped", role=telemetry_role, error=str(exc))
+        return text
 
     kwargs: dict = {
         "model": model,
