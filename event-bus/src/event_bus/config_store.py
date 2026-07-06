@@ -104,8 +104,12 @@ class RuntimeConfig:
     limits: LimitsConfig = field(default_factory=LimitsConfig)
 
 
-def _load(r: "redis.Redis") -> RuntimeConfig:
-    data = r.get(_KEY)
+def _run_key(run_id: str) -> str:
+    return f"{_KEY}:{run_id}"
+
+
+def _load(r: "redis.Redis", key: str = _KEY) -> RuntimeConfig:
+    data = r.get(key)
     if not data:
         return RuntimeConfig()
     try:
@@ -129,34 +133,41 @@ def _load(r: "redis.Redis") -> RuntimeConfig:
         return RuntimeConfig()
 
 
-def _save(r: "redis.Redis", config: RuntimeConfig) -> None:
-    r.set(_KEY, json.dumps(asdict(config)))
+def _save(r: "redis.Redis", config: RuntimeConfig, key: str = _KEY) -> None:
+    r.set(key, json.dumps(asdict(config)))
 
 
-def get_config(r: "redis.Redis") -> RuntimeConfig:
-    return _load(r)
+def get_config(r: "redis.Redis", run_id: str = "") -> RuntimeConfig:
+    """Return the effective config. With ``run_id`` (Story 4.2), read the per-run override
+    at ``runtime_config:{run_id}`` when present, else fall back to the global default — so
+    experiment arms are isolated without clobbering the global config."""
+    if run_id:
+        rk = _run_key(run_id)
+        if r.get(rk):
+            return _load(r, rk)
+    return _load(r, _KEY)
 
 
-def patch_config(r: "redis.Redis", patch: dict) -> RuntimeConfig:
-    """Partial update — only fields present in `patch` are changed."""
-    config = _load(r)
+def patch_config(r: "redis.Redis", patch: dict, run_id: str = "") -> RuntimeConfig:
+    """Partial update — only fields present in `patch` are changed. With ``run_id`` the
+    patch is written to the per-run key (seeded from the global default so the arm inherits
+    global, then applies its overrides), never touching the global config."""
+    key = _run_key(run_id) if run_id else _KEY
+    base_key = key if (run_id and r.get(key)) else _KEY
+    config = _load(r, base_key)
 
-    for key, val in patch.get("gates", {}).items():
-        if key in _GATE_FIELDS:  # idea_approval is immutable
-            setattr(config.gates, key, bool(val))
+    for k, val in patch.get("gates", {}).items():
+        if k in _GATE_FIELDS:  # idea_approval is immutable
+            setattr(config.gates, k, bool(val))
 
-    for key, val in patch.get("models", {}).items():
-        if key in _MODEL_ROLES:
-            setattr(config.models, key, str(val))
+    for k, val in patch.get("models", {}).items():
+        if k in _MODEL_ROLES:
+            setattr(config.models, k, str(val))
 
-    for key, val in patch.get("limits", {}).items():
-        if hasattr(config.limits, key):
+    for k, val in patch.get("limits", {}).items():
+        if hasattr(config.limits, k):
             # Coerce to the field's declared type (int counters, float for the cost cap)
-            setattr(config.limits, key, type(getattr(config.limits, key))(val))
+            setattr(config.limits, k, type(getattr(config.limits, k))(val))
 
-    for key, val in patch.get("project", {}).items():
-        if key in _PROJECT_FIELDS:
-            setattr(config.project, key, str(val))
-
-    _save(r, config)
+    _save(r, config, key)
     return config
