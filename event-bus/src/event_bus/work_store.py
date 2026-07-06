@@ -40,6 +40,19 @@ STATE_COLORS: dict[str, str] = {
 
 STATE_ORDER = list(STATE_COLORS.keys())
 
+# Story 5.2 — story label vocabularies (for the trust-boundary risk study, T1.1).
+# A trust boundary is code that generates code, renders untrusted data into a sink, or
+# makes outbound calls — where autonomous coding is most costly/risky.
+TRUST_BOUNDARY_CLASSES = frozenset({
+    "generates-code", "renders-untrusted", "calls-outward", "none"})
+STORY_SIZES = frozenset({"xs", "s", "m", "l", "xl"})
+
+
+def validate_story_label(value: str | None, allowed: frozenset, field: str) -> None:
+    """Raise ValueError if a non-empty label is outside its vocabulary. Empty/None = unset."""
+    if value and value not in allowed:
+        raise ValueError(f"invalid {field}: {value!r} (one of {sorted(allowed)})")
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -77,6 +90,22 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_state ON work_items(state);
         CREATE INDEX IF NOT EXISTS idx_parent ON work_items(parent_id);
+
+        -- Story 5.3: durable defect ledger. Records each observed runtime defect linked to
+        -- a story/run/PR, so verdict precision/recall (T3.1) is computable and every run
+        -- feeds the dataset. Verdicts live in Redis (TTL'd); the join is done at read time.
+        CREATE TABLE IF NOT EXISTS defects (
+            id           TEXT PRIMARY KEY,
+            run_id       TEXT,
+            story_id     TEXT REFERENCES work_items(id),
+            pr_url       TEXT,
+            source       TEXT,          -- 'oracle' | 'manual'
+            class        TEXT,
+            description  TEXT,
+            detected_at  TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_defect_story ON defects(story_id);
+        CREATE INDEX IF NOT EXISTS idx_defect_run ON defects(run_id);
     """)
     # Migrate existing DBs that pre-date optional columns
     for col, definition in [("pr_url", "TEXT"), ("sequence", "INTEGER"), ("repo", "TEXT"),
@@ -84,7 +113,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
                             ("style_guides", "TEXT"), ("archived_at", "TEXT"),
                             ("epic", "TEXT"), ("design_decisions", "TEXT"),
                             ("planner_model", "TEXT"), ("started_at", "TEXT"),
-                            ("nfrs", "TEXT"), ("run_id", "TEXT")]:
+                            ("nfrs", "TEXT"), ("run_id", "TEXT"),
+                            ("trust_boundary_class", "TEXT"), ("size", "TEXT")]:
         try:
             conn.execute(f"ALTER TABLE work_items ADD COLUMN {col} {definition}")
             conn.commit()
@@ -111,9 +141,13 @@ def create_item(
     design_decisions: str = "",
     planner_model: str = "",
     run_id: str = "",
+    trust_boundary_class: str = "",
+    size: str = "",
     item_id: Optional[str] = None,
     created_at: Optional[str] = None,
 ) -> dict:
+    validate_story_label(trust_boundary_class, TRUST_BOUNDARY_CLASSES, "trust_boundary_class")
+    validate_story_label(size, STORY_SIZES, "size")
     item_id = item_id or str(uuid.uuid4())
     now = created_at or _now()
     guides_csv = ",".join(style_guides) if style_guides else None
@@ -123,12 +157,14 @@ def create_item(
             """INSERT INTO work_items
                (id, type, title, prompt, description, state, parent_id, sequence,
                 model_used, repo, stack, sdlc, stack_rationale, style_guides, epic,
-                design_decisions, planner_model, run_id, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                design_decisions, planner_model, run_id, trust_boundary_class, size,
+                created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (item_id, item_type, title, prompt, description, state, parent_id,
              sequence, model_used, repo or None, stack or None, sdlc or None,
              stack_rationale or None, guides_csv, epic or None,
-             design_decisions or None, planner_model or None, run_id or None, now, now),
+             design_decisions or None, planner_model or None, run_id or None,
+             trust_boundary_class or None, size or None, now, now),
         )
         db.commit()
     return get_item(item_id)
@@ -424,6 +460,65 @@ def delete_item_tree(idea_id: str) -> int:
         )
         db.commit()
         return cur.rowcount
+
+
+def add_defect(story_id: str, defect_class: str, description: str, *,
+               source: str = "manual", run_id: str = "", pr_url: str = "",
+               detected_at: Optional[str] = None) -> dict:
+    """Insert one defect into the ledger (Story 5.3). Returns the stored row."""
+    did = str(uuid.uuid4())
+    now = detected_at or _now()
+    with _lock:
+        db = get_db()
+        db.execute(
+            """INSERT INTO defects
+               (id, run_id, story_id, pr_url, source, class, description, detected_at)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (did, run_id or None, story_id or None, pr_url or None, source,
+             defect_class, description, now),
+        )
+        db.commit()
+        row = db.execute("SELECT * FROM defects WHERE id=?", (did,)).fetchone()
+    return dict(row)
+
+
+def record_oracle_defects(story_id: str, oracle_result: dict, *,
+                          run_id: str = "", pr_url: str = "") -> list[dict]:
+    """Insert a ledger row per defect in an oracle result (EPIC 2 → ledger bridge). This is
+    the integration point a post-merge oracle run calls after persist_oracle_result."""
+    rows = []
+    for d in (oracle_result or {}).get("defects", []):
+        rows.append(add_defect(
+            story_id, d.get("class", "unknown"), d.get("description", ""),
+            source="oracle", run_id=run_id, pr_url=pr_url))
+    return rows
+
+
+def list_defects(story_id: str = "", run_id: str = "") -> list[dict]:
+    """List ledger defects, optionally filtered by story or run (most-recent first)."""
+    with _lock:
+        db = get_db()
+        if story_id:
+            rows = db.execute("SELECT * FROM defects WHERE story_id=? ORDER BY detected_at DESC",
+                              (story_id,)).fetchall()
+        elif run_id:
+            rows = db.execute("SELECT * FROM defects WHERE run_id=? ORDER BY detected_at DESC",
+                              (run_id,)).fetchall()
+        else:
+            rows = db.execute("SELECT * FROM defects ORDER BY detected_at DESC").fetchall()
+    return [dict(r) for r in rows]
+
+
+_GREEN_VERDICTS = frozenset({"pass", "green", "success"})
+
+
+def defects_vs_verdicts(defects: list[dict], verdicts: dict) -> list[dict]:
+    """Annotate each defect with the story's R/T/S verdict statuses and whether every
+    verdict was green — i.e. the pipeline shipped the defect uncaught (the T3.1 signal).
+    ``verdicts`` = {"code_review": "pass|warn|fail", "test_run": ..., "security": ...};
+    injected by the caller (verdicts live in Redis, decoupled from this store)."""
+    missed_by_all = bool(verdicts) and all(v in _GREEN_VERDICTS for v in verdicts.values())
+    return [{**d, "verdicts": dict(verdicts), "missed_by_all": missed_by_all} for d in defects]
 
 
 def list_items_by_run(run_id: str) -> list[dict]:

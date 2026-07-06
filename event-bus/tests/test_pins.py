@@ -120,6 +120,19 @@ class TestPersistPlanWritesPin:
 
         assert not (tmp_path / "idea-11.json").exists()
 
+    def test_persist_plan_forwards_story_labels(self, tmp_path, monkeypatch):
+        # Story 5.2: trust-boundary/size labels on pin stories flow into create_item.
+        monkeypatch.setattr(settings, "pins_dir", str(tmp_path))
+        created = _stub_store(monkeypatch)
+        plan = {**CANNED_PLAN, "stories": [
+            {**CANNED_PLAN["stories"][0], "trust_boundary_class": "generates-code", "size": "l"},
+            CANNED_PLAN["stories"][1],
+        ]}
+        m._persist_plan("idea-lab", plan, "dev/w", _STACK, _SDLC, "model-x", _GATED)
+        assert created[0]["trust_boundary_class"] == "generates-code"
+        assert created[0]["size"] == "l"
+        assert created[1]["trust_boundary_class"] == ""  # unset when absent
+
 
 # ── Story 1.2: load / validate / replay ────────────────────────────────────────
 

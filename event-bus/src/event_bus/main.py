@@ -1196,6 +1196,10 @@ def _persist_plan(item_id: str, plan: dict, repo_full: str, stack, sdlc,
             sdlc=sdlc.id,
             style_guides=idea_guides,
             epic=story.get("epic", ""),
+            # Story 5.2: trust-boundary/size labels ride along on the pin so they're stable
+            # across replay arms (feeds the T1.1 risk study). Unset when absent.
+            trust_boundary_class=story.get("trust_boundary_class", ""),
+            size=story.get("size", ""),
         )
         log.info("story_created", id=story_item["id"], seq=seq, state=state,
                  epic=story.get("epic", ""), title=story_item["title"], repo=repo_full)

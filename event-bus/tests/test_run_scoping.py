@@ -57,6 +57,62 @@ class TestListItemsByRun:
         assert ws.list_items_by_run("nope") == []
 
 
+class TestStoryLabels:
+    def test_stores_valid_labels(self):
+        it = ws.create_item(item_type="story", title="S",
+                            trust_boundary_class="renders-untrusted", size="m")
+        row = ws.get_item(it["id"])
+        assert row["trust_boundary_class"] == "renders-untrusted" and row["size"] == "m"
+
+    def test_labels_default_null(self):
+        row = ws.get_item(ws.create_item(item_type="story", title="S")["id"])
+        assert row["trust_boundary_class"] is None and row["size"] is None
+
+    def test_invalid_trust_boundary_rejected(self):
+        with pytest.raises(ValueError, match="trust_boundary_class"):
+            ws.create_item(item_type="story", title="S", trust_boundary_class="bogus")
+
+    def test_invalid_size_rejected(self):
+        with pytest.raises(ValueError, match="size"):
+            ws.create_item(item_type="story", title="S", size="huge")
+
+
+class TestDefectLedger:
+    def test_add_and_list_defect(self):
+        d = ws.add_defect("story-1", "not-visible", "panel hidden",
+                          source="manual", run_id="run-1", pr_url="http://pr/1")
+        assert d["class"] == "not-visible" and d["story_id"] == "story-1"
+        rows = ws.list_defects(story_id="story-1")
+        assert len(rows) == 1 and rows[0]["source"] == "manual"
+
+    def test_record_oracle_defects_inserts_per_defect(self):
+        oracle_result = {"passed": False, "defects": [
+            {"class": "not-visible", "description": "hidden panel"},
+            {"class": "dead-route", "description": "404 download"}]}
+        rows = ws.record_oracle_defects("story-2", oracle_result, run_id="run-2")
+        assert len(rows) == 2 and all(r["source"] == "oracle" for r in rows)
+        classes = {r["class"] for r in ws.list_defects(story_id="story-2")}
+        assert classes == {"not-visible", "dead-route"}
+
+    def test_list_defects_filters_by_run(self):
+        ws.add_defect("s-a", "x", "d", run_id="runA")
+        ws.add_defect("s-b", "y", "d", run_id="runB")
+        assert {r["story_id"] for r in ws.list_defects(run_id="runA")} == {"s-a"}
+
+    def test_defects_vs_verdicts_flags_missed_by_all_green(self):
+        defects = [{"class": "not-visible", "description": "d"}]
+        annotated = ws.defects_vs_verdicts(
+            defects, {"code_review": "pass", "test_run": "pass", "security": "pass"})
+        assert annotated[0]["missed_by_all"] is True
+        assert annotated[0]["verdicts"]["security"] == "pass"
+
+    def test_defects_vs_verdicts_not_missed_when_a_verdict_failed(self):
+        annotated = ws.defects_vs_verdicts(
+            [{"class": "x", "description": "d"}],
+            {"code_review": "fail", "test_run": "pass", "security": "pass"})
+        assert annotated[0]["missed_by_all"] is False
+
+
 class _Usage:
     def __init__(self, cost, i, o):
         self.cost, self.prompt_tokens, self.completion_tokens = cost, i, o
