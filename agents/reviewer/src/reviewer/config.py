@@ -42,6 +42,10 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
 
+    # Story 5.4: per-run LLM transcript dir (prompts+responses, redacted). Only written
+    # for run-scoped calls (experiments); override with TRANSCRIPT_DIR.
+    transcript_dir: str = "experiments/runs"
+
     @property
     def effective_api_key(self) -> str:
         return self.openrouter_api_key or self.anthropic_api_key

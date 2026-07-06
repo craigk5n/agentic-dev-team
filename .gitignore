@@ -24,3 +24,6 @@ infra/.env
 
 # Generated plan pins (experiment artifacts)
 experiments/pins/
+
+# Per-run LLM transcripts (experiment artifacts)
+experiments/runs/

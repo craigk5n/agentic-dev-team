@@ -74,9 +74,11 @@ def complete(
     *,
     api_key: str = "",
     temperature: float = 0.0,
+    seed: int | None = None,
     telemetry_role: str = "",
     telemetry_stack: str = "",
     telemetry_story: str = "",
+    telemetry_run: str = "",
     structured: bool = False,
 ) -> str:
     """
@@ -106,9 +108,12 @@ def complete(
                 from reviewer.telemetry import record_subscription_usage
                 r = _redis.from_url(settings.redis_url, decode_responses=False)
                 record_subscription_usage(r, telemetry_role, model, cc_usage,
-                                          stack=telemetry_stack, story=telemetry_story)
+                                          stack=telemetry_stack, story=telemetry_story,
+                                          run=telemetry_run)
             except Exception as exc:
                 log.debug("telemetry_skipped", role=telemetry_role, error=str(exc))
+        _capture_transcript(telemetry_run, telemetry_role, model, seed, temperature,
+                            messages, text)
         return text
 
     kwargs: dict = {
@@ -117,6 +122,8 @@ def complete(
         "temperature": temperature,
         "max_tokens": _MAX_OUTPUT_TOKENS,
     }
+    if seed is not None:  # Story 5.4: deterministic seed where the provider honors it
+        kwargs["seed"] = seed
     if api_key:
         kwargs["api_key"] = api_key
     if structured and _supports_structured(model):
@@ -137,11 +144,29 @@ def complete(
             from reviewer.telemetry import record_usage
             r = _redis.from_url(settings.redis_url, decode_responses=False)
             record_usage(r, telemetry_role, model, resp, stack=telemetry_stack,
-                         story=telemetry_story)
+                         story=telemetry_story, run=telemetry_run)
         except Exception as exc:
             log.debug("telemetry_skipped", role=telemetry_role, error=str(exc))
 
-    return resp.choices[0].message.content or ""
+    text = resp.choices[0].message.content or ""
+    _capture_transcript(telemetry_run, telemetry_role, model, seed, temperature,
+                        messages, text)
+    return text
+
+
+def _capture_transcript(run_id, role, model, seed, temperature, messages, response) -> None:
+    """Write a per-run, redacted transcript entry (Story 5.4). No-op without a run_id;
+    never raises."""
+    if not run_id:
+        return
+    try:
+        from reviewer.transcript import write_transcript
+        write_transcript(run_id, {
+            "role": role, "model": model, "seed": seed, "temperature": temperature,
+            "messages": messages, "response": response,
+        })
+    except Exception as exc:
+        log.debug("transcript_skipped", role=role, error=str(exc))
 
 
 _REVIEW_SYSTEM = """\
