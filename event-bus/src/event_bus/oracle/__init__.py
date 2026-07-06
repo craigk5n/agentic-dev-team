@@ -17,9 +17,11 @@ from event_bus.oracle.runner import (
     run_oracle, register_backend, get_backend, persist_oracle_result, OracleRunError,
 )
 
-# Register default backends (Story 2.2 cli; Story 2.3 browser added later).
+# Register default backends (Story 2.2 cli; Story 2.3 browser).
 from event_bus.oracle.backends.cli import cli_backend as _cli_backend
+from event_bus.oracle.backends.browser import browser_backend as _browser_backend
 register_backend("cli", _cli_backend)
+register_backend("browser", _browser_backend)
 
 __all__ = [
     "validate_spec", "load_spec", "OracleSpecError",
