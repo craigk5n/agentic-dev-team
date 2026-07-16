@@ -26,9 +26,12 @@ _RETRY_BACKOFF = 2.0        # seconds, ×attempt
 _RATE_LIMIT_BACKOFF = 20.0  # seconds — 429s need a real pause, not a short retry
 
 # Provider "out of credit / quota" markers — an unrecoverable failure (no point retrying).
+# NOTE: kept byte-identical across the decoupled coding/planner/event-bus packages (each
+# runs standalone in its own sandbox and cannot share an import) — keep the copies in sync.
+# "insufficient credit" (singular) is deliberate: as a substring it also matches the plural.
 _CREDIT_ERROR_MARKERS = (
-    "insufficient credits", "requires more credits", "add more credits",
-    "quota exceeded", "insufficient_quota", "payment required",
+    "insufficient credit", "requires more credits", "add more credits",
+    "quota exceeded", "payment required", "insufficient_quota",
 )
 
 

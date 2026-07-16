@@ -163,9 +163,12 @@ _CODER_ERROR_CAP = 5             # consecutive coder failures before flagging fo
 
 # A coder failure whose message carries these markers means the model provider is out of
 # credit/quota — unrecoverable by retry, so the story is parked for the operator directly.
+# NOTE: kept byte-identical across the decoupled coding/planner/event-bus packages (each
+# runs standalone in its own sandbox and cannot share an import) — keep the copies in sync.
+# "insufficient credit" (singular) is deliberate: as a substring it also matches the plural.
 _CREDIT_EXHAUSTION_MARKERS = (
-    "insufficient credit", "quota exceeded", "requires more credits",
-    "add more credits", "payment required", "insufficient_quota",
+    "insufficient credit", "requires more credits", "add more credits",
+    "quota exceeded", "payment required", "insufficient_quota",
 )
 
 

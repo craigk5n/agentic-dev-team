@@ -177,9 +177,12 @@ def _looks_like_model_not_found(output: str) -> bool:
 # A provider "out of credit / quota" rejection is unrecoverable — retrying can't fix an
 # empty balance. Surface it distinctly (a subset of the generic provider errors above) so
 # the caller parks the story for the operator instead of burning the retry cap.
+# NOTE: kept byte-identical across the decoupled coding/planner/event-bus packages (each
+# runs standalone in its own sandbox and cannot share an import) — keep the copies in sync.
+# "insufficient credit" (singular) is deliberate: as a substring it also matches the plural.
 _CREDIT_ERROR_MARKERS = (
-    "insufficient credits", "quota exceeded", "requires more credits",
-    "add more credits", "payment required", "insufficient_quota",
+    "insufficient credit", "requires more credits", "add more credits",
+    "quota exceeded", "payment required", "insufficient_quota",
 )
 
 
