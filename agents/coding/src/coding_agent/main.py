@@ -26,7 +26,6 @@ from coding_agent.config import settings
 from coding_agent.forgejo_client import ForgejoClient
 from coding_agent import git_ops
 from coding_agent.opencode_agent import run_opencode_agent
-from typing import Any
 
 log = structlog.get_logger()
 
