@@ -182,6 +182,60 @@ cp .env.example .env        # fill in API keys and secrets
 
 Then open `http://localhost:8090` to access the board. Reach it from your machine or trusted LAN — just don't forward the port to the internet (see below).
 
+That's the one-time setup; for everyday start/stop see [Starting and stopping](#starting-and-stopping).
+
+## Starting and stopping
+
+`setup.sh` is for **first-time setup** (and re-provisioning accounts/tokens). Day to day,
+drive the two Compose stacks directly. Always run from `infra/` and always pass
+`--env-file .env` — without it the containers start with empty `OPENROUTER_API_KEY` /
+`ANTHROPIC_API_KEY` and every agent call fails.
+
+```bash
+cd infra
+
+# ── Start everything ──────────────────────────────────────────────
+docker compose -f forgejo/docker-compose.yml   --env-file .env up -d   # forge + DB + CI runner
+docker compose -f event-bus/docker-compose.yml --env-file .env up -d   # board + Redis + 3 workers
+./verify.sh                                                            # confirm both APIs are healthy
+
+# ── Stop everything (data untouched) ──────────────────────────────
+docker compose -f event-bus/docker-compose.yml --env-file .env stop
+docker compose -f forgejo/docker-compose.yml   --env-file .env stop
+```
+
+**Order matters.** Forgejo comes up *first* (the board and every agent talk to it) and goes
+down *last*, so nothing is mid-push when the forge disappears.
+
+Then open the board at `http://localhost:8090` (`EVENT_BUS_PORT`) and Forgejo at
+`http://localhost:3000` (`FORGEJO_HTTP_PORT`).
+
+### Variants
+
+| Command (add `-f …` and `--env-file .env`) | What it does |
+|---|---|
+| `up -d` | Start / recreate anything not already running |
+| `up -d --build` | Same, after rebuilding the event-bus image — use after changing agent or event-bus code |
+| `stop` / `start` | Stop and resume containers in place; fastest cycle |
+| `restart` | Apply an `.env` change (config is read at container start) |
+| `down` | Remove containers + networks. Named volumes survive, so repos and the work store are kept |
+| `down -v` | **Destroys the volumes** — every repo, story, PR, and CI record. Not a restart |
+| `ps` / `logs -f event-bus` | Check state / tail the board's logs |
+
+### Good to know
+
+- **Bring the whole forge stack up with no service names.** `./setup.sh` starts only
+  `forgejo-db` + `forgejo`, so it will *not* restart a stopped `forgejo-runner` (no CI).
+  The bare `up -d` above does.
+- **A reboot brings everything back on its own** — every service is
+  `restart: unless-stopped`. A deliberate `stop` also persists across the reboot.
+- **Stopping mid-run is safe.** Agent sandboxes are ephemeral `--rm` containers outside
+  Compose and clean themselves up; on startup the event bus returns stranded
+  `in-progress` stories to `ready` and re-drives any stuck in the transient `merged`
+  state, then dispatches again.
+- **Re-running `./setup.sh` is safe** — it reuses existing accounts and only regenerates a
+  Forgejo token that no longer resolves.
+
 ## Security & access
 
 This system is designed for a **single operator on a laptop or trusted home LAN** — running it "mostly unsecured" on your own network is the intended mode, not a compromise. The model is simple: **keep the board off untrusted networks, and keep a `BOARD_AUTH_PASSWORD` set.** Understand these properties:
